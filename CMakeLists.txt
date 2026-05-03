@@ -5,7 +5,7 @@
 
 cmake_minimum_required(VERSION 4.0)
 
-set(PROJECT_VERSION 0.1.0.9)
+set(PROJECT_VERSION 0.1.0.10)
 
 project(NetLink VERSION ${PROJECT_VERSION} LANGUAGES CXX)
 
@@ -29,13 +29,26 @@ CPMAddPackage(
   VERSION 1.3.81
 )
 
+CPMAddPackage(
+  NAME nlohmann_json
+  GITHUB_REPOSITORY nlohmann/json
+  VERSION 3.11.3
+)
+
 file(GLOB_RECURSE NETWORKING_SOURCES src/*.cpp)
 file(GLOB_RECURSE NETWORKING_HEADERS include/*.h)
 
 add_library(${PROJECT_NAME} STATIC ${NETWORKING_SOURCES} ${NETWORKING_HEADERS})
 
 target_include_directories(${PROJECT_NAME} PUBLIC include)
-target_include_directories(${PROJECT_NAME} PRIVATE ${asio_SOURCE_DIR}/asio/include)
+
+target_include_directories(${PROJECT_NAME} 
+    PRIVATE 
+        ${asio_SOURCE_DIR}/asio/include
+        src/internal
+        src/internal/Discovery
+        src/internal/Util
+)
 
 target_compile_definitions(${PROJECT_NAME} PUBLIC
     ASIO_STANDALONE
@@ -43,4 +56,4 @@ target_compile_definitions(${PROJECT_NAME} PUBLIC
     WIN32_LEAN_AND_MEAN
 )
 
-target_link_libraries(${PROJECT_NAME} PUBLIC Logger iphlpapi)
+target_link_libraries(${PROJECT_NAME} PUBLIC Logger iphlpapi PRIVATE nlohmann_json::nlohmann_json)
