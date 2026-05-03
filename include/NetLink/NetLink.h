@@ -17,7 +17,7 @@
 namespace netlink {
 
 
-    // Public types
+    // --- Public types ---------------------------------------
 
     struct Endpoint
     {
@@ -73,7 +73,7 @@ namespace netlink {
     };
 
 
-    // Callbacks
+    // --- Callbacks ------------------------------------------
 
     struct NetLinkCallbacks
     {
@@ -91,7 +91,7 @@ namespace netlink {
     };
 
 
-    // Configuration
+    // --- Configuration ---------------------------------------
 
     struct NetLinkConfig
     {
@@ -103,7 +103,7 @@ namespace netlink {
     };
 
 
-    // Main Facade
+    // --- Main Facade ----------------------------------
 
     class NetLink
     {
@@ -127,9 +127,56 @@ namespace netlink {
         void shutdown();
 
 
+        // -- Discovery --------------------------
+
+        // Start broadcasting as a host or searching for hosts
+        bool startDiscovery(DiscoveryMode mode);
+
+        // Stop active discovery
+        void stopDiscovery();
+
+        // Currently discovered remotes (snapshot)
+        std::vector<Endpoint> getDiscoveredEndpoints();
+
+
+        // -- Connection ------------------------------
+
+        // Host: begin accepting incoming connections
+        bool hostSession();
+
+        // Client: connect to a discovered endpoint
+        bool connectTo(const Endpoint &remote);
+
+        // Accept or reject a pending inbound connection (host side)
+        void respondToConnection(bool accepted);
+
+        // Disconnect active session
+        void disconnect();
+
+        // Current connection state
+        ConnectionState getConnectionState() const;
+
+
+        // -- Messaging -----------------------------------
+
+        // Send a message to the connected peer
+        bool send(const Message &message);
+
+        // Send a typed message with raw bytes
+        bool send(uint32_t type, const std::vector<uint8_t> &payload);
+
+
+        // -- Network adapters -------------------------------
+
+        // Available adapters on the system
+        std::vector<NetworkAdapter> getAvailableAdapters();
+
+        // Switch active adapter by ID
+        bool setActiveAdapter(const int &adapterID);
+
+    private:
+        struct Impl;
+        std::unique_ptr<Impl> pImpl{};
     };
 
-
 }
-
-
