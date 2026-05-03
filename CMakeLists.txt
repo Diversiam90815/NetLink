@@ -14,7 +14,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 
-option(NETLINK_ENABLE_LOGGING "Enable logging via Logger library" ON)
+option(NETLINK_ENABLE_LOGGING "Enable logging via Logger library" OFF)
 
 include(cpm)
 
