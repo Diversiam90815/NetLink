@@ -49,7 +49,7 @@ target_include_directories(${PROJECT_NAME} PUBLIC include)
 target_include_directories(${PROJECT_NAME} 
     PRIVATE 
         ${asio_SOURCE_DIR}/asio/include
-        src/internal
+        src/internal/
         src/internal/Discovery
         src/internal/Util
 )

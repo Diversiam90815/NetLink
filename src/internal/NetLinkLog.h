@@ -24,4 +24,3 @@
 	#define NETLINK_LOG_ERROR(...)	 ((void)0)
 
 #endif
-
