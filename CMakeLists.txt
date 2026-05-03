@@ -14,6 +14,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 
+option(NETLINK_ENABLE_LOGGING "Enable logging via Logger library" ON)
+
 include(cpm)
 
 CPMAddPackage(
@@ -23,11 +25,13 @@ CPMAddPackage(
   OPTIONS "ASIO_STANDALONE ON"
 )
 
-CPMAddPackage(
-  NAME Logger
-  GITHUB_REPOSITORY Diversiam90815/Logger
-  VERSION 1.3.81
-)
+if(NETLINK_ENABLE_LOGGING)
+    CPMAddPackage(
+      NAME Logger
+      GITHUB_REPOSITORY Diversiam90815/Logger
+      VERSION 1.3.81
+    )
+endif()
 
 CPMAddPackage(
   NAME nlohmann_json
@@ -56,4 +60,9 @@ target_compile_definitions(${PROJECT_NAME} PUBLIC
     WIN32_LEAN_AND_MEAN
 )
 
-target_link_libraries(${PROJECT_NAME} PUBLIC Logger iphlpapi PRIVATE nlohmann_json::nlohmann_json)
+if(NETLINK_ENABLE_LOGGING)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE NETLINK_LOGGING_ENABLED)
+    target_link_libraries(${PROJECT_NAME} PRIVATE Logger)
+endif()
+
+target_link_libraries(${PROJECT_NAME} PUBLIC iphlpapi PRIVATE nlohmann_json::nlohmann_json)
