@@ -178,5 +178,4 @@ namespace netlink {
         struct Impl;
         std::unique_ptr<Impl> pImpl{};
     };
-
 }
