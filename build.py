@@ -24,7 +24,7 @@ def main():
     runner.update_environment()
     runner.update_app_version()
 
-    print("==== Chess Engine Configuration ====")
+    print("==== NetLink Configuration ====")
     print(f"Current Directory:          {ROOT_DIR}")
     print(f"Build Directory:            {build_dir}")
     print(f"Test Build Directory:       {test_dir}")
