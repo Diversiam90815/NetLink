@@ -24,15 +24,6 @@
 using asio::ip::udp;
 
 
-/// @brief Discovery operating mode.
-enum class DiscoveryMode
-{
-	None   = 1,
-	Server = 2,
-	Client = 3
-};
-
-
 struct DiscoveryConfig
 {
 	std::string	   displayName{};
@@ -49,9 +40,6 @@ using RemoteFoundCallback = std::function<void(const DiscoveryEndpoint &)>;
 
 /**
  * @brief	Provides LAN discovery via UDP broadcast.
- *
- * Host mode: periodically broadcasts presence.
- * Client mode: listens for broadcasts and reports discovered hosts.
  */
 class DiscoveryService : public ThreadBase
 {
@@ -59,7 +47,7 @@ public:
 	DiscoveryService(asio::io_context &ioContext);
 	~DiscoveryService();
 
-	// @brief		Set callback invoked when a remote is discovered (client mode).
+	// @brief		Set callback invoked when a remote is discovered
 	void			  setOnRemoteFound(RemoteFoundCallback cb) { mOnRemoteFound = std::move(cb); }
 
 	// @brief		Initialize socket and bind to discovery port.
@@ -68,8 +56,8 @@ public:
 	// @brief		Tear down socket and stop thread. Safe to call multiple times.
 	void			  deinit();
 
-	// @brief		Begin broadcasting (Host) or listening (Client).
-	void			  startDiscovery(DiscoveryMode mode);
+	// @brief		Begin broadcasting
+	void			  startDiscovery();
 
 	// @brief		Look up a previously discovered endpoint by IP.
 	DiscoveryEndpoint getEndpointFromIP(const std::string &IPv4);
@@ -91,15 +79,16 @@ private:
 
 
 	DiscoveryConfig				   mConfig;
-	std::vector<DiscoveryEndpoint> mRemoteDevices;
 	std::atomic<bool>			   mInitialized{false};
 
 	asio::io_context			  *mIoContext = nullptr;
 	udp::socket					   mSocket;
+
 	udp::endpoint				   mLocalEndpoint;
 	udp::endpoint				   mTargetEndpoint;
+	std::vector<DiscoveryEndpoint> mRemoteDevices;
+
 	std::array<char, 1024>		   mRecvBuffer{};
-	DiscoveryMode				   mDiscoveryMode{DiscoveryMode::None};
 	asio::steady_timer			   mTimer;
 
 	RemoteFoundCallback			   mOnRemoteFound;

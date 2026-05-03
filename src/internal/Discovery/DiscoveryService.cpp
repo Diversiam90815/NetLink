@@ -77,27 +77,11 @@ void DiscoveryService::deinit()
 }
 
 
-void DiscoveryService::startDiscovery(DiscoveryMode mode)
+void DiscoveryService::startDiscovery()
 {
 	if (!isInitialized())
 	{
 		throw std::runtime_error("Discovery Service has not been initialized but was called to start!");
-		return;
-	}
-
-	mDiscoveryMode = mode;
-
-	if (mDiscoveryMode == DiscoveryMode::Server)
-	{
-		NETLINK_LOG_INFO("Starting discovery server on UDP port {} ...", mConfig.discoveryPort);
-	}
-	else if (mDiscoveryMode == DiscoveryMode::Client)
-	{
-		NETLINK_LOG_INFO("Starting discovery client on UDP port {}...", mConfig.discoveryPort);
-	}
-	else
-	{
-		NETLINK_LOG_ERROR("Invalid discovery mode!");
 		return;
 	}
 
@@ -134,7 +118,7 @@ void DiscoveryService::addRemoteToList(DiscoveryEndpoint remote)
 
 	mRemoteDevices.push_back(remote);
 
-	if (mDiscoveryMode == DiscoveryMode::Client && mOnRemoteFound)
+	if (mOnRemoteFound)
 		mOnRemoteFound(remote);
 }
 
