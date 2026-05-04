@@ -20,8 +20,8 @@ using asio::ip::tcp;
  */
 struct AsyncReadState
 {
-	MultiplayerMessageType messageType;
-	size_t				   dataLength = 0;
+	netlink::InternalMessage messageType;
+	size_t					 dataLength = 0;
 };
 
 
@@ -65,7 +65,7 @@ public:
 	 * @brief	Serialize and send a multiplayer message (may queue internally).
 	 * @return	true if dispatch initiated.
 	 */
-	bool								sendMessage(MultiplayerMessageStruct &message) override;
+	bool								sendMessage(netlink::InternalMessage &message) override;
 
 	/**
 	 * @brief	Start async read loop delivering complete messages to callback.

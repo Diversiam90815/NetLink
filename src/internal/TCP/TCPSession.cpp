@@ -7,6 +7,7 @@
 
 #include "TCPSession.h"
 #include "NetLinkLog.h"
+#include "NetLinkConstants.h"
 
 
 TCPSession::TCPSession(asio::io_context &ioContext) : mSocket(ioContext)
@@ -15,15 +16,15 @@ TCPSession::TCPSession(asio::io_context &ioContext) : mSocket(ioContext)
 	mSocket.bind(tcp::endpoint(tcp::v4(), 0));		  // Bind to a OS assigned port
 	mBoundPort	   = mSocket.local_endpoint().port(); // Get the port number it is bound to
 
-	mSendBuffer	   = new uint8_t[RemoteControl::PackageBufferSize];
-	mReceiveBuffer = new uint8_t[RemoteControl::PackageBufferSize];
+	mSendBuffer	   = new uint8_t[netlink::internal::PackageBufferSize];
+	mReceiveBuffer = new uint8_t[netlink::internal::PackageBufferSize];
 }
 
 
 TCPSession::TCPSession(tcp::socket &&socket) : mSocket(std::move(socket))
 {
-	mSendBuffer	   = new uint8_t[RemoteControl::PackageBufferSize];
-	mReceiveBuffer = new uint8_t[RemoteControl::PackageBufferSize];
+	mSendBuffer	   = new uint8_t[netlink::internal::PackageBufferSize];
+	mReceiveBuffer = new uint8_t[netlink::internal::PackageBufferSize];
 }
 
 
@@ -63,7 +64,7 @@ void TCPSession::readMessageAsync()
 		return;
 
 	// Read full package of fixed size
-	asio::async_read(mSocket, asio::buffer(mReceiveBuffer, RemoteControl::PackageBufferSize), asio::transfer_at_least(sizeof(MultiplayerMessageType) + sizeof(size_t)),
+	asio::async_read(mSocket, asio::buffer(mReceiveBuffer, netlink::internal::PackageBufferSize), asio::transfer_at_least(sizeof(MultiplayerMessageType) + sizeof(size_t)),
 					 [this](const asio::error_code &ec, size_t bytes_transfered)
 					 {
 						 if (!mAsyncReadActive)
@@ -87,7 +88,7 @@ void TCPSession::readMessageAsync()
 							 return;
 						 }
 
-						 MultiplayerMessageStruct message;
+						 netlink::InternalMessage message;
 
 						 // Extract message type
 						 memcpy(&message.type, mReceiveBuffer, sizeof(MultiplayerMessageType));
@@ -97,7 +98,7 @@ void TCPSession::readMessageAsync()
 						 memcpy(&dataSize, mReceiveBuffer + sizeof(MultiplayerMessageType), sizeof(size_t));
 
 						 // Validate and limit data size to prevent buffer overflow
-						 if (dataSize > RemoteControl::PackageBufferSize - sizeof(MultiplayerMessageType) - sizeof(size_t))
+						 if (dataSize > netlink::internal::PackageBufferSize - sizeof(MultiplayerMessageType) - sizeof(size_t))
 						 {
 							 NETLINK_LOG_ERROR("Received data size ({} bytes) exceeds maximum allowed!", dataSize);
 							 readMessageAsync(); // Continue reading next message
@@ -120,7 +121,7 @@ void TCPSession::readMessageAsync()
 }
 
 
-bool TCPSession::sendMessage(MultiplayerMessageStruct &message)
+bool TCPSession::sendMessage(netlink::InternalMessage &message)
 {
 	if (!isConnected())
 	{
@@ -135,7 +136,7 @@ bool TCPSession::sendMessage(MultiplayerMessageStruct &message)
 
 	size_t		 offset				   = 0;
 
-	memset(mSendBuffer, 0, RemoteControl::PackageBufferSize); // Clear the buffer
+	memset(mSendBuffer, 0, netlink::internal::PackageBufferSize); // Clear the buffer
 
 	// Copy the message type
 	memcpy(&mSendBuffer[offset], &message.type, messageTypeSize);

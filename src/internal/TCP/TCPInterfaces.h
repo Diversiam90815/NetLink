@@ -10,6 +10,8 @@
 #include <functional>
 #include <memory>
 
+#include "Messaging/MessageTypes.h"
+
 
 /**
  * @brief	Interface for a TCP session handling an established connection.
@@ -17,7 +19,7 @@
 class ITCPSession
 {
 public:
-	using MessageReceivedCallback								  = std::function<void(MultiplayerMessageStruct &message)>;
+	using MessageReceivedCallback								  = std::function<void(netlink::InternalMessage &message)>;
 	using pointer												  = std::shared_ptr<ITCPSession>;
 
 	virtual ~ITCPSession()										  = default;
@@ -31,7 +33,7 @@ public:
 	 * @brief	Send a serialized multiplayer message (synchronous or async fire-and-forget).
 	 * @return	true if queued / sent successfully.
 	 */
-	virtual bool sendMessage(MultiplayerMessageStruct &message)	  = 0;
+	virtual bool sendMessage(netlink::InternalMessage &message)	  = 0;
 
 	/**
 	 * @brief	Begin asynchronous read loop invoking callback per complete message.

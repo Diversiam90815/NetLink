@@ -14,7 +14,7 @@ namespace netlink
 {
 
 // Internal wire-level message
-struct MessageTypes
+struct InternalMessage
 {
 	uint32_t			 type{0};
 	std::vector<uint8_t> data{};
