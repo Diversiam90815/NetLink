@@ -94,6 +94,7 @@ struct NetLinkConfig
 	unsigned short tcpPort{0};
 	int			   discoveryPort{5555};
 	std::string	   broadcastAddress{"255.255.255.255"};
+	std::string	   secret{"NetLink"};
 };
 
 
