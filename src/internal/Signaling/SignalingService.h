@@ -54,6 +54,7 @@ private:
 	void				   receiveAsync();
 	void				   handleReceive(const asio::error_code &error, size_t bytesReceived);
 	void				   routePacket(const SignalPacket &packet);
+	void				   sendPacket(const std::string &targetIP, int targetPort, const SignalPacket &packet);
 
 	asio::io_context	  *mIoContext{nullptr};
 	udp::socket			   mSocket;
