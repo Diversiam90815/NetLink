@@ -40,16 +40,13 @@ netlink::NetLink::~NetLink() {}
 netlink::NetLink::NetLink(NetLink &&) noexcept {}
 
 
-netlink::NetLink &netlink::NetLink::operator=(NetLink &&) noexcept
-{
-	// TODO: insert return statement here
-}
+netlink::NetLink &netlink::NetLink::operator=(NetLink &&) noexcept = default;
 
 
-void netlink::NetLink::configure(const NetLinkConfig &config, const NetLinkCallbacks &callbacks) {}
+void			  netlink::NetLink::configure(const NetLinkConfig &config, const NetLinkCallbacks &callbacks) {}
 
 
-bool netlink::NetLink::init()
+bool			  netlink::NetLink::init()
 {
 	return false;
 }
