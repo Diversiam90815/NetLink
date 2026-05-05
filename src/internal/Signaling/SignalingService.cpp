@@ -25,7 +25,7 @@ netlink::SignalingService::~SignalingService()
 
 bool netlink::SignalingService::init(const std::string &localIPv4)
 {
-	if (!localIPv4.empty())
+	if (localIPv4.empty())
 		return false;
 
 	asio::error_code ec;
