@@ -29,7 +29,7 @@ inline uint32_t IPv4ToNumeric(const std::string &ipv4)
 	std::istringstream stream(ipv4);
 	std::string		   token;
 
-	while (std::getline(stream, token, "."))
+	while (std::getline(stream, token, '.'))
 	{
 		result = static_cast<uint32_t>(std::stoul(token) << shift);
 		shift -= 8;

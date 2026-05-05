@@ -64,7 +64,7 @@ void TCPSession::readMessageAsync()
 		return;
 
 	// Read full package of fixed size
-	asio::async_read(mSocket, asio::buffer(mReceiveBuffer, netlink::internal::PackageBufferSize), asio::transfer_at_least(sizeof(MultiplayerMessageType) + sizeof(size_t)),
+	asio::async_read(mSocket, asio::buffer(mReceiveBuffer, netlink::internal::PackageBufferSize), asio::transfer_at_least(sizeof(uint32_t) + sizeof(size_t)),
 					 [this](const asio::error_code &ec, size_t bytes_transfered)
 					 {
 						 if (!mAsyncReadActive)
@@ -91,14 +91,14 @@ void TCPSession::readMessageAsync()
 						 netlink::InternalMessage message;
 
 						 // Extract message type
-						 memcpy(&message.type, mReceiveBuffer, sizeof(MultiplayerMessageType));
+						 memcpy(&message.type, mReceiveBuffer, sizeof(uint32_t));
 
 						 // Extract the message size
 						 size_t dataSize = 0;
-						 memcpy(&dataSize, mReceiveBuffer + sizeof(MultiplayerMessageType), sizeof(size_t));
+						 memcpy(&dataSize, mReceiveBuffer + sizeof(uint32_t), sizeof(size_t));
 
 						 // Validate and limit data size to prevent buffer overflow
-						 if (dataSize > netlink::internal::PackageBufferSize - sizeof(MultiplayerMessageType) - sizeof(size_t))
+						 if (dataSize > netlink::internal::PackageBufferSize - sizeof(uint32_t) - sizeof(size_t))
 						 {
 							 NETLINK_LOG_ERROR("Received data size ({} bytes) exceeds maximum allowed!", dataSize);
 							 readMessageAsync(); // Continue reading next message
@@ -108,8 +108,7 @@ void TCPSession::readMessageAsync()
 						 // Copy the actual message data
 						 if (dataSize > 0)
 						 {
-							 message.data.assign(mReceiveBuffer + sizeof(MultiplayerMessageType) + sizeof(size_t),
-												 mReceiveBuffer + sizeof(MultiplayerMessageType) + sizeof(size_t) + dataSize);
+							 message.data.assign(mReceiveBuffer + sizeof(uint32_t) + sizeof(size_t), mReceiveBuffer + sizeof(uint32_t) + sizeof(size_t) + dataSize);
 						 }
 
 						 // Deliver message
