@@ -7,6 +7,29 @@
 
 #include "NetLink/NetLink.h"
 
+#include "Discovery/DiscoveryService.h"
+#include "Signaling/SignalingService.h"
+#include "Signaling/RoleNegotiation.h"
+#include "TCP/TCPSession.h"
+#include "Messaging/RemoteCommunication.h"
+
+
+struct netlink::NetLink::Impl
+{
+	NetLinkConfig		config;
+	NetLinkCallbacks	callbacks;
+
+	asio::io_context	ioContext;
+	DiscoveryService	discovery{ioContext};
+	SignalingService	signaling{ioContext};
+	RemoteCommunication communication;
+
+	// Pending inbound request info (for respondToConnetion)
+	DiscoveryEndpoint	pendingRemote;
+
+	ConnectionState		connectionState{ConnectionState::None};
+};
+
 
 netlink::NetLink::NetLink() {}
 
@@ -41,7 +64,7 @@ bool netlink::NetLink::startDiscovery()
 }
 
 
-void				  netlink::NetLink::stopDiscovery() {}
+void						   netlink::NetLink::stopDiscovery() {}
 
 
 std::vector<netlink::Endpoint> netlink::NetLink::getDiscoveredEndpoints()
@@ -62,10 +85,10 @@ bool netlink::NetLink::connectTo(const Endpoint &remote)
 }
 
 
-void netlink::NetLink::respondToConnection(bool accepted) {}
+void					 netlink::NetLink::respondToConnection(bool accepted) {}
 
 
-void			netlink::NetLink::disconnect() {}
+void					 netlink::NetLink::disconnect() {}
 
 
 netlink::ConnectionState netlink::NetLink::getConnectionState() const
