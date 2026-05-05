@@ -136,9 +136,6 @@ public:
 
 	// -- Connection ------------------------------
 
-	// Host: begin accepting incoming connections
-	bool						hostSession();
-
 	// Client: connect to a discovered endpoint
 	bool						connectTo(const Endpoint &remote);
 

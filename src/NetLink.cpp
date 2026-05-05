@@ -31,10 +31,13 @@ struct netlink::NetLink::Impl
 };
 
 
-netlink::NetLink::NetLink() {}
+netlink::NetLink::NetLink() : pImpl(std::make_unique<Impl>()) {}
 
 
-netlink::NetLink::~NetLink() {}
+netlink::NetLink::~NetLink()
+{
+	shutdown();
+}
 
 
 netlink::NetLink::NetLink(NetLink &&) noexcept {}
@@ -52,27 +55,34 @@ bool			  netlink::NetLink::init()
 }
 
 
-void netlink::NetLink::shutdown() {}
+void netlink::NetLink::shutdown()
+{
+	pImpl->communication.deinit();
+	pImpl->signaling.deinit();
+	pImpl->discovery.deinit();
+	pImpl->connectionState = ConnectionState::None;
+}
 
 
 bool netlink::NetLink::startDiscovery()
 {
-	return false;
+	pImpl->discovery.startDiscovery();
+	pImpl->signaling.start();
+	pImpl->connectionState = ConnectionState::Searching;
+	return true;
 }
 
 
-void						   netlink::NetLink::stopDiscovery() {}
+void netlink::NetLink::stopDiscovery()
+{
+	pImpl->discovery.deinit();
+}
 
 
 std::vector<netlink::Endpoint> netlink::NetLink::getDiscoveredEndpoints()
 {
+	// TODO: map internal endpoints to public endpoints
 	return std::vector<Endpoint>();
-}
-
-
-bool netlink::NetLink::hostSession()
-{
-	return false;
 }
 
 
@@ -82,27 +92,56 @@ bool netlink::NetLink::connectTo(const Endpoint &remote)
 }
 
 
-void					 netlink::NetLink::respondToConnection(bool accepted) {}
+void netlink::NetLink::respondToConnection(bool accepted)
+{
+	auto &pending = pImpl->pendingRemote;
+
+	if (accepted)
+	{
+		pImpl->signaling.sendConnectAccept(pending.IPAddress, pending.signalingPort);
+
+		// TODO: Enter flow of establishing connection
+	}
+	else
+	{
+		pImpl->signaling.sendConnectDecline(pending.IPAddress, pending.signalingPort);
+		pImpl->connectionState = ConnectionState::None;
+	}
+}
 
 
-void					 netlink::NetLink::disconnect() {}
+void netlink::NetLink::disconnect()
+{
+	// signal the remote peer before teardown
+	auto &pending = pImpl->pendingRemote;
+
+	if (pending.isValid())
+		pImpl->signaling.sendDisconnect(pending.IPAddress, pending.signalingPort);
+
+	pImpl->communication.deinit();
+	pImpl->connectionState = ConnectionState::Disconnected;
+}
 
 
 netlink::ConnectionState netlink::NetLink::getConnectionState() const
 {
-	return ConnectionState();
+	return pImpl->connectionState;
 }
 
 
 bool netlink::NetLink::send(const Message &message)
 {
-	return false;
+	return send(message.type, message.data);
 }
 
 
 bool netlink::NetLink::send(uint32_t type, const std::vector<uint8_t> &payload)
 {
-	return false;
+	if (pImpl->connectionState != ConnectionState::Connected)
+		return false;
+
+	pImpl->communication.write(type, payload);
+	return true;
 }
 
 
