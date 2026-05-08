@@ -9,9 +9,10 @@
 
 #include <string>
 
-/// <summary>
-/// Enumerates the types of network adapters.
-/// </summary>
+
+namespace netlink
+{
+
 enum class AdapterTypes
 {
 	Ethernet = 1,
@@ -21,19 +22,15 @@ enum class AdapterTypes
 	Other	 = 5
 };
 
-/// <summary>
-/// Defines the visibility states for an adapter.
-/// </summary>
-enum class AdapterVisibility
+
+enum class SuggestionLevel
 {
 	Hidden		= 1,
 	Visible		= 2,
 	Recommended = 3
 };
 
-/// <summary>
-/// Represents a network adapter with associated properties and utility functions.
-/// </summary>
+
 struct NetworkAdapter
 {
 	NetworkAdapter() = default;
@@ -45,27 +42,30 @@ struct NetworkAdapter
 				   const int		  id,
 				   bool				  isDefaultRoute,
 				   AdapterTypes		  type,
-				   AdapterVisibility  visibility)
-		: AdapterName(adapterName), NetworkName(networkName), IPv4(ipv4), Subnet(subnet), ID(id), IsDefaultRoute(isDefaultRoute), Type(type), Visibility(visibility)
+				   SuggestionLevel	  suggestionLevel)
+		: AdapterName(adapterName), NetworkName(networkName), IPv4(ipv4), Subnet(subnet), ID(id), IsDefaultRoute(isDefaultRoute), Type(type), Level(suggestionLevel)
 	{
-		eligible = filterSubnetMask();
+		Eligible = filterSubnetMask();
 	}
 
 
-	bool			  operator==(const NetworkAdapter &other) const { return std::tie(AdapterName, Subnet) == std::tie(other.AdapterName, other.Subnet); }
-	bool			  operator!=(const NetworkAdapter &other) const { return !(*this == other); }
+	bool			operator==(const NetworkAdapter &other) const { return std::tie(AdapterName, Subnet) == std::tie(other.AdapterName, other.Subnet); }
+	bool			operator!=(const NetworkAdapter &other) const { return !(*this == other); }
 
-	bool			  isValid() const { return !AdapterName.empty() && !IPv4.empty() && ID != 0; }
+	bool			isValid() const { return !AdapterName.empty() && !IPv4.empty() && ID != 0; }
 
-	bool			  filterSubnetMask() const { return Subnet == "255.255.255.0"; }
+	bool			filterSubnetMask() const { return Subnet == "255.255.255.0"; }
 
-	std::string		  AdapterName{};
-	std::string		  NetworkName{};
-	std::string		  IPv4{};
-	std::string		  Subnet{};
-	int				  ID{0};
-	bool			  IsDefaultRoute{false};
-	bool			  eligible{false};
-	AdapterTypes	  Type{AdapterTypes::Other};
-	AdapterVisibility Visibility{};
+	std::string		AdapterName{};
+	std::string		NetworkName{};
+	std::string		IPv4{};
+	std::string		Subnet{};
+	int				ID{0};
+	bool			IsDefaultRoute{false};
+	bool			Eligible{false};
+	AdapterTypes	Type{AdapterTypes::Other};
+	SuggestionLevel Level{};
 };
+
+
+} // namespace netlink

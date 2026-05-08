@@ -25,14 +25,14 @@
 #include "NetworkAdapter.h"
 #include "NetLinkLog.h"
 
+namespace netlink
+{
 
-/// <summary>
-/// Provides functionality to query and manage network adapter information on the system.
-/// </summary>
+
 class NetworkInformation
 {
 public:
-	NetworkInformation();
+	NetworkInformation() = default;
 	~NetworkInformation();
 
 	bool							   init();
@@ -102,26 +102,39 @@ private:
 
 	using AdapterBuffer = std::unique_ptr<IP_ADAPTER_ADDRESSES, void (*)(IP_ADAPTER_ADDRESSES *)>;
 
-	void							saveAdapter(const PIP_ADAPTER_ADDRESSES adapter, const int ID, std::unordered_set<ULONG64> &defaultRouteLuidValues);
-	bool							getNetworkInformationFromOS();
+	void			saveAdapter(const PIP_ADAPTER_ADDRESSES adapter, const int ID, std::unordered_set<ULONG64> &defaultRouteLuidValues);
+	bool			getNetworkInformationFromOS();
 
-	std::string						sockaddrToString(SOCKADDR *sa) const;
-	std::string						prefixLengthToSubnetMask(USHORT family, ULONG prefixLength) const;
-	AdapterTypes					filterAdapterType(const DWORD Type) const;
-	AdapterVisibility				determineAdapterVisibility(bool isDefaultRoute, bool IPv4Enabled, AdapterTypes type, IF_OPER_STATUS status);
+	std::string		sockaddrToString(SOCKADDR *sa) const;
+	std::string		prefixLengthToSubnetMask(USHORT family, ULONG prefixLength) const;
+	AdapterTypes	filterAdapterType(const DWORD Type) const;
+	SuggestionLevel determineSuggestionLevel(bool isDefaultRoute, bool IPv4Enabled, AdapterTypes type, IF_OPER_STATUS status);
 
-	bool							getDefaultInterfaces(std::vector<NET_LUID> &pLUIDs);
-	std::string						getHostName(const SOCKADDR *ip, const socklen_t ipLength);
-	std::string						getWifiSsid(const AdapterTypes type, const NET_LUID luid);
-	std::string						getNetworkGatename(const AdapterTypes type, const NET_LUID_LH luid, const std::string address);
-	std::string						getNetworkName(const AdapterTypes type, const NET_LUID_LH luid, const std::string address);
+	bool			getDefaultInterfaces(std::vector<NET_LUID> &pLUIDs);
+	std::string		getHostName(const SOCKADDR *ip, const socklen_t ipLength);
+	std::string		getWifiSsid(const AdapterTypes type, const NET_LUID luid);
+	std::string		getNetworkGatename(const AdapterTypes type, const NET_LUID_LH luid, const std::string address);
+	std::string		getNetworkName(const AdapterTypes type, const NET_LUID_LH luid, const std::string address);
+
+
+	std::string		WStringToStdString(const std::wstring &wstr)
+	{
+		if (wstr.empty())
+			return {};
+
+		std::string str{};
+		size_t		size{};
+		str.resize(wstr.length());
+		wcstombs_s(&size, &str[0], str.size() + 1, wstr.c_str(), wstr.size());
+		return str;
+	}
 
 
 	AdapterBuffer					mAdapterAddresses{nullptr, [](IP_ADAPTER_ADDRESSES *p)
-													  {
-										if (p)
-											free(p);
-													  }};
+									  {
+										  if (p)
+											  free(p);
+									  }};
 	ULONG							mOutBufLen{0};
 
 	std::unique_ptr<WinsockSession> mWinsockSession;
@@ -129,3 +142,6 @@ private:
 	std::vector<NetworkAdapter>		mNetworkAdapters{};
 	NetworkAdapter					mCurrentNetworkAdapter{};
 };
+
+
+} // namespace netlink

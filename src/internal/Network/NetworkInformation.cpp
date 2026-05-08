@@ -8,16 +8,13 @@
 #include "NetworkInformation.h"
 
 
-NetworkInformation::NetworkInformation() {}
-
-
-NetworkInformation::~NetworkInformation()
+netlink::NetworkInformation::~NetworkInformation()
 {
 	deinit();
 }
 
 
-bool NetworkInformation::init()
+bool netlink::NetworkInformation::init()
 {
 	mWinsockSession = std::make_unique<WinsockSession>();
 
@@ -28,14 +25,14 @@ bool NetworkInformation::init()
 }
 
 
-void NetworkInformation::deinit()
+void netlink::NetworkInformation::deinit()
 {
 	mAdapterAddresses.reset();
 	mNetworkAdapters.clear();
 }
 
 
-bool NetworkInformation::getNetworkInformationFromOS()
+bool netlink::NetworkInformation::getNetworkInformationFromOS()
 {
 	ULONG flags	 = GAA_FLAG_INCLUDE_PREFIX | GAA_FLAG_INCLUDE_GATEWAYS;
 
@@ -44,12 +41,12 @@ bool NetworkInformation::getNetworkInformationFromOS()
 
 	if (result == ERROR_ACCESS_DENIED)
 	{
-		LOG_ERROR("Access denied: Running without admin privileges limits available information!");
+		NETLINK_LOG_ERROR("Access denied: Running without admin privileges limits available information!");
 		flags = 0;
 	}
 	else if (result != ERROR_BUFFER_OVERFLOW)
 	{
-		LOG_ERROR("GetAdapterAddresses failed with error {}", result);
+		NETLINK_LOG_ERROR("GetAdapterAddresses failed with error {}", result);
 		return false;
 	}
 
@@ -62,7 +59,7 @@ bool NetworkInformation::getNetworkInformationFromOS()
 
 	if (!tmp)
 	{
-		LOG_ERROR("Allocation failed for adapter buffer ({} bytes)", mOutBufLen);
+		NETLINK_LOG_ERROR("Allocation failed for adapter buffer ({} bytes)", mOutBufLen);
 		return false;
 	}
 
@@ -71,7 +68,7 @@ bool NetworkInformation::getNetworkInformationFromOS()
 
 	if (result != NO_ERROR)
 	{
-		LOG_ERROR("GetAdapterAddresses failed with error : {}", result);
+		NETLINK_LOG_ERROR("GetAdapterAddresses failed with error : {}", result);
 		return false;
 	}
 
@@ -81,7 +78,7 @@ bool NetworkInformation::getNetworkInformationFromOS()
 }
 
 
-void NetworkInformation::processAdapter()
+void netlink::NetworkInformation::processAdapter()
 {
 	mNetworkAdapters.clear();
 
@@ -89,7 +86,7 @@ void NetworkInformation::processAdapter()
 
 	if (!getDefaultInterfaces(defaultRouteAdapters))
 	{
-		LOG_WARNING("Could not get list of default route adapters!");
+		NETLINK_LOG_WARNING("Could not get list of default route adapters!");
 		defaultRouteAdapters.clear();
 	}
 
@@ -108,7 +105,7 @@ void NetworkInformation::processAdapter()
 }
 
 
-void NetworkInformation::saveAdapter(const PIP_ADAPTER_ADDRESSES adapter, const int ID, std::unordered_set<ULONG64> &defaultRouteLuidValues)
+void netlink::NetworkInformation::saveAdapter(const PIP_ADAPTER_ADDRESSES adapter, const int ID, std::unordered_set<ULONG64> &defaultRouteLuidValues)
 {
 	std::string					adapterName = WStringToStdString(adapter->Description);
 
@@ -118,15 +115,15 @@ void NetworkInformation::saveAdapter(const PIP_ADAPTER_ADDRESSES adapter, const 
 	{
 		if (unicast->Address.lpSockaddr->sa_family == AF_INET)
 		{
-			std::string		  addressString	   = sockaddrToString(unicast->Address.lpSockaddr);
-			std::string		  subnetMaskString = prefixLengthToSubnetMask(unicast->Address.lpSockaddr->sa_family, unicast->OnLinkPrefixLength);
-			AdapterTypes	  type			   = filterAdapterType(adapter->IfType);
-			std::string		  networkName	   = getNetworkName(type, adapter->Luid, addressString);
-			const bool		  isDefaultRoute   = defaultRouteLuidValues.find(adapter->Luid.Value) != defaultRouteLuidValues.end();
-			bool			  ipv4Enabled	   = adapter->Flags & 0x80;
-			AdapterVisibility visibility	   = determineAdapterVisibility(isDefaultRoute, ipv4Enabled, type, adapter->OperStatus);
+			std::string				 addressString	  = sockaddrToString(unicast->Address.lpSockaddr);
+			std::string				 subnetMaskString = prefixLengthToSubnetMask(unicast->Address.lpSockaddr->sa_family, unicast->OnLinkPrefixLength);
+			AdapterTypes			 type			  = filterAdapterType(adapter->IfType);
+			std::string				 networkName	  = getNetworkName(type, adapter->Luid, addressString);
+			const bool				 isDefaultRoute	  = defaultRouteLuidValues.find(adapter->Luid.Value) != defaultRouteLuidValues.end();
+			bool					 ipv4Enabled	  = adapter->Flags & 0x80;
+			netlink::SuggestionLevel visibility		  = determineSuggestionLevel(isDefaultRoute, ipv4Enabled, type, adapter->OperStatus);
 
-			auto			  createdAdapter   = NetworkAdapter(adapterName, networkName, addressString, subnetMaskString, ID, isDefaultRoute, type, visibility);
+			auto					 createdAdapter	  = NetworkAdapter(adapterName, networkName, addressString, subnetMaskString, ID, isDefaultRoute, type, visibility);
 
 			mNetworkAdapters.push_back(createdAdapter);
 		}
@@ -136,28 +133,28 @@ void NetworkInformation::saveAdapter(const PIP_ADAPTER_ADDRESSES adapter, const 
 }
 
 
-void NetworkInformation::setCurrentNetworkAdapter(const NetworkAdapter &adapter)
+void netlink::NetworkInformation::setCurrentNetworkAdapter(const NetworkAdapter &adapter)
 {
 	if (mCurrentNetworkAdapter == adapter)
 		return;
 
 	mCurrentNetworkAdapter = adapter;
 
-	LOG_INFO("Set user defined adapter to :");
-	LOG_INFO("\t Adapter:\t {}", adapter.AdapterName);
-	LOG_INFO("\t IPv4: \t\t\t{}", adapter.IPv4);
-	LOG_INFO("\t Subnet: \t\t{}", adapter.Subnet);
-	LOG_INFO("\t ID: \t\t\t{}", adapter.ID);
+	NETLINK_LOG_INFO("Set user defined adapter to :");
+	NETLINK_LOG_INFO("\t Adapter:\t {}", adapter.AdapterName);
+	NETLINK_LOG_INFO("\t IPv4: \t\t\t{}", adapter.IPv4);
+	NETLINK_LOG_INFO("\t Subnet: \t\t{}", adapter.Subnet);
+	NETLINK_LOG_INFO("\t ID: \t\t\t{}", adapter.ID);
 }
 
 
-const NetworkAdapter &NetworkInformation::getCurrentNetworkAdapter() const
+const netlink::NetworkAdapter &netlink::NetworkInformation::getCurrentNetworkAdapter() const
 {
 	return mCurrentNetworkAdapter;
 }
 
 
-NetworkAdapter NetworkInformation::isAdapterCurrentlyAvailable(const NetworkAdapter &adapter)
+netlink::NetworkAdapter netlink::NetworkInformation::isAdapterCurrentlyAvailable(const NetworkAdapter &adapter)
 {
 	// If the adapter is available we return the adapter current version (with maybe a new ID set)
 	for (auto &it : mNetworkAdapters)
@@ -170,13 +167,13 @@ NetworkAdapter NetworkInformation::isAdapterCurrentlyAvailable(const NetworkAdap
 }
 
 
-const std::vector<NetworkAdapter> &NetworkInformation::getAvailableNetworkAdapters() const
+const std::vector<netlink::NetworkAdapter> &netlink::NetworkInformation::getAvailableNetworkAdapters() const
 {
 	return mNetworkAdapters;
 }
 
 
-std::string NetworkInformation::sockaddrToString(SOCKADDR *sa) const
+std::string netlink::NetworkInformation::sockaddrToString(SOCKADDR *sa) const
 {
 	char addressBuffer[INET6_ADDRSTRLEN] = {0};
 
@@ -195,7 +192,7 @@ std::string NetworkInformation::sockaddrToString(SOCKADDR *sa) const
 }
 
 
-std::string NetworkInformation::prefixLengthToSubnetMask(USHORT family, ULONG prefixLength) const
+std::string netlink::NetworkInformation::prefixLengthToSubnetMask(USHORT family, ULONG prefixLength) const
 {
 	if (family == AF_INET && prefixLength <= 32)
 	{
@@ -218,7 +215,7 @@ std::string NetworkInformation::prefixLengthToSubnetMask(USHORT family, ULONG pr
 }
 
 
-AdapterTypes NetworkInformation::filterAdapterType(const DWORD Type) const
+netlink::AdapterTypes netlink::NetworkInformation::filterAdapterType(const DWORD Type) const
 {
 	switch (Type)
 	{
@@ -231,7 +228,7 @@ AdapterTypes NetworkInformation::filterAdapterType(const DWORD Type) const
 }
 
 
-AdapterVisibility NetworkInformation::determineAdapterVisibility(bool isDefaultRoute, bool IPv4Enabled, AdapterTypes type, IF_OPER_STATUS status)
+netlink::SuggestionLevel netlink::NetworkInformation::determineSuggestionLevel(bool isDefaultRoute, bool IPv4Enabled, AdapterTypes type, IF_OPER_STATUS status)
 {
 	// Recommended device should be
 	//	- Real
@@ -240,22 +237,22 @@ AdapterVisibility NetworkInformation::determineAdapterVisibility(bool isDefaultR
 	//	- IPv4 enabled (as currently we just support IPv4)
 
 	if (type == AdapterTypes::Loopback)
-		return AdapterVisibility::Hidden;
+		return netlink::SuggestionLevel::Hidden;
 
 	if (status != IfOperStatusUp)
-		return AdapterVisibility::Visible;
+		return netlink::SuggestionLevel::Visible;
 
 	if (!isDefaultRoute || !IPv4Enabled)
-		return AdapterVisibility::Visible;
+		return netlink::SuggestionLevel::Visible;
 
 	if (type != AdapterTypes::Ethernet && type != AdapterTypes::WiFi)
-		return AdapterVisibility::Visible;
+		return netlink::SuggestionLevel::Visible;
 
-	return AdapterVisibility::Recommended;
+	return netlink::SuggestionLevel::Recommended;
 }
 
 
-bool NetworkInformation::getDefaultInterfaces(std::vector<NET_LUID> &pLUIDs)
+bool netlink::NetworkInformation::getDefaultInterfaces(std::vector<NET_LUID> &pLUIDs)
 {
 	MIB_IPFORWARD_TABLE2 *routingTable = nullptr;
 	pLUIDs.clear();
@@ -281,7 +278,7 @@ bool NetworkInformation::getDefaultInterfaces(std::vector<NET_LUID> &pLUIDs)
 }
 
 
-std::string NetworkInformation::getHostName(const SOCKADDR *ip, const socklen_t ipLength)
+std::string netlink::NetworkInformation::getHostName(const SOCKADDR *ip, const socklen_t ipLength)
 {
 	char nameBuffer[NI_MAXHOST];
 
@@ -294,14 +291,14 @@ std::string NetworkInformation::getHostName(const SOCKADDR *ip, const socklen_t 
 }
 
 
-std::string NetworkInformation::getWifiSsid(const AdapterTypes type, const NET_LUID luid)
+std::string netlink::NetworkInformation::getWifiSsid(const AdapterTypes type, const NET_LUID luid)
 {
 	std::string networkName = (type == AdapterTypes::Virtual) ? "Virtual WiFi" : "WiFi";
 
 	GUID		guid;
 	if (ConvertInterfaceLuidToGuid(&luid, &guid) != NOERROR)
 	{
-		LOG_ERROR("Could not convert network interface luid to guid!");
+		NETLINK_LOG_ERROR("Could not convert network interface luid to guid!");
 		return networkName;
 	}
 
@@ -309,7 +306,7 @@ std::string NetworkInformation::getWifiSsid(const AdapterTypes type, const NET_L
 	DWORD	   negotiatedVersion;
 	if (WlanOpenHandle(2, NULL, &negotiatedVersion, &wlan.h) != NOERROR)
 	{
-		LOG_ERROR("Could not create wlan handle!");
+		NETLINK_LOG_ERROR("Could not create wlan handle!");
 		return networkName;
 	}
 
@@ -320,12 +317,12 @@ std::string NetworkInformation::getWifiSsid(const AdapterTypes type, const NET_L
 
 	if (result == ERROR_ACCESS_DENIED)
 	{
-		LOG_WARNING("Network access denied!");
+		NETLINK_LOG_WARNING("Network access denied!");
 		return std::string("Please allow network access");
 	}
 	else if (result != NO_ERROR || !queryData.ptr)
 	{
-		LOG_ERROR("Could not access network ssid");
+		NETLINK_LOG_ERROR("Could not access network ssid");
 		return networkName;
 	}
 
@@ -343,7 +340,7 @@ std::string NetworkInformation::getWifiSsid(const AdapterTypes type, const NET_L
 }
 
 
-std::string NetworkInformation::getNetworkGatename(const AdapterTypes type, const NET_LUID_LH luid, const std::string address)
+std::string netlink::NetworkInformation::getNetworkGatename(const AdapterTypes type, const NET_LUID_LH luid, const std::string address)
 {
 	std::string networkName = (type == AdapterTypes::Virtual) ? "Virtual Ethernet" : "Ethernet";
 
@@ -351,7 +348,7 @@ std::string NetworkInformation::getNetworkGatename(const AdapterTypes type, cons
 
 	if (ConvertInterfaceLuidToIndex(&luid, &interfaceIndex) != NOERROR)
 	{
-		LOG_ERROR("Could not convert network interface luid to index!");
+		NETLINK_LOG_ERROR("Could not convert network interface luid to index!");
 
 		if (!address.empty())
 			networkName += " (" + address + ")";
@@ -362,7 +359,7 @@ std::string NetworkInformation::getNetworkGatename(const AdapterTypes type, cons
 	IpForwardTable table;
 	if (GetIpForwardTable2(AF_UNSPEC, &table.ptr) != NOERROR)
 	{
-		LOG_ERROR("Could not get IP routing table!");
+		NETLINK_LOG_ERROR("Could not get IP routing table!");
 
 		if (!address.empty())
 			networkName += " (" + address + ")";
@@ -403,7 +400,7 @@ std::string NetworkInformation::getNetworkGatename(const AdapterTypes type, cons
 }
 
 
-std::string NetworkInformation::getNetworkName(const AdapterTypes type, const NET_LUID_LH luid, const std::string address)
+std::string netlink::NetworkInformation::getNetworkName(const AdapterTypes type, const NET_LUID_LH luid, const std::string address)
 {
 	std::string networkName = "";
 
