@@ -22,9 +22,9 @@
 #include <vector>
 #include <unordered_set>
 
-#include "Logging.h"
-#include "Conversion.h"
 #include "NetworkAdapter.h"
+#include "NetLinkLog.h"
+
 
 /// <summary>
 /// Provides functionality to query and manage network adapter information on the system.
@@ -60,7 +60,7 @@ private:
 			ok = (WSAStartup(MAKEWORD(2, 2), &wsa) == 0);
 
 			if (!ok)
-				LOG_ERROR("WSAStartup failed!");
+				NETLINK_LOG_ERROR("WSAStartup failed!");
 		}
 
 		~WinsockSession()
