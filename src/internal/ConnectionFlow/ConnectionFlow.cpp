@@ -9,7 +9,7 @@
 #include "NetLinkLog.h"
 
 
-netlink::ConnectionFlow::ConnectionFlow(asio::io_context &io_context, SignalingService &signaling) : mIoContext(io_context), mSignaling(signaling)
+netlink::ConnectionFlow::ConnectionFlow(asio::io_context &io_context, SignalingService &signaling, ITransportFactory &transportFactory) : mIoContext(io_context), mSignaling(signaling), mTransportFactory(transportFactory)
 {
 
 	// wire signaling with connectionflow
@@ -43,7 +43,7 @@ void netlink::ConnectionFlow::respondToConnection(bool accepted)
 	{
 		mSignaling.sendConnectAccept(mRemote.IPAddress, mRemote.signalingPort);
 		mPhase = ConnectionPhase::Accepted;
-		beginTCPEstablishment();
+		beginTransportEstablishment();
 	}
 	else
 	{
@@ -85,7 +85,7 @@ void netlink::ConnectionFlow::onSignalConnectAccepted(const SignalPacket &pkt)
 		return;
 
 	mPhase = ConnectionPhase::Accepted;
-	beginTCPEstablishment();
+	beginTransportEstablishment();
 }
 
 
@@ -106,18 +106,18 @@ void netlink::ConnectionFlow::onSignalDisconnect(const SignalPacket &pkt)
 	reset();
 }
 
-void netlink::ConnectionFlow::beginTCPEstablishment()
+void netlink::ConnectionFlow::beginTransportEstablishment()
 {
-	mPhase			 = ConnectionPhase::EstablishingTCP;
+	mPhase			 = ConnectionPhase::EstablishingTransport;
 	SessionRole role = determineRole(mLocalIP, mRemote.IPAddress);
 
 	if (role == SessionRole::Acceptor)
 	{
-		NETLINK_LOG_INFO("TCP Role : Acceptor -> Listening for inbound connection");
+		NETLINK_LOG_INFO("Role: Acceptor -> Listening for inbound connection");
 
-		mServer = std::make_unique<TCPServer>(mIoContext);
+		mServer = mTransportFactory.createServer(mIoContext);
 		mServer->setSessionHandler(
-			[this](ITCPSession::pointer session)
+			[this](ISession::pointer session)
 			{
 				mPhase = ConnectionPhase::Connected;
 				if (mCallbacks.onConnected)
@@ -127,11 +127,11 @@ void netlink::ConnectionFlow::beginTCPEstablishment()
 	}
 	else
 	{
-		NETLINK_LOG_INFO("TCP Role: Connector -> connecting to {}-({})", mRemote.displayName, mRemote.IPAddress);
+		NETLINK_LOG_INFO("Role: Connector -> connecting to {}-({})", mRemote.displayName, mRemote.IPAddress);
 
-		mClient = std::make_unique<TCPClient>(mIoContext);
+		mClient = mTransportFactory.createClient(mIoContext);
 		mClient->setConnectHandler(
-			[this](ITCPSession::pointer session)
+			[this](ISession::pointer session)
 			{
 				mPhase = ConnectionPhase::Connected;
 				if (mCallbacks.onConnected)
@@ -142,7 +142,7 @@ void netlink::ConnectionFlow::beginTCPEstablishment()
 			[this]()
 			{
 				if (mCallbacks.onConnectionFailed)
-					mCallbacks.onConnectionFailed("TCP connection timed out");
+					mCallbacks.onConnectionFailed("Connection timed out");
 
 				reset();
 			});

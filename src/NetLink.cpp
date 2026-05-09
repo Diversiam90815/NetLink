@@ -10,7 +10,8 @@
 #include "Discovery/DiscoveryService.h"
 #include "Signaling/SignalingService.h"
 #include "Signaling/RoleNegotiation.h"
-#include "TCP/TCPSession.h"
+#include "Transport/TransportInterfaces.h"
+#include "TCP/TCPTransportFactory.h"
 #include "Messaging/RemoteCommunication.h"
 #include "ConnectionFlow/ConnectionFlow.h"
 
@@ -20,11 +21,12 @@ struct netlink::NetLink::Impl
 	NetLinkConfig		config;
 	NetLinkCallbacks	callbacks;
 
-	asio::io_context	ioContext;
-	DiscoveryService	discovery{ioContext};
-	SignalingService	signaling{ioContext};
-	ConnectionFlow		connectionFlow{ioContext, signaling};
-	RemoteCommunication communication;
+	asio::io_context		  ioContext;
+	DiscoveryService		  discovery{ioContext};
+	SignalingService		  signaling{ioContext};
+	netlink::TCPTransportFactory transportFactory;
+	ConnectionFlow			  connectionFlow{ioContext, signaling, transportFactory};
+	RemoteCommunication		  communication;
 
 	ConnectionState		connectionState{ConnectionState::None};
 };
@@ -61,8 +63,8 @@ void			  netlink::NetLink::configure(const NetLinkConfig &config, const NetLinkC
 			pImpl->callbacks.onConnectionChanged({ConnectionState::None, "", {remote.IPAddress, remote.port, remote.displayName}});
 	};
 
-	// TCP established -> init messaging
-	flowCB.onConnected = [this](ITCPSession::pointer session)
+	// Transport established -> init messaging
+	flowCB.onConnected = [this](ISession::pointer session)
 	{
 		pImpl->communication.init(session, pImpl->config.secret);
 		pImpl->communication.start();

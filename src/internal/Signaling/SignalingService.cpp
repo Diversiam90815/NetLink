@@ -125,6 +125,16 @@ void netlink::SignalingService::sendDisconnect(const std::string &targetIP, int 
 	sendPacket(targetIP, targetSignalingPort, packet);
 }
 
+void netlink::SignalingService::sendReadyFlag(const std::string &targetIP, int targetSignalingPort)
+{
+	SignalPacket packet{};
+	packet.signalType		   = SignalType::ReadyFlag;
+	packet.senderIP			   = mSocket.local_endpoint().address().to_string();
+	packet.senderSignalingPort = mBoundPort;
+
+	sendPacket(targetIP, targetSignalingPort, packet);
+}
+
 
 void netlink::SignalingService::run()
 {
@@ -197,6 +207,11 @@ void netlink::SignalingService::routePacket(const SignalPacket &packet)
 	case SignalType::Disconnect:
 		if (mCallbacks.onDisconnectReceived)
 			mCallbacks.onDisconnectReceived(packet);
+		break;
+
+	case SignalType::ReadyFlag:
+		if (mCallbacks.onReadyFlagReceived)
+			mCallbacks.onReadyFlagReceived(packet);
 		break;
 
 	default: NETLINK_LOG_WARNING("Unknown signal type received: {}", static_cast<int>(packet.signalType)); break;

@@ -20,7 +20,8 @@ enum class SignalType : uint8_t
 	ConnectRequest,
 	ConnectAccept,
 	ConnectDecline,
-	Disconnect
+	Disconnect,
+	ReadyFlag
 };
 
 struct SignalPacket

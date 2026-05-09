@@ -10,7 +10,7 @@
 #include <asio.hpp>
 #include <vector>
 
-#include "TCPInterfaces.h"
+#include "Transport/TransportInterfaces.h"
 
 
 using asio::ip::tcp;
@@ -36,7 +36,7 @@ struct AsyncReadState
  * Thread-safety: Public methods intended to be invoked from owning I/O thread;
  * minimal external synchronization assumed.
  */
-class TCPSession : public ITCPSession, public std::enable_shared_from_this<TCPSession>
+class TCPSession : public ISession, public std::enable_shared_from_this<TCPSession>
 {
 public:
 	~TCPSession();

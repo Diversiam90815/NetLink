@@ -145,7 +145,7 @@ void DiscoveryService::sendPackage()
 	DiscoveryEndpoint local{};
 	local.IPAddress			 = mConfig.localIPv4;
 	local.displayName		 = mConfig.displayName;
-	local.port				 = mConfig.tcpPort;
+	local.port				 = mConfig.port;
 
 	json			 j		 = local;
 	std::string		 message = j.dump();

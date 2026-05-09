@@ -13,7 +13,7 @@
 #include <string>
 #include <vector>
 
-#include "TCP/TCPSession.h"
+#include "Transport/TransportInterfaces.h"
 #include "CommunicationThreads.h"
 #include "MessageTypes.h"
 
@@ -26,7 +26,7 @@ public:
 	RemoteCommunication()  = default;
 	~RemoteCommunication() = default;
 
-	bool init(std::shared_ptr<ITCPSession> session, const std::string &secret);
+	bool init(std::shared_ptr<ISession> session, const std::string &secret);
 	void deinit();
 
 	void start();
@@ -49,7 +49,7 @@ private:
 	std::string							  mSecret;
 	MessageCallback						  mCallback;
 
-	std::shared_ptr<ITCPSession>		  mTCPSession;
+	std::shared_ptr<ISession>			  mSession;
 	std::shared_ptr<SendThread>			  mSendThread;
 	std::shared_ptr<ReceiveThread>		  mReceiveThread;
 

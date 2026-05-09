@@ -9,11 +9,11 @@
 #include "NetLinkLog.h"
 
 
-bool RemoteCommunication::init(std::shared_ptr<ITCPSession> session, const std::string &secret)
+bool RemoteCommunication::init(std::shared_ptr<ISession> session, const std::string &secret)
 {
 	if (!session)
 	{
-		NETLINK_LOG_ERROR("TCPSession is not valid. We received a nullptr. Cannot initialize");
+		NETLINK_LOG_ERROR("Session is not valid. We received a nullptr. Cannot initialize");
 		return false;
 	}
 	else if (!session->isConnected())
@@ -22,7 +22,7 @@ bool RemoteCommunication::init(std::shared_ptr<ITCPSession> session, const std::
 		return false;
 	}
 
-	mTCPSession = session;
+	mSession = session;
 	mSecret		= secret;
 
 	if (mSendThread)
@@ -48,7 +48,7 @@ void RemoteCommunication::deinit()
 		mReceiveThread->stop();
 
 	// Try to send any remaining critical messages (like disconnect)
-	if (mTCPSession && mTCPSession->isConnected())
+	if (mSession && mSession->isConnected())
 	{
 		// Send remaining outgoing messages with a timeout
 		auto timeout = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
@@ -60,11 +60,11 @@ void RemoteCommunication::deinit()
 		}
 	}
 
-	if (mTCPSession)
+	if (mSession)
 	{
-		mTCPSession->stopReadAsync();
-		mTCPSession.reset();
-		mTCPSession = nullptr;
+		mSession->stopReadAsync();
+		mSession.reset();
+		mSession = nullptr;
 	}
 
 	clearPendingMessages();
@@ -78,7 +78,7 @@ void RemoteCommunication::start()
 		return;
 
 	// Start async read
-	mTCPSession->startReadAsync(
+	mSession->startReadAsync(
 		[this](netlink::InternalMessage message)
 		{
 			const size_t secretLen = mSecret.size();
@@ -211,7 +211,7 @@ bool RemoteCommunication::sendMessages()
 
     for (auto &message : toSend)
 	{
-		if (!mTCPSession->sendMessage(message))
+		if (!mSession->sendMessage(message))
 			return false;
 	}
 

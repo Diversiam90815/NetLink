@@ -11,8 +11,8 @@
 
 #include "ConnectionPhase.h"
 #include "Signaling/SignalingService.h"
-#include "TCP/TCPServer.h"
-#include "TCP/TCPClient.h"
+#include "Transport/TransportInterfaces.h"
+#include "Transport/TransportFactory.h"
 #include "Discovery/DiscoveryEndpoint.h"
 #include "Signaling/RoleNegotiation.h"
 
@@ -20,13 +20,25 @@
 namespace netlink
 {
 
+
+// Timeout category constants for ConnectionFlow
+namespace ConnectionTimeouts
+{
+constexpr const char *Connection	  = "connection";
+constexpr const char *Invitation	  = "invitation";
+constexpr const char *ReadyFlag		  = "ready_flag";
+constexpr const char *RoleNegotiation = "role_negotiation";
+} // namespace ConnectionTimeouts
+
+
+
 struct ConnectionFlowCallbacks
 {
 	// inbound request arrived. App must call respondToConnection
 	std::function<void(const DiscoveryEndpoint &remote)> onConnectionRequested;
 
-	// TCP fully established. Session is ready for messaging
-	std::function<void(ITCPSession::pointer session)>	 onConnected;
+	// Transport fully established. Session is ready for messaging
+	std::function<void(ISession::pointer session)>		 onConnected;
 
 	// Remote declined or disconnected
 	std::function<void(const std::string &reason)>		 onConnectionFailed;
@@ -40,7 +52,7 @@ struct ConnectionFlowCallbacks
 class ConnectionFlow
 {
 public:
-	ConnectionFlow(asio::io_context &io_context, SignalingService &signaling);
+	ConnectionFlow(asio::io_context &io_context, SignalingService &signaling, ITransportFactory &transportFactory);
 
 	void			setCallbacks(ConnectionFlowCallbacks cb) { mCallbacks = std::move(cb); }
 	void			setLocalIP(const std::string &ip) { mLocalIP = ip; }
@@ -62,12 +74,13 @@ private:
 	void					   onSignalConnectDeclined(const SignalPacket &pkt);
 	void					   onSignalDisconnect(const SignalPacket &pkt);
 
-	void					   beginTCPEstablishment();
+	void					   beginTransportEstablishment();
 	void					   reset();
 
 
 	asio::io_context		  &mIoContext;
 	SignalingService		  &mSignaling;
+	ITransportFactory		  &mTransportFactory;
 
 	ConnectionFlowCallbacks	   mCallbacks;
 	ConnectionPhase			   mPhase{ConnectionPhase::Idle};
@@ -75,8 +88,8 @@ private:
 	DiscoveryEndpoint		   mRemote{};
 	std::string				   mLocalIP{};
 
-	std::unique_ptr<TCPServer> mServer;
-	std::unique_ptr<TCPClient> mClient;
+	std::unique_ptr<IServer>   mServer;
+	std::unique_ptr<IClient>   mClient;
 };
 
 

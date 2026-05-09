@@ -28,6 +28,7 @@ struct SignalingCallbacks
 	std::function<void(const SignalPacket &)> onConnectAccepted;
 	std::function<void(const SignalPacket &)> onConnectDeclined;
 	std::function<void(const SignalPacket &)> onDisconnectReceived;
+	std::function<void(const SignalPacket &)> onReadyFlagReceived;
 };
 
 
@@ -48,6 +49,7 @@ public:
 	void sendConnectAccept(const std::string &targetIP, int targetSignalingPort);
 	void sendConnectDecline(const std::string &targetIP, int targetSignalingPort);
 	void sendDisconnect(const std::string &targetIP, int targetSignalingPort);
+	void sendReadyFlag(const std::string &targetIP, int targetSignalingPort);
 
 private:
 	void				   run() override;

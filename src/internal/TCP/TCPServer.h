@@ -10,7 +10,7 @@
 
 #include <asio.hpp>
 
-#include "TCPInterfaces.h"
+#include "Transport/TransportInterfaces.h"
 #include "TCPSession.h"
 
 
@@ -21,7 +21,7 @@ using asio::ip::tcp;
  * @brief	Implements a TCP server that listens for and accepts incoming connections,
  *			creating TCPSession instances for each accepted socket.
  */
-class TCPServer : public ITCPServer
+class TCPServer : public IServer
 {
 public:
 	TCPServer(asio::io_context &ioContext);

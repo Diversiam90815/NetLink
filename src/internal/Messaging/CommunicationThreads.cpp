@@ -1,7 +1,8 @@
 /*
   ==============================================================================
 	Module:         CommunicationThreads
-	Description:    Threads used for remote communication (sending and receiving data)
+	Description:    Dedicated worker threads supporting RemoteCommunication.
+					Each thread cooperatively waits for work signaled by RemoteCommunication (event driven).
   ==============================================================================
 */
 

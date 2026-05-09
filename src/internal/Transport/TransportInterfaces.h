@@ -1,7 +1,7 @@
 /*
   ==============================================================================
-	Module:         TCPInterfaces
-	Description:    Interface for TCP modules
+	Module:         TransportInterfaces
+	Description:    Protocol-agnostic interfaces for transport modules
   ==============================================================================
 */
 
@@ -14,15 +14,15 @@
 
 
 /**
- * @brief	Interface for a TCP session handling an established connection.
+ * @brief	Interface for a session handling an established connection.
  */
-class ITCPSession
+class ISession
 {
 public:
 	using MessageReceivedCallback								  = std::function<void(netlink::InternalMessage &message)>;
-	using pointer												  = std::shared_ptr<ITCPSession>;
+	using pointer												  = std::shared_ptr<ISession>;
 
-	virtual ~ITCPSession()										  = default;
+	virtual ~ISession()											  = default;
 
 	/**
 	 * @brief	True if socket is in a connected state.
@@ -46,21 +46,21 @@ public:
 	virtual void stopReadAsync()								  = 0;
 
 	/**
-	 * @brief	The bound local TCP port (after connect / accept).
+	 * @brief	The bound local port (after connect / accept).
 	 */
 	virtual int	 getBoundPort() const							  = 0;
 };
 
 
 /**
- * @brief	Interface for a TCP server accepting inbound connections.
+ * @brief	Interface for a server accepting inbound connections.
  */
-class ITCPServer
+class IServer
 {
 public:
-	using SessionHandler								   = std::function<void(ITCPSession::pointer session)>;
+	using SessionHandler								   = std::function<void(ISession::pointer session)>;
 
-	virtual ~ITCPServer()								   = default;
+	virtual ~IServer()									   = default;
 
 	/**
 	 * @brief	Begin accepting connections (continuously or single depending on implementation).
@@ -85,15 +85,15 @@ public:
 
 
 /**
- * @brief	Interface for a TCP client initiating outbound connections.
+ * @brief	Interface for a client initiating outbound connections.
  */
-class ITCPClient
+class IClient
 {
 public:
-	using ConnectHandler												 = std::function<void(ITCPSession::pointer session)>;
+	using ConnectHandler												 = std::function<void(ISession::pointer session)>;
 	using ConnectTimeoutHandler											 = std::function<void()>;
 
-	virtual ~ITCPClient()												 = default;
+	virtual ~IClient()													 = default;
 
 	/**
 	 * @brief	Begin async connect to host:port.

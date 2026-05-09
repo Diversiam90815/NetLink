@@ -10,7 +10,7 @@
 #include <asio.hpp>
 #include <memory>
 
-#include "TCPInterfaces.h"
+#include "Transport/TransportInterfaces.h"
 #include "TCPSession.h"
 
 
@@ -21,7 +21,7 @@ using asio::ip::tcp;
  * @brief	Implements a TCP client responsible for connecting to a remote host
  *			and establishing a TCPSession.
  */
-class TCPClient : public ITCPClient
+class TCPClient : public IClient
 {
 public:
 	TCPClient(asio::io_context &ioContext);
