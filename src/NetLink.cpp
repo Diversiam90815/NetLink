@@ -9,11 +9,11 @@
 
 #include "Discovery/DiscoveryService.h"
 #include "Signaling/SignalingService.h"
-#include "Signaling/RoleNegotiation.h"
 #include "Transport/TransportInterfaces.h"
 #include "TCP/TCPTransportFactory.h"
 #include "Messaging/RemoteCommunication.h"
-#include "ConnectionFlow/ConnectionFlow.h"
+#include "ConnectionService/ConnectionService.h"
+#include "ConnectionService/PeerValidationService.h"
 
 
 struct netlink::NetLink::Impl
@@ -21,12 +21,13 @@ struct netlink::NetLink::Impl
 	NetLinkConfig		config;
 	NetLinkCallbacks	callbacks;
 
-	asio::io_context		  ioContext;
-	DiscoveryService		  discovery{ioContext};
-	SignalingService		  signaling{ioContext};
-	netlink::TCPTransportFactory transportFactory;
-	ConnectionFlow			  connectionFlow{ioContext, signaling, transportFactory};
-	RemoteCommunication		  communication;
+	asio::io_context			  ioContext;
+	DiscoveryService			  discovery{ioContext};
+	SignalingService			  signaling{ioContext};
+	netlink::TCPTransportFactory  transportFactory;
+	netlink::PeerValidationService validation;
+	netlink::ConnectionService	  connectionService{ioContext, signaling, transportFactory, validation};
+	RemoteCommunication			  communication;
 
 	ConnectionState		connectionState{ConnectionState::None};
 };
@@ -51,20 +52,20 @@ void			  netlink::NetLink::configure(const NetLinkConfig &config, const NetLinkC
 {
 	pImpl->config	 = config;
 	pImpl->callbacks = callbacks;
-	pImpl->connectionFlow.setLocalIP(config.localIPv4);
+	pImpl->connectionService.setLocalIP(config.localIPv4);
 
-	ConnectionFlowCallbacks flowCB;
+	netlink::ConnectionServiceCallbacks svcCB;
 
 	// Remote wants to connect -> ask app to accept/decline
-	flowCB.onConnectionRequested = [this](const DiscoveryEndpoint &remote)
+	svcCB.onConnectionRequested = [this](const DiscoveryEndpoint &remote)
 	{
 		pImpl->connectionState = ConnectionState::None;
 		if (pImpl->callbacks.onConnectionChanged)
 			pImpl->callbacks.onConnectionChanged({ConnectionState::None, "", {remote.IPAddress, remote.port, remote.displayName}});
 	};
 
-	// Transport established -> init messaging
-	flowCB.onConnected = [this](ISession::pointer session)
+	// Both peers ready -> init messaging
+	svcCB.onConnected = [this](ISession::pointer session)
 	{
 		pImpl->communication.init(session, pImpl->config.secret);
 		pImpl->communication.start();
@@ -74,14 +75,14 @@ void			  netlink::NetLink::configure(const NetLinkConfig &config, const NetLinkC
 			pImpl->callbacks.onConnectionChanged({ConnectionState::Connected, "", {}});
 	};
 
-	flowCB.onConnectionFailed = [this](const std::string &reason)
+	svcCB.onConnectionFailed = [this](const std::string &reason)
 	{
 		pImpl->connectionState = ConnectionState::Error;
 		if (pImpl->callbacks.onConnectionChanged)
 			pImpl->callbacks.onConnectionChanged({ConnectionState::Error, reason, {}});
 	};
 
-	flowCB.onDisconnected = [this]()
+	svcCB.onDisconnected = [this]()
 	{
 		pImpl->communication.deinit();
 		pImpl->connectionState = ConnectionState::Disconnected;
@@ -89,7 +90,7 @@ void			  netlink::NetLink::configure(const NetLinkConfig &config, const NetLinkC
 			pImpl->callbacks.onConnectionChanged({ConnectionState::Disconnected, "", {}});
 	};
 
-	pImpl->connectionFlow.setCallbacks(std::move(flowCB));
+	pImpl->connectionService.setCallbacks(std::move(svcCB));
 }
 
 
@@ -134,7 +135,7 @@ bool netlink::NetLink::connectTo(const Endpoint &remote)
 {
 	// Map public endpoint to internal DiscoveryEndpoint
 	DiscoveryEndpoint ep{remote.IPAddress, remote.port, remote.port, remote.displayName}; // @TODO: signalingport
-	pImpl->connectionFlow.requestConnection(ep);
+	pImpl->connectionService.requestConnection(ep);
 	
 	pImpl->connectionState = ConnectionState::Searching;
 
@@ -144,7 +145,7 @@ bool netlink::NetLink::connectTo(const Endpoint &remote)
 
 void netlink::NetLink::respondToConnection(bool accepted)
 {
-	pImpl->connectionFlow.respondToConnection(accepted);
+	pImpl->connectionService.respondToConnection(accepted);
 }
 
 
