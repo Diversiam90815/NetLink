@@ -227,7 +227,7 @@ void netlink::ConnectionService::onSignalReadyFlag(const SignalPacket &pkt)
 // Flow stages
 // ---------------------------------------------------------------------------
 
-void netlink::ConnectionService::beginTransportEstablishment()
+void netlink::ConnectionService::beginTransportEstablishment(PeerState &peer)
 {
 	// Caller holds mMutex
 	mPhase			 = ConnectionPhase::EstablishingTransport;
@@ -276,7 +276,7 @@ void netlink::ConnectionService::beginTransportEstablishment()
 }
 
 
-void netlink::ConnectionService::sendLocalReadyFlag()
+void netlink::ConnectionService::sendLocalReadyFlag(PeerState &peer)
 {
 	// Caller holds mMutex
 	mLocalReadyFlag.store(true);
@@ -292,7 +292,7 @@ void netlink::ConnectionService::sendLocalReadyFlag()
 }
 
 
-void netlink::ConnectionService::checkBothReady()
+void netlink::ConnectionService::checkBothReady(PeerState &peer)
 {
 	// Caller holds mMutex
 	if (!mLocalReadyFlag.load() || !mRemoteReadyFlag.load())

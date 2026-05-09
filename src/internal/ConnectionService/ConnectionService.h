@@ -37,6 +37,19 @@ struct ConnectionServiceCallbacks
 };
 
 
+struct PeerState
+{
+	ConnectionPhase			 phase{ConnectionPhase::Idle};
+	DiscoveryEndpoint		 remote{};
+	bool					 isInitiator{false};
+	bool					 localReadyFlag{false};
+	bool					 remoteReadyFlag{false};
+	ISession::pointer		 session{};
+	std::unique_ptr<IServer> server;
+	std::unique_ptr<IClient> client;
+};
+
+
 class ConnectionService
 {
 public:
@@ -59,54 +72,43 @@ public:
 
 private:
 	// Signal handlers, wired in constructor, called from SignalingService IO thread
-	void					   onSignalConnectRequested(const SignalPacket &pkt);
-	void					   onSignalConnectAccepted(const SignalPacket &pkt);
-	void					   onSignalConnectDeclined(const SignalPacket &pkt);
-	void					   onSignalDisconnect(const SignalPacket &pkt);
-	void					   onSignalReadyFlag(const SignalPacket &pkt);
+	void							 onSignalConnectRequested(const SignalPacket &pkt);
+	void							 onSignalConnectAccepted(const SignalPacket &pkt);
+	void							 onSignalConnectDeclined(const SignalPacket &pkt);
+	void							 onSignalDisconnect(const SignalPacket &pkt);
+	void							 onSignalReadyFlag(const SignalPacket &pkt);
 
-	// Flow stages
-	void					   beginTransportEstablishment();
-	void					   sendLocalReadyFlag();
-	void					   checkBothReady();
+	// Per-peer flow stages — caller must hold mMutex
+	void							 beginTransportEstablishment(PeerState &peer);
+	void							 sendLocalReadyFlag(PeerState &peer);
+	void							 checkBothReady(PeerState &peer);
 
 	// Timeout expiry handler
-	void					   onTimeout(const TimeoutKey &key);
+	void							 onTimeout(const TimeoutKey &key);
 
 	// Reset all state to Idle
-	void					   reset();
+	void							 reset();
 
 
 	// Dependencies
-	asio::io_context		  &mIoContext;
-	SignalingService		  &mSignaling;
-	ITransportFactory		  &mTransportFactory;
-	PeerValidationService	  &mValidation;
+	asio::io_context				&mIoContext;
+	SignalingService				&mSignaling;
+	ITransportFactory				&mTransportFactory;
+	PeerValidationService			&mValidation;
 
 	// Configuration and callbacks
-	ConnectionConfig		   mConfig;
-	ConnectionServiceCallbacks mCallbacks;
+	ConnectionConfig				 mConfig;
+	ConnectionServiceCallbacks		 mCallbacks;
+	std::string						 mLocalIP{};
 
-	// Connection state
-	ConnectionPhase			   mPhase{ConnectionPhase::Idle};
-	DiscoveryEndpoint		   mRemote{};
-	std::string				   mLocalIP{};
-	bool					   mIsInitiator{false};
-
-	// ReadyFlag synchronization
-	std::atomic<bool>		   mLocalReadyFlag{false};
-	std::atomic<bool>		   mRemoteReadyFlag{false};
-	ISession::pointer		   mSession;
-
-	// Transport
-	std::unique_ptr<IServer>   mServer;
-	std::unique_ptr<IClient>   mClient;
+	// Per-peer state keyed by IP
+	std::map<std::string, PeerState> mPeers;
 
 	// Timeout management
-	TimeoutService			   mTimeoutService;
+	TimeoutService					 mTimeoutService;
 
 	// Thread safety
-	mutable std::mutex		   mMutex;
+	mutable std::mutex				 mMutex;
 };
 
 } // namespace netlink
