@@ -251,6 +251,18 @@ std::optional<netlink::ValidationResult> netlink::PeerValidationService::getVali
 }
 
 
+void netlink::PeerValidationService::cancelAllPendingValidation()
+{
+	{
+		std::lock_guard<std::mutex> lock(mPendingValidationMutex);
+		mPendingValidations.clear();
+	}
+
+	mTimeoutService.cancelAll();
+}
+
+
+
 void netlink::PeerValidationService::handleSecretRequest(const std::string &computerName)
 {
 	NETLINK_LOG_INFO("Handling secret request from {}", computerName);

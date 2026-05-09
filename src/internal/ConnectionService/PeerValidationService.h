@@ -65,6 +65,7 @@ private:
 	// State queries
 	ValidationResult						 getLastResult() const { return mLastResult; }
 	std::optional<ValidationResult>			 getValidationResult(const std::string &computerName);
+	void									 cancelAllPendingValidation();
 
 	// Request handlers -> Answer incoming requests
 	void									 handleSecretRequest(const std::string &computerName);
