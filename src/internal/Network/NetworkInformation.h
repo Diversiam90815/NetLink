@@ -21,6 +21,7 @@
 
 #include <vector>
 #include <unordered_set>
+#include <memory>
 
 #include "NetworkAdapter.h"
 #include "NetLinkLog.h"

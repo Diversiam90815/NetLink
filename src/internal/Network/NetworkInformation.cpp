@@ -259,7 +259,7 @@ bool netlink::NetworkInformation::getDefaultInterfaces(std::vector<NET_LUID> &pL
 
 	if (GetIpForwardTable2(AF_INET, &routingTable) != NO_ERROR)
 	{
-		LOG_WARNING("Could not retrieve Routing Table!");
+		NETLINK_LOG_WARNING("Could not retrieve Routing Table!");
 
 		if (routingTable)
 			FreeMibTable(routingTable);
