@@ -22,6 +22,7 @@ struct DiscoveryEndpoint
 	bool		operator==(const DiscoveryEndpoint &other) const { return IPAddress == other.IPAddress && port == other.port; }
 
 	bool		isValid() const { return !IPAddress.empty() && port != 0 && signalingPort != 0; }
+	bool		isEmpty() const { return IPAddress.empty() && port == 0 && signalingPort == 0; }
 };
 
 
