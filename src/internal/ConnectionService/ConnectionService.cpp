@@ -65,7 +65,7 @@ bool netlink::ConnectionService::initiateConnection(const std::string &computerN
 	request.isInitiator		 = true;
 	request.state			 = ConnectionState::Initiated;
 
-	mCurrentRequest			 = request;
+	mCurrentRequest			 = std::move(request);
 	mConnecting.store(true);
 	mConnectionAttempts = 0;
 
@@ -164,7 +164,52 @@ bool netlink::ConnectionService::declineIncomingConnection(const std::string &co
 
 bool netlink::ConnectionService::closeConnection(const std::string &computerName)
 {
-	return false;
+	std::lock_guard<std::mutex> lock(mConnectingMutex);
+
+	if (!mCurrentRequest.has_value())
+	{
+		NETLINK_LOG_WARNING("No connection to close");
+		return false;
+	}
+
+	std::string remote = computerName;
+
+	// if computerName was left empty, we close the current connection
+	if (computerName.empty())
+		remote = mCurrentRequest->remote.displayName;
+
+	// validate remote's name unless empty (alwas force close if left empty)
+	if (!computerName.empty() && mCurrentRequest->remote.displayName != computerName)
+	{
+		NETLINK_LOG_WARNING("Connection close missmatch: request: {}, current: {}", computerName, mCurrentRequest->remote.displayName);
+		return false;
+	}
+
+	// cancel all timeouts for this connection
+	if (!remote.empty())
+		mTimeoutService.cancelByIdentifier(remote);
+	else
+		mTimeoutService.cancelAll();
+
+	// only proceed if we have an actual connection in progress or established
+	if (!isConnected() || !isConnecting())
+	{
+		NETLINK_LOG_DEBUG("Connection already idle, clearing state");
+		clearCurrentConnection();
+		return true;
+	}
+
+	NETLINK_LOG_INFO("Closing current connection to {}", remote);
+
+	mCurrentRequest->state = ConnectionState::Disconnecting;
+
+	notifyStatus(ConnectionStatusUpdate::Type::Closing, "Closing connection");
+
+	sendDisconnectMessage(computerName);
+
+	notifyStatus(ConnectionStatusUpdate::Type::Closed, "Connection closed");
+	clearCurrentConnection();
+	return true;
 }
 
 
@@ -187,13 +232,6 @@ std::optional<DiscoveryEndpoint> netlink::ConnectionService::getCurrentRemote() 
 }
 
 
-std::optional<netlink::ConnectionRequest> netlink::ConnectionService::getCurrentRequest() const
-{
-	std::lock_guard<std::mutex> lock(mConnectingMutex);
-	return mCurrentRequest;
-}
-
-
 netlink::ConnectionState netlink::ConnectionService::getConnectionState() const
 {
 	std::lock_guard<std::mutex> lock(mConnectingMutex);
@@ -205,16 +243,96 @@ netlink::ConnectionState netlink::ConnectionService::getConnectionState() const
 }
 
 
-bool netlink::ConnectionService::sendConnectionInvitation(const std::string &computerName) {}
+bool netlink::ConnectionService::sendConnectionInvitation(const std::string &computerName)
+{
+	return false;
+}
 
 
-bool netlink::ConnectionService::answerInvitation(const std::string &computerName, const bool connectionAccepted, const std::string &reason) {}
+bool netlink::ConnectionService::sendDisconnectMessage(const std::string &computerName)
+{
+	return false;
+}
 
 
-bool netlink::ConnectionService::sendConnectionReadyFlag(const std::string &computerName, const bool flag) {}
+bool netlink::ConnectionService::answerInvitation(const std::string &computerName, const bool connectionAccepted, const std::string &reason)
+{
+	return false;
+}
 
 
-void netlink::ConnectionService::onPeerValidated(const ValidationResult &peerValidation) {}
+bool netlink::ConnectionService::sendConnectionReadyFlag(const std::string &computerName, const bool flag)
+{
+	return false;
+}
+
+
+void netlink::ConnectionService::onReceivedInvitation(const std::string &computerName) {}
+
+
+void netlink::ConnectionService::onReceivedAnswerToInvite(const std::string &computerName, const bool connectionAccepted, const std::string &reason)
+{
+
+	std::lock_guard<std::mutex> lock(mConnectingMutex);
+
+	if (!mCurrentRequest.has_value())
+	{
+		NETLINK_LOG_WARNING("Received acceptance but no connection request exists!");
+		return;
+	}
+
+	if (mCurrentRequest->state != ConnectionState::InvitationSent)
+	{
+		NETLINK_LOG_WARNING("Received acceptance in unexpected state: {}", static_cast<int>(mCurrentRequest->state));
+		return;
+	}
+
+	// cancel invitation timeout
+	mTimeoutService.cancelTimeout({ConnectionTimeouts::Invitation, computerName});
+
+	if (connectionAccepted)
+	{
+		NETLINK_LOG_INFO("Connection accepted by {}", computerName);
+
+		mCurrentRequest->state			  = ConnectionState::Accepted;
+		mCurrentRequest->lastActivityTime = std::chrono::steady_clock::now();
+
+		notifyStatus(ConnectionStatusUpdate::Type::Accepted, "Connection accepted by " + computerName);
+
+		// start connection timeout
+		mTimeoutService.startTimeout({ConnectionTimeouts::Connection, computerName}, mConfig.connectionTimeoutMs, [this](const TimeoutKey &key) { onTimeout(key); });
+
+		// start role negotiation
+		if (!determineLocalSessionRole())
+		{
+			NETLINK_LOG_ERROR("Failed to start role negotiation!");
+			notifyStatus(ConnectionStatusUpdate::Type::Failed, "Session role negotiation failed", false);
+			clearCurrentConnection();
+		}
+	}
+	else
+	{
+		NETLINK_LOG_WARNING("Connection declined by {}", computerName);
+
+		notifyStatus(ConnectionStatusUpdate::Type::Declined, "Connection declined by " + computerName, false);
+		clearCurrentConnection();
+	}
+}
+
+
+void netlink::ConnectionService::onReceivedConnectionReadyFlag(const std::string &computerName) {}
+
+
+void netlink::ConnectionService::onPeerValidated(const ValidationResult &peerValidation)
+{
+	NETLINK_LOG_INFO("Peer {} validated", peerValidation.remoteEndpoint.displayName);
+
+	// store the result
+	{
+		std::lock_guard<std::mutex> lock(mValidationMutex);
+		mValidatedResults[peerValidation.remoteEndpoint.displayName] = peerValidation;
+	}
+}
 
 
 void netlink::ConnectionService::clearCurrentConnection()
@@ -227,12 +345,6 @@ void netlink::ConnectionService::clearCurrentConnection()
 	mConnectionAttempts = 0;
 	mTimeoutService.cancelAll();
 
-	resetConnectionFlags();
-}
-
-
-void netlink::ConnectionService::resetConnectionFlags()
-{
 	mLocalReady.store(false);
 	mRemoteReady.store(false);
 }

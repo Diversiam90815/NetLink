@@ -99,13 +99,18 @@ public:
 	bool							 hasIncomingInvitation() const;
 
 	std::optional<DiscoveryEndpoint> getCurrentRemote() const;
-	std::optional<ConnectionRequest> getCurrentRequest() const;
 	ConnectionState					 getConnectionState() const;
 
 	// Sending helper
 	bool							 sendConnectionInvitation(const std::string &computerName);
+	bool							 sendDisconnectMessage(const std::string &computerName);
 	bool							 answerInvitation(const std::string &computerName, const bool connectionAccepted, const std::string &reason = "");
 	bool							 sendConnectionReadyFlag(const std::string &computerName, const bool flag);
+
+	// Receiving helper
+	void							 onReceivedInvitation(const std::string &computerName);
+	void							 onReceivedAnswerToInvite(const std::string &computerName, const bool connectionAccepted, const std::string &reason);
+	void							 onReceivedConnectionReadyFlag(const std::string &computerName);
 
 	// Peer validated
 	void							 onPeerValidated(const ValidationResult &peerValidation);
@@ -113,7 +118,6 @@ public:
 private:
 	// State management
 	void									clearCurrentConnection();
-	void									resetConnectionFlags();
 
 	// Helper methods
 	std::optional<ValidationResult>			findValidationResult(const std::string &computerName) const;

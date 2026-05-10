@@ -7,6 +7,8 @@
 
 #pragma once
 
+#include "Discovery/DiscoveryEndpoint.h"
+
 
 namespace netlink
 {

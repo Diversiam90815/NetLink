@@ -26,7 +26,7 @@ struct netlink::NetLink::Impl
 	SignalingService			   signaling{ioContext};
 	netlink::TCPTransportFactory   transportFactory;
 	netlink::PeerValidationService validation;
-	netlink::ConnectionService	   connectionService{ioContext, signaling, transportFactory, validation};
+	netlink::ConnectionService	   connectionService{ioContext, signaling, transportFactory};
 	RemoteCommunication			   communication;
 
 	ConnectionState				   connectionState{ConnectionState::None};
@@ -149,19 +149,12 @@ std::vector<netlink::Endpoint> netlink::NetLink::getDiscoveredEndpoints()
 
 bool netlink::NetLink::connectTo(const Endpoint &remote)
 {
-	// Map public endpoint to internal DiscoveryEndpoint
-	DiscoveryEndpoint ep{remote.IPAddress, remote.port, remote.port, remote.displayName}; // @TODO: signalingport
-	pImpl->connectionService.requestConnection(ep);
-
-	pImpl->connectionState = ConnectionState::Searching;
-
 	return true;
 }
 
 
 void netlink::NetLink::respondToConnection(bool accepted)
 {
-	pImpl->connectionService.respondToConnection(accepted);
 }
 
 
