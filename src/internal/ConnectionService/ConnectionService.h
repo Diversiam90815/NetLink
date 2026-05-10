@@ -14,15 +14,14 @@
 #include <mutex>
 #include <string>
 
-#include "ConnectionConfig.h"
 #include "ConnectionPhase.h"
-#include "PeerValidationService.h"
+#include "RoleNegotiation.h"
+#include "PeerValidation/PeerValidationService.h"
 #include "Discovery/DiscoveryEndpoint.h"
 #include "Signaling/SignalingService.h"
 #include "TimeoutService/TimeoutService.h"
 #include "Transport/TransportFactory.h"
 #include "Transport/TransportInterfaces.h"
-#include "Signaling/RoleNegotiation.h"
 
 
 namespace netlink
@@ -37,13 +36,37 @@ struct ConnectionServiceCallbacks
 };
 
 
-struct PeerState
+namespace ConnectionTimeouts
+{
+constexpr const char *Connection = "connection";
+constexpr const char *Invitation = "invitation";
+constexpr const char *ReadyFlag	 = "ready_flag";
+} // namespace ConnectionTimeouts
+
+
+struct ConnectionConfig
+{
+	int						  maxConnectionRetries{3};
+	std::chrono::milliseconds retryDelay{300};
+	bool					  autoAcceptConnection{false}; // If enabled, an incoming connection is automatically enabled if valid
+
+	int						  invitationTimeoutMs{5000};
+	int						  connectionTimeoutMs{10000};
+	int						  readyFlagTimeoutMs{3000};
+};
+
+
+struct ConnectionRequest
 {
 	ConnectionPhase			 phase{ConnectionPhase::Idle};
+
 	DiscoveryEndpoint		 remote{};
 	bool					 isInitiator{false};
+	SessionRole				 localRole;
+
 	bool					 localReadyFlag{false};
 	bool					 remoteReadyFlag{false};
+
 	ISession::pointer		 session{};
 	std::unique_ptr<IServer> server;
 	std::unique_ptr<IClient> client;
@@ -53,62 +76,72 @@ struct PeerState
 class ConnectionService
 {
 public:
-	ConnectionService(asio::io_context &ioContext, SignalingService &signaling, ITransportFactory &transportFactory, PeerValidationService &validation);
+	ConnectionService(asio::io_context &ioContext, SignalingService &signaling, ITransportFactory &transportFactory);
 
-	void			setCallbacks(ConnectionServiceCallbacks cb);
-	void			setConfig(const ConnectionConfig &config);
-	void			setLocalIP(const std::string &ip);
+	// Configuration
+	void							 setCallbacks(ConnectionServiceCallbacks cb) { mCallbacks = std::move(cb); }
+	void							 setConfig(const ConnectionConfig &config) { mConfig = config; }
+	void							 setLocalIP(const std::string &ip) { mLocalIP = ip; }
 
-	// Initiator path, called by NetLink::connectTo()
-	void			requestConnection(const DiscoveryEndpoint &remote);
+	// Connection management
+	bool							 initiateConnection(const std::string &computerName);
+	bool							 acceptIncomingConnection(const std::string &computerName);
+	bool							 declineIncomingConnection(const std::string &computerName);
+	bool							 closeConnection(const std::string &computerName);
 
-	// Responder path, called by NetLink::respondToConnection()
-	void			respondToConnection(bool accepted);
+	// State
+	bool							 isConnected() const { return mConnected; }
+	bool							 isConnecting() const { return mConnecting; }
+	bool							 hasIncomingInvitation() const;
 
-	// Tear down active connection or in-progress attempt
-	void			disconnect();
+	std::optional<DiscoveryEndpoint> getCurrentRemote() const;
+	std::optional<ConnectionRequest> getCurrentRequest() const;
+	ConnectionPhase					 getConnectionPhase() const;
 
-	ConnectionPhase getPhase() const;
+	// Peer validated
+	void							 onPeerValidated(const ValidationResult &peerValidation);
 
 private:
-	// Signal handlers, wired in constructor, called from SignalingService IO thread
-	void							 onSignalConnectRequested(const SignalPacket &pkt);
-	void							 onSignalConnectAccepted(const SignalPacket &pkt);
-	void							 onSignalConnectDeclined(const SignalPacket &pkt);
-	void							 onSignalDisconnect(const SignalPacket &pkt);
-	void							 onSignalReadyFlag(const SignalPacket &pkt);
+	// State management
+	void									clearCurrentConnection();
+	void									resetConnectionFlags();
 
-	// Per-peer flow stages — caller must hold mMutex
-	void							 beginTransportEstablishment(PeerState &peer);
-	void							 sendLocalReadyFlag(PeerState &peer);
-	void							 checkBothReady(PeerState &peer);
+	// Helper methods
+	std::optional<ValidationResult>			findValidationResult(const std::string &computerName) const;
+	std::optional<ValidationResult>			findValidationResultByIPv4(const std::string &ipv4) const;
+	bool									retryConnection();
+	void									notifyStatus(ConnectionStatusUpdate::Type type, const std::string &message = "", bool success = true);
+
+	// Define role
+	SessionRole								determineLocalSessionRole();
 
 	// Timeout expiry handler
-	void							 onTimeout(const TimeoutKey &key);
-
-	// Reset all state to Idle
-	void							 reset();
-
+	void									onTimeout(const TimeoutKey &key);
 
 	// Dependencies
-	asio::io_context				&mIoContext;
-	SignalingService				&mSignaling;
-	ITransportFactory				&mTransportFactory;
-	PeerValidationService			&mValidation;
+	asio::io_context					   &mIoContext;
+	SignalingService					   &mSignaling;
+	ITransportFactory					   &mTransportFactory;
 
 	// Configuration and callbacks
-	ConnectionConfig				 mConfig;
-	ConnectionServiceCallbacks		 mCallbacks;
-	std::string						 mLocalIP{};
+	ConnectionConfig						mConfig;
+	ConnectionServiceCallbacks				mCallbacks;
+	std::string								mLocalIP{};
 
-	// Per-peer state keyed by IP
-	std::map<std::string, PeerState> mPeers;
+	// Validation result cache
+	std::map<std::string, ValidationResult> mValidatedResults; // Key : ComputerName
+	mutable std::mutex						mValidationMutex;
 
 	// Timeout management
-	TimeoutService					 mTimeoutService;
+	TimeoutService							mTimeoutService;
 
-	// Thread safety
-	mutable std::mutex				 mMutex;
+	// State
+	std::atomic<bool>						mConnected{false};
+	std::atomic<bool>						mConnecting{false};
+	mutable std::mutex						mConnectingMutex;
+
+	std::atomic<bool>						mLocalReady{false};
+	std::atomic<bool>						mRemoteReady{false};
 };
 
 } // namespace netlink
