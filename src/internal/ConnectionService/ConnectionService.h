@@ -1,7 +1,7 @@
 /*
   ==============================================================================
 	Module:         ConnectionService
-	Description:    Orchestrates the full connection lifecycle with per-phase
+	Description:    Orchestrates the full connection lifecycle with per-state
 					timeouts, ReadyFlag synchronization, and peer validation.
   ==============================================================================
 */
@@ -58,18 +58,22 @@ struct ConnectionConfig
 
 struct ConnectionRequest
 {
-	ConnectionPhase			 phase{ConnectionPhase::Idle};
+	ConnectionState						  state{ConnectionState::Idle};
+	ValidationResult					  validationResult;
 
-	DiscoveryEndpoint		 remote{};
-	bool					 isInitiator{false};
-	SessionRole				 localRole;
+	DiscoveryEndpoint					  remote{};
+	bool								  isInitiator{false};
+	SessionRole							  localRole;
 
-	bool					 localReadyFlag{false};
-	bool					 remoteReadyFlag{false};
+	std::chrono::steady_clock::time_point requestTime;
+	std::chrono::steady_clock::time_point lastActivityTime;
 
-	ISession::pointer		 session{};
-	std::unique_ptr<IServer> server;
-	std::unique_ptr<IClient> client;
+	bool								  localReadyFlag{false};
+	bool								  remoteReadyFlag{false};
+
+	ISession::pointer					  session{};
+	std::unique_ptr<IServer>			  server;
+	std::unique_ptr<IClient>			  client;
 };
 
 
@@ -86,7 +90,7 @@ public:
 	// Connection management
 	bool							 initiateConnection(const std::string &computerName);
 	bool							 acceptIncomingConnection(const std::string &computerName);
-	bool							 declineIncomingConnection(const std::string &computerName);
+	bool							 declineIncomingConnection(const std::string &computerName, const std::string &reason = "");
 	bool							 closeConnection(const std::string &computerName);
 
 	// State
@@ -96,7 +100,12 @@ public:
 
 	std::optional<DiscoveryEndpoint> getCurrentRemote() const;
 	std::optional<ConnectionRequest> getCurrentRequest() const;
-	ConnectionPhase					 getConnectionPhase() const;
+	ConnectionState					 getConnectionState() const;
+
+	// Sending helper
+	bool							 sendConnectionInvitation(const std::string &computerName);
+	bool							 answerInvitation(const std::string &computerName, const bool connectionAccepted, const std::string &reason = "");
+	bool							 sendConnectionReadyFlag(const std::string &computerName, const bool flag);
 
 	// Peer validated
 	void							 onPeerValidated(const ValidationResult &peerValidation);
@@ -113,7 +122,7 @@ private:
 	void									notifyStatus(ConnectionStatusUpdate::Type type, const std::string &message = "", bool success = true);
 
 	// Define role
-	SessionRole								determineLocalSessionRole();
+	bool									determineLocalSessionRole();
 
 	// Timeout expiry handler
 	void									onTimeout(const TimeoutKey &key);
@@ -138,7 +147,11 @@ private:
 	// State
 	std::atomic<bool>						mConnected{false};
 	std::atomic<bool>						mConnecting{false};
+	std::optional<ConnectionRequest>		mCurrentRequest;
 	mutable std::mutex						mConnectingMutex;
+
+	// Retry logic
+	int										mConnectionAttempts{0};
 
 	std::atomic<bool>						mLocalReady{false};
 	std::atomic<bool>						mRemoteReady{false};

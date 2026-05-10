@@ -1,7 +1,7 @@
 /*
   ==============================================================================
-	Module:         ConnectionPhase
-	Description:    Internal phase of the connection
+	Module:         ConnectionState
+	Description:    Internal state of the connection
   ==============================================================================
 */
 
@@ -11,17 +11,18 @@
 namespace netlink
 {
 
-enum class ConnectionPhase
+enum class ConnectionState
 {
-	Idle,
-	ValidationPending,	   // Async peer validation in progress (@TODO)
-	ValidationComplete,	   // Validation passed, ready to proceed
-	RequestSent,		   // Initiator: sent ConnectRequest, awaiting Accept/Decline
-	RequestReceived,	   // Responder: received request, awaiting app decision
-	Accepted,			   // Signaling handshake complete
-	EstablishingTransport, // Transport role determined, socket setup in progress
-	AwaitingReadyFlag,	   // Transport up, waiting for both ReadyFlags
-	Connected,			   // Fully connected, messaging ready
+	Idle,				   // No connection
+	Initiated,			   // Started connection flow
+	InvitationSent,		   // we sent invitation
+	InvitationReceived,	   // we received invitation
+	Accepted,			   // Invitation accepted
+	Declined,			   // Invitation declined
+	EstablishingTransport, // determining local session role
+	AwaitingReadyFlag,	   // waiting for remote to be ready
+	Connected,			   // Connection established
+	Failed,				   // connection failed
 	Disconnecting,		   // Teardown in progress
 };
 
@@ -43,7 +44,7 @@ struct ConnectionStatusUpdate
 	};
 
 	Type								  type{};
-	ConnectionPhase						  phase{};
+	ConnectionState						  state{};
 	DiscoveryEndpoint					  endpoint;
 	std::string							  message;
 	bool								  success{true};
