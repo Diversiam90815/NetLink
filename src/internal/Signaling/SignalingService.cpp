@@ -80,6 +80,22 @@ void netlink::SignalingService::deinit()
 }
 
 
+void netlink::SignalingService::registerPeer(const std::string &displayName, const std::string &ipv4, const int signalingPort)
+{
+	std::lock_guard<std::mutex> lock(mPeerRegistryMutex);
+	mPeerRegistry[displayName] = {ipv4, signalingPort};
+	NETLINK_LOG_DEBUG("Registered peer {} -> {}:{}", displayName, ipv4, signalingPort);
+}
+
+
+void netlink::SignalingService::unregisterPeer(const std::string &displayName)
+{
+	std::lock_guard<std::mutex> lock(mPeerRegistryMutex);
+	mPeerRegistry.erase(displayName);
+	NETLINK_LOG_DEBUG("Unregistered peer {}", displayName);
+}
+
+
 void netlink::SignalingService::sendConnectRequest(const std::string &targetIP, int targetSignalingPort, const std::string &displayName)
 {
 	SignalPacket packet{};
@@ -133,6 +149,66 @@ void netlink::SignalingService::sendReadyFlag(const std::string &targetIP, int t
 	packet.senderSignalingPort = mBoundPort;
 
 	sendPacket(targetIP, targetSignalingPort, packet);
+}
+
+
+void netlink::SignalingService::sendValidationRequest(const std::string &displayName, RemoteRequest request)
+{
+	auto peer = resolvePeer(displayName);
+
+	if (!peer.isValid())
+		return;
+
+	// @TODO: build packet and send
+	SignalPacket packet;
+
+	//	sendPacket(peer.IPv4, peer.signalingPort, );
+}
+
+
+void netlink::SignalingService::sendSecretResponse(const std::string &displayName, const std::string &secret)
+{
+	auto peer = resolvePeer(displayName);
+
+	if (!peer.isValid())
+		return;
+
+	// @TODO: build packet and send
+	SignalPacket packet;
+
+	//	sendPacket(peer.IPv4, peer.signalingPort, );
+}
+
+
+void netlink::SignalingService::sendVersionResponse(const std::string &displayName, const std::string &version)
+{
+	auto peer = resolvePeer(displayName);
+
+	if (!peer.isValid())
+		return;
+
+	// @TODO: build packet and send
+	SignalPacket packet;
+
+	//	sendPacket(peer.IPv4, peer.signalingPort, );
+}
+
+
+void				  netlink::SignalingService::sendValidationHandshake(const std::string &displayName) {}
+
+
+netlink::PeerEndpoint netlink::SignalingService::resolvePeer(const std::string &displayName) const
+{
+	std::lock_guard<std::mutex> lock(mPeerRegistryMutex);
+
+	auto						it = mPeerRegistry.find(displayName);
+	if (it != mPeerRegistry.end())
+	{
+		NETLINK_LOG_WARNING("Cannot resolve peer {}: not registered", displayName);
+		return {};
+	}
+
+	return it->second;
 }
 
 

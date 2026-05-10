@@ -13,23 +13,23 @@
 #include "TCP/TCPTransportFactory.h"
 #include "Messaging/RemoteCommunication.h"
 #include "ConnectionService/ConnectionService.h"
-#include "ConnectionService/PeerValidationService.h"
+#include "PeerValidation/PeerValidationService.h"
 
 
 struct netlink::NetLink::Impl
 {
-	NetLinkConfig		config;
-	NetLinkCallbacks	callbacks;
+	NetLinkConfig				   config;
+	NetLinkCallbacks			   callbacks;
 
-	asio::io_context			  ioContext;
-	DiscoveryService			  discovery{ioContext};
-	SignalingService			  signaling{ioContext};
-	netlink::TCPTransportFactory  transportFactory;
+	asio::io_context			   ioContext;
+	DiscoveryService			   discovery{ioContext};
+	SignalingService			   signaling{ioContext};
+	netlink::TCPTransportFactory   transportFactory;
 	netlink::PeerValidationService validation;
-	netlink::ConnectionService	  connectionService{ioContext, signaling, transportFactory, validation};
-	RemoteCommunication			  communication;
+	netlink::ConnectionService	   connectionService{ioContext, signaling, transportFactory, validation};
+	RemoteCommunication			   communication;
 
-	ConnectionState		connectionState{ConnectionState::None};
+	ConnectionState				   connectionState{ConnectionState::None};
 };
 
 
@@ -91,6 +91,22 @@ void			  netlink::NetLink::configure(const NetLinkConfig &config, const NetLinkC
 	};
 
 	pImpl->connectionService.setCallbacks(std::move(svcCB));
+
+	// Set callback for when a remote peer was found
+	pImpl->discovery.setOnRemoteFound(
+		[this](const DiscoveryEndpoint &ep)
+		{
+			pImpl->signaling.registerPeer(ep.displayName, ep.IPAddress, ep.signalingPort);
+			pImpl->validation.onPeerDiscovered(ep);
+		});
+
+	// Wire PeerValidationSendCallbacks
+	PeerValidationSendCallbacks sendCb;
+	sendCb.sendRequest		   = [this](const std::string &name, RemoteRequest req) { pImpl->signaling.sendValidationRequest(name, req); };
+	sendCb.sendSecretResponse  = [this](const std::string &name, const std::string &v) { pImpl->signaling.sendSecretResponse(name, v); };
+	sendCb.sendVersionResponse = [this](const std::string &name, const std::string &v) { pImpl->signaling.sendVersionResponse(name, v); };
+	sendCb.sendHandshake	   = [this](const std::string &name) { pImpl->signaling.sendValidationHandshake(name); };
+	pImpl->validation.setSendCallbacks(std::move(sendCb));
 }
 
 
@@ -136,7 +152,7 @@ bool netlink::NetLink::connectTo(const Endpoint &remote)
 	// Map public endpoint to internal DiscoveryEndpoint
 	DiscoveryEndpoint ep{remote.IPAddress, remote.port, remote.port, remote.displayName}; // @TODO: signalingport
 	pImpl->connectionService.requestConnection(ep);
-	
+
 	pImpl->connectionState = ConnectionState::Searching;
 
 	return true;

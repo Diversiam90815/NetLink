@@ -84,6 +84,8 @@ public:
 	ValidationResult validatePeer(const DiscoveryEndpoint &peer);
 	void			 clearValidatedPeer(const std::string &computerName);
 
+	void			 onPeerDiscovered(const DiscoveryEndpoint &remoteEndpoint);
+
 private:
 	// Validation logic
 	ValidationResult						 performValidation(const std::string &computerName);

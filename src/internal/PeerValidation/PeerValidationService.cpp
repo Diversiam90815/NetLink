@@ -96,6 +96,50 @@ void netlink::PeerValidationService::clearValidatedPeer(const std::string &compu
 }
 
 
+void netlink::PeerValidationService::onPeerDiscovered(const DiscoveryEndpoint &remoteEndpoint)
+{
+	NETLINK_LOG_INFO("Found a remote peer : {}", remoteEndpoint.displayName);
+
+	bool startedNewHandshake = false;
+
+	// Track handshake initiation
+	{
+		std::lock_guard<std::mutex> lock(mHandshakeMutex);
+		auto						it = mPendingHandshakes.find(remoteEndpoint.displayName);
+
+		if (it == mPendingHandshakes.end())
+		{
+			// There is no handshake yet, so we create one
+			RemoteHandshake handshake;
+			handshake.remoteName						   = remoteEndpoint.displayName;
+			handshake.remoteEndpoint					   = remoteEndpoint;
+			handshake.sent								   = false;
+			handshake.received							   = false;
+			handshake.initiatedTime						   = std::chrono::steady_clock::now();
+
+			mPendingHandshakes[remoteEndpoint.displayName] = handshake;
+			startedNewHandshake							   = true;
+		}
+		else
+		{
+			// update handshake with remote endpoint (it was received when receiving a handshake without the endpoint info
+			it->second.remoteEndpoint = remoteEndpoint;
+
+			NETLINK_LOG_DEBUG("Updated existing handshake for {} with RemoteEndpoint", remoteEndpoint.displayName);
+		}
+	}
+
+	if (startedNewHandshake)
+	{
+		TimeoutKey key{PeerValidationTimouts::Handshake, remoteEndpoint.displayName};
+		mTimeoutService.startTimeout(key, mConfig.handshakeTimeoutMs, [this](const TimeoutKey &key) { onTimeout(key); });
+	}
+
+	// send the handshake
+	sendHandshake(remoteEndpoint.displayName);
+}
+
+
 netlink::ValidationResult netlink::PeerValidationService::performValidation(const std::string &computerName)
 {
 	ValidationResult result;
@@ -423,15 +467,13 @@ void netlink::PeerValidationService::sendRequestToRemote(const std::string &comp
 
 bool netlink::PeerValidationService::checkVersionCompatibility(const std::string remoteVersion)
 {
-	// @TODO
-	return false;
+	return mLocalVersion == remoteVersion;
 }
 
 
 bool netlink::PeerValidationService::checkSecretCompatibility(const std::string remoteSecret)
 {
-	// @TODO
-	return false;
+	return mLocalSecret == remoteSecret;
 }
 
 
