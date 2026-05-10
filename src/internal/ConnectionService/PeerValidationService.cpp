@@ -220,7 +220,9 @@ void netlink::PeerValidationService::completePendingValidation(const std::string
 	// store the last result
 	mLastResult = result;
 
-	// @TODO: notify
+	// notify
+	if (mCallback)
+		mCallback(result);
 
 	// remove from pending
 	removePendingValidation(computerName);
@@ -267,7 +269,9 @@ void netlink::PeerValidationService::handleSecretRequest(const std::string &comp
 {
 	NETLINK_LOG_INFO("Handling secret request from {}", computerName);
 
-	// @TODO - send our secret to the remote
+	// Send our secret to the remote
+	if (mSendCallbacks.sendSecretResponse)
+		mSendCallbacks.sendSecretResponse(computerName, mLocalSecret);
 
 	NETLINK_LOG_DEBUG("Sent our secret answer to {}", computerName);
 }
@@ -277,7 +281,9 @@ void netlink::PeerValidationService::handleVersionRequest(const std::string &com
 {
 	NETLINK_LOG_INFO("Handling version request from {}", computerName);
 
-	// @TODO - send our version to the remote
+	// send our version to the remote
+	if (mSendCallbacks.sendVersionResponse)
+		mSendCallbacks.sendVersionResponse(computerName, mLocalVersion);
 
 	NETLINK_LOG_DEBUG("Sent our version answer to {}", computerName);
 }
@@ -406,7 +412,9 @@ void netlink::PeerValidationService::sendRequestToRemote(const std::string &comp
 
 	NETLINK_LOG_DEBUG("Sending request {} to {}", static_cast<int>(request), computerName);
 
-	// @TODO : send request
+	// send request
+	if (mSendCallbacks.sendRequest)
+		mSendCallbacks.sendRequest(computerName, request);
 
 	if (timeoutMS > 0)
 		mTimeoutService.startTimeout(key, timeoutMS, [this](const TimeoutKey &key) { onTimeout(key); });
@@ -441,7 +449,9 @@ void netlink::PeerValidationService::sendHandshake(const std::string &computerNa
 			it->second.sent = true;
 	}
 
-	// @TODO: send handshake
+	// send handshake
+	if (mSendCallbacks.sendHandshake)
+		mSendCallbacks.sendHandshake(computerName);
 
 	// check if handshake is complete
 	checkAndStartValidation(computerName);
@@ -524,7 +534,9 @@ void netlink::PeerValidationService::onTimeout(const TimeoutKey &key)
 		result.canConnect	  = false;
 		result.needsAction	  = false;
 
-		// @TODO: notify
+		// notify
+		if (mCallback)
+			mCallback(result);
 
 		// Remove pending validation
 		removePendingValidation(key.identifier);

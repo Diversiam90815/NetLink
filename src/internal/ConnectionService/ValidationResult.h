@@ -15,28 +15,6 @@
 namespace netlink
 {
 
-struct PeerValidationConfig
-{
-	bool enableVersionCheck{false};
-	bool enableSecretCheck{false};
-	int	 handshakeTimeoutMs{3000};
-	int	 versionRequestTimeoutMs{3000};
-	int	 secretRequestTimeoutMs{3000};
-};
-
-
-struct RemoteHandshake
-{
-	std::string							  remoteName{};
-	DiscoveryEndpoint					  remoteEndpoint{};
-	bool								  sent{false};
-	bool								  received{false};
-	std::chrono::steady_clock::time_point initiatedTime;
-
-	bool								  isComplete() const { return sent && received; }
-};
-
-
 struct PendingValidation
 {
 	std::string							  computerName{};

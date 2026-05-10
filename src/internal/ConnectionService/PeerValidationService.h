@@ -27,6 +27,38 @@ enum class RemoteRequest
 	Version = 2,
 };
 
+struct PeerValidationConfig
+{
+	bool enableVersionCheck{false};
+	bool enableSecretCheck{false};
+	int	 handshakeTimeoutMs{3000};
+	int	 versionRequestTimeoutMs{3000};
+	int	 secretRequestTimeoutMs{3000};
+};
+
+
+struct PeerValidationSendCallbacks
+{
+	// outgoing validation messages via SignalingService
+	std::function<void(const std::string &computerName, RemoteRequest)>			 sendRequest;
+	std::function<void(const std::string &computerName, const std::string &val)> sendSecretResponse;
+	std::function<void(const std::string &computerName, const std::string &val)> sendVersionResponse;
+	std::function<void(const std::string &computerName)>						 sendHandshake;
+};
+
+
+struct RemoteHandshake
+{
+	std::string							  remoteName{};
+	DiscoveryEndpoint					  remoteEndpoint{};
+	bool								  sent{false};
+	bool								  received{false};
+	std::chrono::steady_clock::time_point initiatedTime;
+
+	bool								  isComplete() const { return sent && received; }
+};
+
+
 namespace PeerValidationTimouts
 {
 constexpr const char *Handshake		 = "handshake";
@@ -45,7 +77,8 @@ public:
 
 	// Configuration
 	void			 setConfig(const PeerValidationConfig &config) { mConfig = config; }
-	void			 setValidationCallback(ValidationCallback cb) { mCallback = cb; }
+	void			 setValidationCallback(ValidationCallback cb) { mCallback = std::move(cb); }
+	void			 setSendCallbacks(PeerValidationSendCallbacks cb) { mSendCallbacks = std::move(cb); }
 
 	// Manual validation
 	ValidationResult validatePeer(const DiscoveryEndpoint &peer);
@@ -94,12 +127,13 @@ private:
 	PeerValidationConfig					 mConfig;
 	ValidationResult						 mLastResult;
 
-	std::string								 localVersion{};
-	std::string								 localSecret{};
+	std::string								 mLocalVersion{};
+	std::string								 mLocalSecret{};
 
 	TimeoutService							 mTimeoutService;
 
 	ValidationCallback						 mCallback;
+	PeerValidationSendCallbacks				 mSendCallbacks;
 
 	std::map<std::string, ValidationResult>	 mValidatedPeers;	  // key = Computername
 	std::mutex								 mValidatedPeerMutex;
