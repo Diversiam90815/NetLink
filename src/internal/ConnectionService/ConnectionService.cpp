@@ -14,11 +14,39 @@ netlink::ConnectionService::ConnectionService(asio::io_context &ioContext, Signa
 	: mIoContext(ioContext), mSignaling(signaling), mTransportFactory(transportFactory)
 {
 	SignalingCallbacks cb;
-	// cb.onConnectRequested	= [this](const SignalPacket &pkt) { onSignalConnectRequested(pkt); };
-	// cb.onConnectAccepted	= [this](const SignalPacket &pkt) { onSignalConnectAccepted(pkt); };
-	// cb.onConnectDeclined	= [this](const SignalPacket &pkt) { onSignalConnectDeclined(pkt); };
-	// cb.onDisconnectReceived = [this](const SignalPacket &pkt) { onSignalDisconnect(pkt); };
-	// cb.onReadyFlagReceived	= [this](const SignalPacket &pkt) { onSignalReadyFlag(pkt); };
+	cb.onConnectRequested	= [this](const SignalPacket &pkt) { onReceivedInvitation(pkt.displayName); };
+	cb.onConnectAccepted	= [this](const SignalPacket &pkt) { onReceivedAnswerToInvite(pkt.displayName, true, ""); };
+	cb.onConnectDeclined	= [this](const SignalPacket &pkt) { onReceivedAnswerToInvite(pkt.displayName, false, "Declined"); };
+
+	cb.onDisconnectReceived = [this](const SignalPacket &pkt)
+	{
+		asio::post(mIoContext,
+				   [this, pkt]()
+				   {
+					   NETLINK_LOG_INFO("Remote {} disconnected", pkt.displayName);
+
+					   clearCurrentConnection();
+
+					   if (mCallbacks.onDisconnected)
+						   mCallbacks.onDisconnected();
+				   });
+	};
+
+	cb.onReadyFlagReceived = [this](const SignalPacket &pkt)
+	{
+		asio::post(mIoContext,
+				   [this, pkt]()
+				   {
+					   // pkt.senderPort carries the remote's TCP bound port (Acceptor advertises it)
+					   std::lock_guard<std::mutex> lock(mConnectingMutex);
+					   if (!mCurrentRequest.has_value())
+						   return;
+
+					   mCurrentRequest->remote.port = pkt.senderPort; // update with actual TCP port
+					   onReceivedConnectionReadyFlag(pkt.displayName);
+				   });
+	};
+
 	mSignaling.setCallbacks(std::move(cb));
 }
 
@@ -245,25 +273,78 @@ netlink::ConnectionState netlink::ConnectionService::getConnectionState() const
 
 bool netlink::ConnectionService::sendConnectionInvitation(const std::string &computerName)
 {
-	return false;
+	auto result = findValidationResult(computerName);
+
+	if (!result.has_value())
+	{
+		NETLINK_LOG_ERROR("No valid result for {}", computerName);
+		return false;
+	}
+
+	const auto &ep = result->remoteEndpoint;
+
+	NETLINK_LOG_DEBUG("Sending connect request to {}:{}", ep.IPAddress, ep.signalingPort);
+
+	mSignaling.sendConnectRequest(ep.IPAddress, ep.signalingPort, computerName);
+
+	return true;
 }
 
 
 bool netlink::ConnectionService::sendDisconnectMessage(const std::string &computerName)
 {
-	return false;
+	auto result = findValidationResult(computerName);
+
+	if (!result.has_value())
+	{
+		NETLINK_LOG_WARNING("sendDisconnectMessage: no validation result for {}", computerName);
+		return false;
+	}
+
+	const auto &ep = result->remoteEndpoint;
+
+	mSignaling.sendDisconnect(ep.IPAddress, ep.signalingPort);
+
+	return true;
 }
 
 
 bool netlink::ConnectionService::answerInvitation(const std::string &computerName, const bool connectionAccepted, const std::string &reason)
 {
-	return false;
+	auto result = findValidationResult(computerName);
+
+	if (!result.has_value())
+	{
+		NETLINK_LOG_ERROR("answerInvitation: no validation result for {}", computerName);
+		return false;
+	}
+
+	const auto &ep = result->remoteEndpoint;
+
+	if (connectionAccepted)
+		mSignaling.sendConnectAccept(ep.IPAddress, ep.signalingPort);
+	else
+		mSignaling.sendConnectDecline(ep.IPAddress, ep.signalingPort);
+
+	return true;
 }
 
 
 bool netlink::ConnectionService::sendConnectionReadyFlag(const std::string &computerName, const bool flag)
 {
-	return false;
+	auto result = findValidationResult(computerName);
+
+	if (!result.has_value())
+	{
+		NETLINK_LOG_ERROR("sendConnectionReadyFlag: no validation result for {}", computerName);
+		return false;
+	}
+
+	const auto &ep = result->remoteEndpoint;
+
+	mSignaling.sendReadyFlag(ep.IPAddress, ep.signalingPort);
+
+	return true;
 }
 
 
@@ -320,7 +401,30 @@ void netlink::ConnectionService::onReceivedAnswerToInvite(const std::string &com
 }
 
 
-void netlink::ConnectionService::onReceivedConnectionReadyFlag(const std::string &computerName) {}
+void netlink::ConnectionService::onReceivedConnectionReadyFlag(const std::string &computerName)
+{
+	// Caller must hold mConnectingMutex
+
+	if (!mCurrentRequest.has_value())
+	{
+		NETLINK_LOG_WARNING("Received ready flag but no active request");
+		return;
+	}
+
+	NETLINK_LOG_INFO("Received ready flag from {}", computerName);
+
+	mTimeoutService.cancelTimeout({ConnectionTimeouts::ReadyFlag, computerName});
+	mRemoteReady.store(true);
+
+	// If we are the Connector, we now know the Acceptor's bound port from the packet
+	// (port was updated in the callback lambda before this call)
+	if (mCurrentRequest->localRole == SessionRole::Connector && mCurrentRequest->client)
+	{
+		NETLINK_LOG_INFO("Connector: connecting to {}:{}", mCurrentRequest->remote.IPAddress, mCurrentRequest->remote.port);
+		mCurrentRequest->state = ConnectionState::EstablishingTransport;
+		mCurrentRequest->client->connect(mCurrentRequest->remote.IPAddress, static_cast<unsigned short>(mCurrentRequest->remote.port));
+	}
+}
 
 
 void netlink::ConnectionService::onPeerValidated(const ValidationResult &peerValidation)
