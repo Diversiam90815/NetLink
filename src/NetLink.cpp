@@ -14,6 +14,7 @@
 #include "Messaging/RemoteCommunication.h"
 #include "ConnectionService/ConnectionService.h"
 #include "PeerValidation/PeerValidationService.h"
+#include "Network/NetworkInformation.h"
 
 
 struct netlink::NetLink::Impl
@@ -24,6 +25,7 @@ struct netlink::NetLink::Impl
 	asio::io_context			   ioContext;
 	DiscoveryService			   discovery{ioContext};
 	SignalingService			   signaling{ioContext};
+	netlink::NetworkInformation	   network;
 	netlink::TCPTransportFactory   transportFactory;
 	netlink::PeerValidationService validation;
 	netlink::ConnectionService	   connectionService{ioContext, signaling, transportFactory};
@@ -31,6 +33,24 @@ struct netlink::NetLink::Impl
 
 	ConnectionState				   connectionState{ConnectionState::None};
 };
+
+
+namespace
+{
+
+netlink::NetworkAdapter toPublicAdapter(const netlink::NetworkAdapterInternal &internal)
+{
+	netlink::NetworkAdapter pub;
+	pub.adapterName = internal.AdapterName;
+	pub.networkName = internal.NetworkName;
+	pub.ipv4		= internal.IPv4;
+	pub.id			= internal.ID;
+	pub.priority	= internal.Priority;
+	return pub;
+}
+
+} // namespace
+
 
 
 netlink::NetLink::NetLink() : pImpl(std::make_unique<Impl>()) {}
@@ -153,9 +173,7 @@ bool netlink::NetLink::connectTo(const Endpoint &remote)
 }
 
 
-void netlink::NetLink::respondToConnection(bool accepted)
-{
-}
+void					 netlink::NetLink::respondToConnection(bool accepted) {}
 
 
 void					 netlink::NetLink::disconnect() {}
@@ -185,11 +203,22 @@ bool netlink::NetLink::send(uint32_t type, const std::vector<uint8_t> &payload)
 
 std::vector<netlink::NetworkAdapter> netlink::NetLink::getAvailableAdapters()
 {
-	return std::vector<NetworkAdapter>();
+	const auto				   &internal = pImpl->network.getAvailableNetworkAdapters();
+
+	std::vector<NetworkAdapter> result;
+	result.reserve(internal.size());
+
+	for (const auto &a : internal)
+	{
+		if (a.Priority != AdapterPriority::Suppressed) // hide loopback etc. from app
+			result.push_back(toPublicAdapter(a));
+	}
+
+	return result;
 }
 
 
 bool netlink::NetLink::setActiveAdapter(const int &adapterID)
 {
-	return false;
+	return pImpl->network.setCurrentNetworkAdapter(adapterID);
 }

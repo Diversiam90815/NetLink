@@ -41,7 +41,7 @@ enum class AdapterTypes
 
 enum class AdapterPriority
 {
-	Surpressed = 1,
+	Suppressed = 1,
 	Available  = 2,
 	Preferred  = 3
 };
@@ -58,8 +58,8 @@ struct NetworkAdapterInternal
 						   const int		  id,
 						   bool				  isDefaultRoute,
 						   AdapterTypes		  type,
-						   AdapterPriority	  suggestionLevel)
-		: AdapterName(adapterName), NetworkName(networkName), IPv4(ipv4), Subnet(subnet), ID(id), IsDefaultRoute(isDefaultRoute), Type(type), priority(suggestionLevel)
+						   AdapterPriority	  priority)
+		: AdapterName(adapterName), NetworkName(networkName), IPv4(ipv4), Subnet(subnet), ID(id), IsDefaultRoute(isDefaultRoute), Type(type), Priority(priority)
 	{
 		Eligible = filterSubnetMask();
 	}
@@ -80,7 +80,7 @@ struct NetworkAdapterInternal
 	bool			IsDefaultRoute{false};
 	bool			Eligible{false};
 	AdapterTypes	Type{AdapterTypes::Other};
-	AdapterPriority priority{};
+	AdapterPriority Priority{};
 };
 
 
@@ -97,8 +97,8 @@ public:
 
 	void									   processAdapter();
 
-	void									   setCurrentNetworkAdapter(const int adapterID);
-	void									   setCurrentNetworkAdapter(const NetworkAdapterInternal &adapter);
+	bool									   setCurrentNetworkAdapter(const int adapterID);
+	bool									   setCurrentNetworkAdapter(const NetworkAdapterInternal &adapter);
 	const NetworkAdapterInternal			  &getCurrentNetworkAdapter() const;
 
 	NetworkAdapterInternal					   isAdapterCurrentlyAvailable(const NetworkAdapterInternal &adapter);

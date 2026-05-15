@@ -36,10 +36,11 @@ struct NetworkAdapter
 	std::string		networkName{};
 	std::string		ipv4{};
 	int				id{};
-	AdapterPriority priority{AdapterPriority::Surpressed};
+	AdapterPriority priority{AdapterPriority::Suppressed};
 
 	bool			isValid() const { return !adapterName.empty() && !networkName.empty() && !ipv4.empty() && id != 0; }
 };
+
 
 // Opaque message envelope
 struct Message

@@ -133,24 +133,24 @@ void netlink::NetworkInformation::saveAdapter(const PIP_ADAPTER_ADDRESSES adapte
 }
 
 
-void netlink::NetworkInformation::setCurrentNetworkAdapter(const int adapterID)
+bool netlink::NetworkInformation::setCurrentNetworkAdapter(const int adapterID)
 {
 	auto it = std::find(mNetworkAdapters.begin(), mNetworkAdapters.end(), [adapterID](const NetworkAdapterInternal &a) { return a.ID == adapterID; });
 
 	if (it == mNetworkAdapters.end())
 	{
 		NETLINK_LOG_WARNING("No adapter found with ID {}", adapterID);
-		return;
+		return false;
 	}
 
-	setCurrentNetworkAdapter(*it);
+	return setCurrentNetworkAdapter(*it);
 }
 
 
-void netlink::NetworkInformation::setCurrentNetworkAdapter(const NetworkAdapterInternal &adapter)
+bool netlink::NetworkInformation::setCurrentNetworkAdapter(const NetworkAdapterInternal &adapter)
 {
 	if (mCurrentNetworkAdapter == adapter)
-		return;
+		return false;
 
 	mCurrentNetworkAdapter = adapter;
 
@@ -159,6 +159,8 @@ void netlink::NetworkInformation::setCurrentNetworkAdapter(const NetworkAdapterI
 	NETLINK_LOG_INFO("\t IPv4: \t\t\t{}", adapter.IPv4);
 	NETLINK_LOG_INFO("\t Subnet: \t\t{}", adapter.Subnet);
 	NETLINK_LOG_INFO("\t ID: \t\t\t{}", adapter.ID);
+
+	return true;
 }
 
 
@@ -251,7 +253,7 @@ netlink::AdapterPriority netlink::NetworkInformation::determinePriority(bool isD
 	//	- IPv4 enabled (as currently we just support IPv4)
 
 	if (type == AdapterTypes::Loopback)
-		return netlink::AdapterPriority::Surpressed;
+		return netlink::AdapterPriority::Suppressed;
 
 	if (status != IfOperStatusUp)
 		return netlink::AdapterPriority::Available;
