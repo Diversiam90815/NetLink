@@ -121,7 +121,7 @@ void netlink::NetworkInformation::saveAdapter(const PIP_ADAPTER_ADDRESSES adapte
 			std::string				 networkName	  = getNetworkName(type, adapter->Luid, addressString);
 			const bool				 isDefaultRoute	  = defaultRouteLuidValues.find(adapter->Luid.Value) != defaultRouteLuidValues.end();
 			bool					 ipv4Enabled	  = adapter->Flags & 0x80;
-			netlink::SuggestionLevel visibility		  = determineSuggestionLevel(isDefaultRoute, ipv4Enabled, type, adapter->OperStatus);
+			netlink::AdapterPriority visibility		  = determinePriority(isDefaultRoute, ipv4Enabled, type, adapter->OperStatus);
 
 			auto					 createdAdapter	  = NetworkAdapter(adapterName, networkName, addressString, subnetMaskString, ID, isDefaultRoute, type, visibility);
 
@@ -228,27 +228,27 @@ netlink::AdapterTypes netlink::NetworkInformation::filterAdapterType(const DWORD
 }
 
 
-netlink::SuggestionLevel netlink::NetworkInformation::determineSuggestionLevel(bool isDefaultRoute, bool IPv4Enabled, AdapterTypes type, IF_OPER_STATUS status)
+netlink::AdapterPriority netlink::NetworkInformation::determinePriority(bool isDefaultRoute, bool IPv4Enabled, AdapterTypes type, IF_OPER_STATUS status)
 {
-	// Recommended device should be
+	// Preferred device should be
 	//	- Real
 	//	- UP (currently operational)
 	//	- preferably default route
 	//	- IPv4 enabled (as currently we just support IPv4)
 
 	if (type == AdapterTypes::Loopback)
-		return netlink::SuggestionLevel::Hidden;
+		return netlink::AdapterPriority::Surpressed;
 
 	if (status != IfOperStatusUp)
-		return netlink::SuggestionLevel::Visible;
+		return netlink::AdapterPriority::Available;
 
 	if (!isDefaultRoute || !IPv4Enabled)
-		return netlink::SuggestionLevel::Visible;
+		return netlink::AdapterPriority::Available;
 
 	if (type != AdapterTypes::Ethernet && type != AdapterTypes::WiFi)
-		return netlink::SuggestionLevel::Visible;
+		return netlink::AdapterPriority::Available;
 
-	return netlink::SuggestionLevel::Recommended;
+	return netlink::AdapterPriority::Preferred;
 }
 
 

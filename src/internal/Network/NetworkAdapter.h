@@ -23,11 +23,11 @@ enum class AdapterTypes
 };
 
 
-enum class SuggestionLevel
+enum class AdapterPriority
 {
-	Hidden		= 1,
-	Visible		= 2,
-	Recommended = 3
+	Surpressed = 1,
+	Available  = 2,
+	Preferred  = 3
 };
 
 
@@ -42,8 +42,8 @@ struct NetworkAdapter
 				   const int		  id,
 				   bool				  isDefaultRoute,
 				   AdapterTypes		  type,
-				   SuggestionLevel	  suggestionLevel)
-		: AdapterName(adapterName), NetworkName(networkName), IPv4(ipv4), Subnet(subnet), ID(id), IsDefaultRoute(isDefaultRoute), Type(type), Level(suggestionLevel)
+				   AdapterPriority	  suggestionLevel)
+		: AdapterName(adapterName), NetworkName(networkName), IPv4(ipv4), Subnet(subnet), ID(id), IsDefaultRoute(isDefaultRoute), Type(type), priority(suggestionLevel)
 	{
 		Eligible = filterSubnetMask();
 	}
@@ -64,7 +64,7 @@ struct NetworkAdapter
 	bool			IsDefaultRoute{false};
 	bool			Eligible{false};
 	AdapterTypes	Type{AdapterTypes::Other};
-	SuggestionLevel Level{};
+	AdapterPriority priority{};
 };
 
 
