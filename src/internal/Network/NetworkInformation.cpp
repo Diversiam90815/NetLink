@@ -123,7 +123,7 @@ void netlink::NetworkInformation::saveAdapter(const PIP_ADAPTER_ADDRESSES adapte
 			bool					 ipv4Enabled	  = adapter->Flags & 0x80;
 			netlink::AdapterPriority visibility		  = determinePriority(isDefaultRoute, ipv4Enabled, type, adapter->OperStatus);
 
-			auto					 createdAdapter	  = NetworkAdapter(adapterName, networkName, addressString, subnetMaskString, ID, isDefaultRoute, type, visibility);
+			auto					 createdAdapter	  = NetworkAdapterInternal(adapterName, networkName, addressString, subnetMaskString, ID, isDefaultRoute, type, visibility);
 
 			mNetworkAdapters.push_back(createdAdapter);
 		}
@@ -135,7 +135,7 @@ void netlink::NetworkInformation::saveAdapter(const PIP_ADAPTER_ADDRESSES adapte
 
 void netlink::NetworkInformation::setCurrentNetworkAdapter(const int adapterID)
 {
-	auto it = std::find(mNetworkAdapters.begin(), mNetworkAdapters.end(), [adapterID](const NetworkAdapter &a) { return a.ID == adapterID; });
+	auto it = std::find(mNetworkAdapters.begin(), mNetworkAdapters.end(), [adapterID](const NetworkAdapterInternal &a) { return a.ID == adapterID; });
 
 	if (it == mNetworkAdapters.end())
 	{
@@ -147,7 +147,7 @@ void netlink::NetworkInformation::setCurrentNetworkAdapter(const int adapterID)
 }
 
 
-void netlink::NetworkInformation::setCurrentNetworkAdapter(const NetworkAdapter &adapter)
+void netlink::NetworkInformation::setCurrentNetworkAdapter(const NetworkAdapterInternal &adapter)
 {
 	if (mCurrentNetworkAdapter == adapter)
 		return;
@@ -162,13 +162,13 @@ void netlink::NetworkInformation::setCurrentNetworkAdapter(const NetworkAdapter 
 }
 
 
-const netlink::NetworkAdapter &netlink::NetworkInformation::getCurrentNetworkAdapter() const
+const netlink::NetworkAdapterInternal &netlink::NetworkInformation::getCurrentNetworkAdapter() const
 {
 	return mCurrentNetworkAdapter;
 }
 
 
-netlink::NetworkAdapter netlink::NetworkInformation::isAdapterCurrentlyAvailable(const NetworkAdapter &adapter)
+netlink::NetworkAdapterInternal netlink::NetworkInformation::isAdapterCurrentlyAvailable(const NetworkAdapterInternal &adapter)
 {
 	// If the adapter is available we return the adapter current version (with maybe a new ID set)
 	for (auto &it : mNetworkAdapters)
@@ -181,7 +181,7 @@ netlink::NetworkAdapter netlink::NetworkInformation::isAdapterCurrentlyAvailable
 }
 
 
-const std::vector<netlink::NetworkAdapter> &netlink::NetworkInformation::getAvailableNetworkAdapters() const
+const std::vector<netlink::NetworkAdapterInternal> &netlink::NetworkInformation::getAvailableNetworkAdapters() const
 {
 	return mNetworkAdapters;
 }

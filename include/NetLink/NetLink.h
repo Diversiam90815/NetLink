@@ -32,14 +32,13 @@ struct Endpoint
 
 struct NetworkAdapter
 {
-	std::string adapterName{};
-	std::string networkName{};
-	std::string ipv4{};
-	std::string subnet{};
-	int			id{};
-	bool		isDefaultRoute{false};
+	std::string		adapterName{};
+	std::string		networkName{};
+	std::string		ipv4{};
+	int				id{};
+	AdapterPriority priority{AdapterPriority::Surpressed};
 
-	bool		isValid() const { return !adapterName.empty() && !networkName.empty() && !ipv4.empty() && id != 0; }
+	bool			isValid() const { return !adapterName.empty() && !networkName.empty() && !ipv4.empty() && id != 0; }
 };
 
 // Opaque message envelope

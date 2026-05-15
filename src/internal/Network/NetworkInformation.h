@@ -23,11 +23,66 @@
 #include <unordered_set>
 #include <memory>
 
-#include "NetworkAdapter.h"
 #include "NetLinkLog.h"
+
 
 namespace netlink
 {
+
+enum class AdapterTypes
+{
+	Ethernet = 1,
+	WiFi	 = 2,
+	Loopback = 3,
+	Virtual	 = 4,
+	Other	 = 5
+};
+
+
+enum class AdapterPriority
+{
+	Surpressed = 1,
+	Available  = 2,
+	Preferred  = 3
+};
+
+
+struct NetworkAdapterInternal
+{
+	NetworkAdapterInternal() = default;
+
+	NetworkAdapterInternal(const std::string &adapterName,
+						   const std::string &networkName,
+						   const std::string &ipv4,
+						   const std::string &subnet,
+						   const int		  id,
+						   bool				  isDefaultRoute,
+						   AdapterTypes		  type,
+						   AdapterPriority	  suggestionLevel)
+		: AdapterName(adapterName), NetworkName(networkName), IPv4(ipv4), Subnet(subnet), ID(id), IsDefaultRoute(isDefaultRoute), Type(type), priority(suggestionLevel)
+	{
+		Eligible = filterSubnetMask();
+	}
+
+
+	bool			operator==(const NetworkAdapterInternal &other) const { return std::tie(AdapterName, Subnet) == std::tie(other.AdapterName, other.Subnet); }
+	bool			operator!=(const NetworkAdapterInternal &other) const { return !(*this == other); }
+
+	bool			isValid() const { return !AdapterName.empty() && !IPv4.empty() && ID != 0; }
+
+	bool			filterSubnetMask() const { return Subnet == "255.255.255.0"; }
+
+	std::string		AdapterName{};
+	std::string		NetworkName{};
+	std::string		IPv4{};
+	std::string		Subnet{};
+	int				ID{0};
+	bool			IsDefaultRoute{false};
+	bool			Eligible{false};
+	AdapterTypes	Type{AdapterTypes::Other};
+	AdapterPriority priority{};
+};
+
 
 
 class NetworkInformation
@@ -36,19 +91,19 @@ public:
 	NetworkInformation() = default;
 	~NetworkInformation();
 
-	bool							   init();
+	bool									   init();
 
-	void							   deinit();
+	void									   deinit();
 
-	void							   processAdapter();
+	void									   processAdapter();
 
-	void							   setCurrentNetworkAdapter(const int adapterID);
-	void							   setCurrentNetworkAdapter(const NetworkAdapter &adapter);
-	const NetworkAdapter			  &getCurrentNetworkAdapter() const;
+	void									   setCurrentNetworkAdapter(const int adapterID);
+	void									   setCurrentNetworkAdapter(const NetworkAdapterInternal &adapter);
+	const NetworkAdapterInternal			  &getCurrentNetworkAdapter() const;
 
-	NetworkAdapter					   isAdapterCurrentlyAvailable(const NetworkAdapter &adapter);
+	NetworkAdapterInternal					   isAdapterCurrentlyAvailable(const NetworkAdapterInternal &adapter);
 
-	const std::vector<NetworkAdapter> &getAvailableNetworkAdapters() const;
+	const std::vector<NetworkAdapterInternal> &getAvailableNetworkAdapters() const;
 
 
 private:
@@ -132,17 +187,17 @@ private:
 	}
 
 
-	AdapterBuffer					mAdapterAddresses{nullptr, [](IP_ADAPTER_ADDRESSES *p)
+	AdapterBuffer						mAdapterAddresses{nullptr, [](IP_ADAPTER_ADDRESSES *p)
 									  {
 										  if (p)
 											  free(p);
 									  }};
-	ULONG							mOutBufLen{0};
+	ULONG								mOutBufLen{0};
 
-	std::unique_ptr<WinsockSession> mWinsockSession;
+	std::unique_ptr<WinsockSession>		mWinsockSession;
 
-	std::vector<NetworkAdapter>		mNetworkAdapters{};
-	NetworkAdapter					mCurrentNetworkAdapter{};
+	std::vector<NetworkAdapterInternal> mNetworkAdapters{};
+	NetworkAdapterInternal				mCurrentNetworkAdapter{};
 };
 
 
