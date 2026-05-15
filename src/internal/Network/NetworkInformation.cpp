@@ -133,6 +133,20 @@ void netlink::NetworkInformation::saveAdapter(const PIP_ADAPTER_ADDRESSES adapte
 }
 
 
+void netlink::NetworkInformation::setCurrentNetworkAdapter(const int adapterID)
+{
+	auto it = std::find(mNetworkAdapters.begin(), mNetworkAdapters.end(), [adapterID](const NetworkAdapter &a) { return a.ID == adapterID; });
+
+	if (it == mNetworkAdapters.end())
+	{
+		NETLINK_LOG_WARNING("No adapter found with ID {}", adapterID);
+		return;
+	}
+
+	setCurrentNetworkAdapter(*it);
+}
+
+
 void netlink::NetworkInformation::setCurrentNetworkAdapter(const NetworkAdapter &adapter)
 {
 	if (mCurrentNetworkAdapter == adapter)

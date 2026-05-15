@@ -42,6 +42,7 @@ public:
 
 	void							   processAdapter();
 
+	void							   setCurrentNetworkAdapter(const int adapterID);
 	void							   setCurrentNetworkAdapter(const NetworkAdapter &adapter);
 	const NetworkAdapter			  &getCurrentNetworkAdapter() const;
 
