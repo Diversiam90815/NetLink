@@ -202,7 +202,8 @@ netlink::PeerEndpoint netlink::SignalingService::resolvePeer(const std::string &
 	std::lock_guard<std::mutex> lock(mPeerRegistryMutex);
 
 	auto						it = mPeerRegistry.find(displayName);
-	if (it != mPeerRegistry.end())
+	auto						it = mPeerRegistry.find(computerName);
+	if (it == mPeerRegistry.end())
 	{
 		NETLINK_LOG_WARNING("Cannot resolve peer {}: not registered", displayName);
 		return {};
