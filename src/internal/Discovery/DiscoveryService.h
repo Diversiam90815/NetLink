@@ -28,7 +28,6 @@ struct DiscoveryConfig
 {
 	std::string	   displayName{};
 	std::string	   localIPv4{};
-	unsigned short port{0};
 	int			   discoveryPort{5555};
 	std::string	   broadCastAddress{"255.255.255.255"};
 };

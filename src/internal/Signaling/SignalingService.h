@@ -30,6 +30,7 @@ struct SignalingCallbacks
 	std::function<void(const SignalPacket &)> onConnectDeclined;
 	std::function<void(const SignalPacket &)> onDisconnectReceived;
 	std::function<void(const SignalPacket &)> onReadyFlagReceived;
+	std::function<void(const SignalPacket &)> onDataPortReceived;
 };
 
 
@@ -59,17 +60,17 @@ public:
 	void registerPeer(const std::string &displayName, const std::string &ipv4, const int signalingPort);
 	void unregisterPeer(const std::string &displayName);
 
-	void sendConnectRequest(const std::string &targetIP, int targetSignalingPort, const std::string &displayName);
-	void sendConnectAccept(const std::string &targetIP, int targetSignalingPort);
-	void sendConnectDecline(const std::string &targetIP, int targetSignalingPort);
-	void sendDisconnect(const std::string &targetIP, int targetSignalingPort);
-	void sendReadyFlag(const std::string &targetIP, int targetSignalingPort);
+	void sendConnectRequest(const std::string &computerName);
+	void sendConnectAccept(const std::string &computerName);
+	void sendConnectDecline(const std::string &computerName);
+	void sendDisconnect(const std::string &computerName);
+	void sendReadyFlag(const std::string &computerName);
 
 	// Validation signaling (called via PeerValidationSendCallbacks)
-	void sendValidationRequest(const std::string &displayName, RemoteRequest request);
-	void sendSecretResponse(const std::string &displayName, const std::string &secret);
-	void sendVersionResponse(const std::string &displayName, const std::string &version);
-	void sendValidationHandshake(const std::string &displayName);
+	void sendValidationRequest(const std::string &computerName, RemoteRequest request);
+	void sendSecretResponse(const std::string &computerName, const std::string &secret);
+	void sendVersionResponse(const std::string &computerName, const std::string &version);
+	void sendValidationHandshake(const std::string &computerName);
 
 private:
 	PeerEndpoint						resolvePeer(const std::string &displayName) const;

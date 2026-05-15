@@ -128,7 +128,7 @@ void			  netlink::NetLink::configure(const NetLinkConfig &config, const NetLinkC
 	pImpl->discovery.setOnRemoteFound(
 		[this](const DiscoveryEndpoint &ep)
 		{
-			pImpl->signaling.registerPeer(ep.displayName, ep.IPAddress, ep.signalingPort);
+			pImpl->signaling.registerPeer(ep.displayName, ep.IPAddress, ep.port);
 			pImpl->validation.onPeerDiscovered(ep);
 		});
 

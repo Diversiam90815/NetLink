@@ -281,11 +281,9 @@ bool netlink::ConnectionService::sendConnectionInvitation(const std::string &com
 		return false;
 	}
 
-	const auto &ep = result->remoteEndpoint;
+	NETLINK_LOG_DEBUG("Sending connect request to {}", computerName);
 
-	NETLINK_LOG_DEBUG("Sending connect request to {}:{}", ep.IPAddress, ep.signalingPort);
-
-	mSignaling.sendConnectRequest(ep.IPAddress, ep.signalingPort, computerName);
+	mSignaling.sendConnectRequest(computerName);
 
 	return true;
 }
@@ -301,9 +299,7 @@ bool netlink::ConnectionService::sendDisconnectMessage(const std::string &comput
 		return false;
 	}
 
-	const auto &ep = result->remoteEndpoint;
-
-	mSignaling.sendDisconnect(ep.IPAddress, ep.signalingPort);
+	mSignaling.sendDisconnect(computerName);
 
 	return true;
 }
@@ -319,12 +315,10 @@ bool netlink::ConnectionService::answerInvitation(const std::string &computerNam
 		return false;
 	}
 
-	const auto &ep = result->remoteEndpoint;
-
 	if (connectionAccepted)
-		mSignaling.sendConnectAccept(ep.IPAddress, ep.signalingPort);
+		mSignaling.sendConnectAccept(computerName);
 	else
-		mSignaling.sendConnectDecline(ep.IPAddress, ep.signalingPort);
+		mSignaling.sendConnectDecline(computerName);
 
 	return true;
 }
@@ -340,9 +334,7 @@ bool netlink::ConnectionService::sendConnectionReadyFlag(const std::string &comp
 		return false;
 	}
 
-	const auto &ep = result->remoteEndpoint;
-
-	mSignaling.sendReadyFlag(ep.IPAddress, ep.signalingPort);
+	mSignaling.sendReadyFlag(computerName);
 
 	return true;
 }

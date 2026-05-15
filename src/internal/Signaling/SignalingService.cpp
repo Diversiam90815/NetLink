@@ -96,65 +96,88 @@ void netlink::SignalingService::unregisterPeer(const std::string &displayName)
 }
 
 
-void netlink::SignalingService::sendConnectRequest(const std::string &targetIP, int targetSignalingPort, const std::string &displayName)
+void netlink::SignalingService::sendConnectRequest(const std::string &computerName)
 {
-	SignalPacket packet{};
-	packet.signalType		   = SignalType::ConnectRequest;
-	packet.senderIP			   = mSocket.local_endpoint().address().to_string();
-	packet.senderPort		   = 0; // TCP port filled by caller or Impl
-	packet.senderSignalingPort = mBoundPort;
-	packet.displayName		   = displayName;
+	auto peer = resolvePeer(computerName);
+	if (!peer.isValid())
+		return;
 
-	sendPacket(targetIP, targetSignalingPort, packet);
+	SignalPacket packet{};
+	packet.signalType  = SignalType::ConnectRequest;
+	packet.senderIP	   = mSocket.local_endpoint().address().to_string();
+	packet.senderPort  = mBoundPort;
+	packet.displayName = computerName;
+
+	sendPacket(peer.IPv4, peer.signalingPort, packet);
 }
 
 
-void netlink::SignalingService::sendConnectAccept(const std::string &targetIP, int targetSignalingPort)
+void netlink::SignalingService::sendConnectAccept(const std::string &computerName)
 {
-	SignalPacket packet{};
-	packet.signalType		   = SignalType::ConnectAccept;
-	packet.senderIP			   = mSocket.local_endpoint().address().to_string();
-	packet.senderSignalingPort = mBoundPort;
+	auto peer = resolvePeer(computerName);
+	if (!peer.isValid())
+		return;
 
-	sendPacket(targetIP, targetSignalingPort, packet);
+	SignalPacket packet{};
+	packet.signalType  = SignalType::ConnectAccept;
+	packet.senderIP	   = mSocket.local_endpoint().address().to_string();
+	packet.senderPort  = mBoundPort;
+	packet.displayName = computerName;
+
+	sendPacket(peer.IPv4, peer.signalingPort, packet);
 }
 
 
-void netlink::SignalingService::sendConnectDecline(const std::string &targetIP, int targetSignalingPort)
+void netlink::SignalingService::sendConnectDecline(const std::string &computerName)
 {
-	SignalPacket packet{};
-	packet.signalType		   = SignalType::ConnectDecline;
-	packet.senderIP			   = mSocket.local_endpoint().address().to_string();
-	packet.senderSignalingPort = mBoundPort;
+	auto peer = resolvePeer(computerName);
+	if (!peer.isValid())
+		return;
 
-	sendPacket(targetIP, targetSignalingPort, packet);
+	SignalPacket packet{};
+	packet.signalType  = SignalType::ConnectDecline;
+	packet.senderIP	   = mSocket.local_endpoint().address().to_string();
+	packet.senderPort  = mBoundPort;
+	packet.displayName = computerName;
+
+	sendPacket(peer.IPv4, peer.signalingPort, packet);
 }
 
 
-void netlink::SignalingService::sendDisconnect(const std::string &targetIP, int targetSignalingPort)
+void netlink::SignalingService::sendDisconnect(const std::string &computerName)
 {
-	SignalPacket packet{};
-	packet.signalType		   = SignalType::Disconnect;
-	packet.senderIP			   = mSocket.local_endpoint().address().to_string();
-	packet.senderSignalingPort = mBoundPort;
+	auto peer = resolvePeer(computerName);
+	if (!peer.isValid())
+		return;
 
-	sendPacket(targetIP, targetSignalingPort, packet);
+	SignalPacket packet{};
+	packet.signalType  = SignalType::Disconnect;
+	packet.senderIP	   = mSocket.local_endpoint().address().to_string();
+	packet.senderPort  = mBoundPort;
+	packet.displayName = computerName;
+
+	sendPacket(peer.IPv4, peer.signalingPort, packet);
 }
 
-void netlink::SignalingService::sendReadyFlag(const std::string &targetIP, int targetSignalingPort)
+void netlink::SignalingService::sendReadyFlag(const std::string &computerName)
 {
-	SignalPacket packet{};
-	packet.signalType		   = SignalType::ReadyFlag;
-	packet.senderIP			   = mSocket.local_endpoint().address().to_string();
-	packet.senderSignalingPort = mBoundPort;
+	auto peer = resolvePeer(computerName);
+	if (!peer.isValid())
+		return;
 
-	sendPacket(targetIP, targetSignalingPort, packet);
+	SignalPacket packet{};
+	packet.signalType  = SignalType::ReadyFlag;
+	packet.senderIP	   = mSocket.local_endpoint().address().to_string();
+	packet.senderPort  = mBoundPort;
+	packet.displayName = computerName;
+
+	sendPacket(peer.IPv4, peer.signalingPort, packet);
 }
 
 
-void netlink::SignalingService::sendValidationRequest(const std::string &displayName, RemoteRequest request)
+void netlink::SignalingService::sendValidationRequest(const std::string &computerName, RemoteRequest request)
 {
-	auto peer = resolvePeer(displayName);
+	auto peer = resolvePeer(computerName);
 
 	if (!peer.isValid())
 		return;
@@ -166,9 +189,9 @@ void netlink::SignalingService::sendValidationRequest(const std::string &display
 }
 
 
-void netlink::SignalingService::sendSecretResponse(const std::string &displayName, const std::string &secret)
+void netlink::SignalingService::sendSecretResponse(const std::string &computerName, const std::string &secret)
 {
-	auto peer = resolvePeer(displayName);
+	auto peer = resolvePeer(computerName);
 
 	if (!peer.isValid())
 		return;
@@ -180,9 +203,9 @@ void netlink::SignalingService::sendSecretResponse(const std::string &displayNam
 }
 
 
-void netlink::SignalingService::sendVersionResponse(const std::string &displayName, const std::string &version)
+void netlink::SignalingService::sendVersionResponse(const std::string &computerName, const std::string &version)
 {
-	auto peer = resolvePeer(displayName);
+	auto peer = resolvePeer(computerName);
 
 	if (!peer.isValid())
 		return;
@@ -194,18 +217,17 @@ void netlink::SignalingService::sendVersionResponse(const std::string &displayNa
 }
 
 
-void				  netlink::SignalingService::sendValidationHandshake(const std::string &displayName) {}
+void				  netlink::SignalingService::sendValidationHandshake(const std::string &computerName) {}
 
 
-netlink::PeerEndpoint netlink::SignalingService::resolvePeer(const std::string &displayName) const
+netlink::PeerEndpoint netlink::SignalingService::resolvePeer(const std::string &computerName) const
 {
 	std::lock_guard<std::mutex> lock(mPeerRegistryMutex);
 
-	auto						it = mPeerRegistry.find(displayName);
 	auto						it = mPeerRegistry.find(computerName);
 	if (it == mPeerRegistry.end())
 	{
-		NETLINK_LOG_WARNING("Cannot resolve peer {}: not registered", displayName);
+		NETLINK_LOG_WARNING("Cannot resolve peer {}: not registered", computerName);
 		return {};
 	}
 

@@ -145,7 +145,7 @@ void DiscoveryService::sendPackage()
 	DiscoveryEndpoint local{};
 	local.IPAddress			 = mConfig.localIPv4;
 	local.displayName		 = mConfig.displayName;
-	local.port				 = mConfig.port;
+	local.port				 = 0; // @TODO: set port from SignalingService
 
 	json			 j		 = local;
 	std::string		 message = j.dump();
