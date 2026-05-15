@@ -35,10 +35,7 @@ struct netlink::NetLink::Impl
 };
 
 
-namespace
-{
-
-netlink::NetworkAdapter toPublicAdapter(const netlink::NetworkAdapterInternal &internal)
+static netlink::NetworkAdapter toPublicAdapter(const netlink::NetworkAdapterInternal &internal)
 {
 	netlink::NetworkAdapter pub;
 	pub.adapterName = internal.AdapterName;
@@ -48,9 +45,6 @@ netlink::NetworkAdapter toPublicAdapter(const netlink::NetworkAdapterInternal &i
 	pub.priority	= internal.Priority;
 	return pub;
 }
-
-} // namespace
-
 
 
 netlink::NetLink::NetLink() : pImpl(std::make_unique<Impl>()) {}
