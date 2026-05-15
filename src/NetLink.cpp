@@ -35,6 +35,20 @@ struct netlink::NetLink::Impl
 };
 
 
+// ---------------------------------------------------------------------------
+// Helpers — map internal <-> public types
+// ---------------------------------------------------------------------------
+
+static netlink::AdapterPriority mapPriority(netlink::AdapterPriorityInternal internal)
+{
+	switch (internal)
+	{
+	case netlink::AdapterPriorityInternal::Preferred: return netlink::AdapterPriority::Preferred;
+	case netlink::AdapterPriorityInternal::Available: return netlink::AdapterPriority::Available;
+	default: return netlink::AdapterPriority::Suppressed;
+	}
+}
+
 static netlink::NetworkAdapter toPublicAdapter(const netlink::NetworkAdapterInternal &internal)
 {
 	netlink::NetworkAdapter pub;
@@ -42,10 +56,14 @@ static netlink::NetworkAdapter toPublicAdapter(const netlink::NetworkAdapterInte
 	pub.networkName = internal.NetworkName;
 	pub.ipv4		= internal.IPv4;
 	pub.id			= internal.ID;
-	pub.priority	= internal.Priority;
+	pub.priority	= mapPriority(internal.Priority);
 	return pub;
 }
 
+
+// ---------------------------------------------------------------------------
+// Lifecycle
+// ---------------------------------------------------------------------------
 
 netlink::NetLink::NetLink() : pImpl(std::make_unique<Impl>()) {}
 
@@ -203,10 +221,7 @@ std::vector<netlink::NetworkAdapter> netlink::NetLink::getAvailableAdapters()
 	result.reserve(internal.size());
 
 	for (const auto &a : internal)
-	{
-		if (a.Priority != AdapterPriority::Suppressed) // hide loopback etc. from app
-			result.push_back(toPublicAdapter(a));
-	}
+		result.push_back(toPublicAdapter(a));
 
 	return result;
 }

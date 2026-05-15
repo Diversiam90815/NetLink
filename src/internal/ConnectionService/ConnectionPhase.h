@@ -13,7 +13,7 @@
 namespace netlink
 {
 
-enum class ConnectionState
+enum class ConnectionStateInternal
 {
 	Idle,				   // No connection
 	Initiated,			   // Started connection flow
@@ -46,7 +46,7 @@ struct ConnectionStatusUpdate
 	};
 
 	Type								  type{};
-	ConnectionState						  state{};
+	ConnectionStateInternal				  state{};
 	DiscoveryEndpoint					  endpoint;
 	std::string							  message;
 	bool								  success{true};

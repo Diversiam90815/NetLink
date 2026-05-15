@@ -121,7 +121,7 @@ void netlink::NetworkInformation::saveAdapter(const PIP_ADAPTER_ADDRESSES adapte
 			std::string				 networkName	  = getNetworkName(type, adapter->Luid, addressString);
 			const bool				 isDefaultRoute	  = defaultRouteLuidValues.find(adapter->Luid.Value) != defaultRouteLuidValues.end();
 			bool					 ipv4Enabled	  = adapter->Flags & 0x80;
-			netlink::AdapterPriority visibility		  = determinePriority(isDefaultRoute, ipv4Enabled, type, adapter->OperStatus);
+			netlink::AdapterPriorityInternal visibility		  = determinePriority(isDefaultRoute, ipv4Enabled, type, adapter->OperStatus);
 
 			auto					 createdAdapter	  = NetworkAdapterInternal(adapterName, networkName, addressString, subnetMaskString, ID, isDefaultRoute, type, visibility);
 
@@ -135,7 +135,7 @@ void netlink::NetworkInformation::saveAdapter(const PIP_ADAPTER_ADDRESSES adapte
 
 bool netlink::NetworkInformation::setCurrentNetworkAdapter(const int adapterID)
 {
-	auto it = std::find(mNetworkAdapters.begin(), mNetworkAdapters.end(), [adapterID](const NetworkAdapterInternal &a) { return a.ID == adapterID; });
+	auto it = std::find_if(mNetworkAdapters.begin(), mNetworkAdapters.end(), [adapterID](const NetworkAdapterInternal &a) { return a.ID == adapterID; });
 
 	if (it == mNetworkAdapters.end())
 	{
@@ -244,7 +244,7 @@ netlink::AdapterTypes netlink::NetworkInformation::filterAdapterType(const DWORD
 }
 
 
-netlink::AdapterPriority netlink::NetworkInformation::determinePriority(bool isDefaultRoute, bool IPv4Enabled, AdapterTypes type, IF_OPER_STATUS status)
+netlink::AdapterPriorityInternal netlink::NetworkInformation::determinePriority(bool isDefaultRoute, bool IPv4Enabled, AdapterTypes type, IF_OPER_STATUS status)
 {
 	// Preferred device should be
 	//	- Real
@@ -253,18 +253,18 @@ netlink::AdapterPriority netlink::NetworkInformation::determinePriority(bool isD
 	//	- IPv4 enabled (as currently we just support IPv4)
 
 	if (type == AdapterTypes::Loopback)
-		return netlink::AdapterPriority::Suppressed;
+		return netlink::AdapterPriorityInternal::Suppressed;
 
 	if (status != IfOperStatusUp)
-		return netlink::AdapterPriority::Available;
+		return netlink::AdapterPriorityInternal::Available;
 
 	if (!isDefaultRoute || !IPv4Enabled)
-		return netlink::AdapterPriority::Available;
+		return netlink::AdapterPriorityInternal::Available;
 
 	if (type != AdapterTypes::Ethernet && type != AdapterTypes::WiFi)
-		return netlink::AdapterPriority::Available;
+		return netlink::AdapterPriorityInternal::Available;
 
-	return netlink::AdapterPriority::Preferred;
+	return netlink::AdapterPriorityInternal::Preferred;
 }
 
 

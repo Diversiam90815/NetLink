@@ -30,6 +30,14 @@ struct Endpoint
 };
 
 
+enum class AdapterPriority
+{
+	Suppressed = 1, // Do not show (loopback, down)
+	Available  = 2, // Show but not highlighted
+	Preferred  = 3	// Highlight as best choice
+};
+
+
 struct NetworkAdapter
 {
 	std::string		adapterName{};

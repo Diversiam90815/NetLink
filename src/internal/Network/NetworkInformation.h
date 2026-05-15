@@ -39,7 +39,7 @@ enum class AdapterTypes
 };
 
 
-enum class AdapterPriority
+enum class AdapterPriorityInternal
 {
 	Suppressed = 1,
 	Available  = 2,
@@ -58,7 +58,7 @@ struct NetworkAdapterInternal
 						   const int		  id,
 						   bool				  isDefaultRoute,
 						   AdapterTypes		  type,
-						   AdapterPriority	  priority)
+						   AdapterPriorityInternal	  priority)
 		: AdapterName(adapterName), NetworkName(networkName), IPv4(ipv4), Subnet(subnet), ID(id), IsDefaultRoute(isDefaultRoute), Type(type), Priority(priority)
 	{
 		Eligible = filterSubnetMask();
@@ -80,7 +80,7 @@ struct NetworkAdapterInternal
 	bool			IsDefaultRoute{false};
 	bool			Eligible{false};
 	AdapterTypes	Type{AdapterTypes::Other};
-	AdapterPriority Priority{};
+	AdapterPriorityInternal Priority{};
 };
 
 
@@ -165,7 +165,7 @@ private:
 	std::string		sockaddrToString(SOCKADDR *sa) const;
 	std::string		prefixLengthToSubnetMask(USHORT family, ULONG prefixLength) const;
 	AdapterTypes	filterAdapterType(const DWORD Type) const;
-	AdapterPriority determinePriority(bool isDefaultRoute, bool IPv4Enabled, AdapterTypes type, IF_OPER_STATUS status);
+	AdapterPriorityInternal determinePriority(bool isDefaultRoute, bool IPv4Enabled, AdapterTypes type, IF_OPER_STATUS status);
 
 	bool			getDefaultInterfaces(std::vector<NET_LUID> &pLUIDs);
 	std::string		getHostName(const SOCKADDR *ip, const socklen_t ipLength);

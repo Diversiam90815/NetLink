@@ -91,7 +91,7 @@ bool netlink::ConnectionService::initiateConnection(const std::string &computerN
 	request.requestTime		 = std::chrono::steady_clock::now();
 	request.lastActivityTime = request.requestTime;
 	request.isInitiator		 = true;
-	request.state			 = ConnectionState::Initiated;
+	request.state			 = ConnectionStateInternal::Initiated;
 
 	mCurrentRequest			 = std::move(request);
 	mConnecting.store(true);
@@ -111,7 +111,7 @@ bool netlink::ConnectionService::initiateConnection(const std::string &computerN
 	notifyStatus(ConnectionStatusUpdate::Type::InvitationSent, "Invitation sent to " + computerName);
 
 	// update current state
-	mCurrentRequest->state = ConnectionState::InvitationSent;
+	mCurrentRequest->state = ConnectionStateInternal::InvitationSent;
 
 	NETLINK_LOG_INFO("Connection invitation sent to {}", computerName);
 	return true;
@@ -128,7 +128,7 @@ bool netlink::ConnectionService::acceptIncomingConnection(const std::string &com
 		return false;
 	}
 
-	if (!mCurrentRequest.has_value() || mCurrentRequest->state != ConnectionState::InvitationReceived)
+	if (!mCurrentRequest.has_value() || mCurrentRequest->state != ConnectionStateInternal::InvitationReceived)
 	{
 		NETLINK_LOG_WARNING("No incoming invitation to accept");
 		return false;
@@ -156,7 +156,7 @@ bool netlink::ConnectionService::acceptIncomingConnection(const std::string &com
 		return false;
 	}
 
-	mCurrentRequest->state = ConnectionState::EstablishingTransport;
+	mCurrentRequest->state = ConnectionStateInternal::EstablishingTransport;
 
 	if (determineLocalSessionRole())
 	{
@@ -174,7 +174,7 @@ bool netlink::ConnectionService::declineIncomingConnection(const std::string &co
 {
 	std::lock_guard<std::mutex> lock(mConnectingMutex);
 
-	if (!mCurrentRequest.has_value() || mCurrentRequest->state != ConnectionState::InvitationReceived)
+	if (!mCurrentRequest.has_value() || mCurrentRequest->state != ConnectionStateInternal::InvitationReceived)
 	{
 		NETLINK_LOG_WARNING("No incoming invitation to decline");
 		return false;
@@ -229,7 +229,7 @@ bool netlink::ConnectionService::closeConnection(const std::string &computerName
 
 	NETLINK_LOG_INFO("Closing current connection to {}", remote);
 
-	mCurrentRequest->state = ConnectionState::Disconnecting;
+	mCurrentRequest->state = ConnectionStateInternal::Disconnecting;
 
 	notifyStatus(ConnectionStatusUpdate::Type::Closing, "Closing connection");
 
@@ -245,7 +245,7 @@ bool netlink::ConnectionService::hasIncomingInvitation() const
 {
 	std::lock_guard<std::mutex> lock(mConnectingMutex);
 
-	return mCurrentRequest.has_value() && mCurrentRequest->state == ConnectionState::InvitationReceived;
+	return mCurrentRequest.has_value() && mCurrentRequest->state == ConnectionStateInternal::InvitationReceived;
 }
 
 
@@ -260,14 +260,14 @@ std::optional<DiscoveryEndpoint> netlink::ConnectionService::getCurrentRemote() 
 }
 
 
-netlink::ConnectionState netlink::ConnectionService::getConnectionState() const
+netlink::ConnectionStateInternal netlink::ConnectionService::getConnectionState() const
 {
 	std::lock_guard<std::mutex> lock(mConnectingMutex);
 
 	if (mCurrentRequest.has_value())
 		return mCurrentRequest->state;
 
-	return ConnectionState::Idle;
+	return ConnectionStateInternal::Idle;
 }
 
 
@@ -375,7 +375,7 @@ void netlink::ConnectionService::onReceivedInvitation(const std::string &compute
 	request.requestTime		 = std::chrono::steady_clock::now();
 	request.lastActivityTime = request.requestTime;
 	request.isInitiator		 = false;
-	request.state			 = ConnectionState::InvitationReceived;
+	request.state			 = ConnectionStateInternal::InvitationReceived;
 
 	mCurrentRequest			 = std::move(request);
 	mConnecting.store(true);
@@ -408,7 +408,7 @@ void netlink::ConnectionService::onReceivedAnswerToInvite(const std::string &com
 		return;
 	}
 
-	if (mCurrentRequest->state != ConnectionState::InvitationSent)
+	if (mCurrentRequest->state != ConnectionStateInternal::InvitationSent)
 	{
 		NETLINK_LOG_WARNING("Received acceptance in unexpected state: {}", static_cast<int>(mCurrentRequest->state));
 		return;
@@ -421,7 +421,7 @@ void netlink::ConnectionService::onReceivedAnswerToInvite(const std::string &com
 	{
 		NETLINK_LOG_INFO("Connection accepted by {}", computerName);
 
-		mCurrentRequest->state			  = ConnectionState::Accepted;
+		mCurrentRequest->state			  = ConnectionStateInternal::Accepted;
 		mCurrentRequest->lastActivityTime = std::chrono::steady_clock::now();
 
 		notifyStatus(ConnectionStatusUpdate::Type::Accepted, "Connection accepted by " + computerName);
@@ -467,7 +467,7 @@ void netlink::ConnectionService::onReceivedConnectionReadyFlag(const std::string
 	if (mCurrentRequest->localRole == SessionRole::Connector && mCurrentRequest->client)
 	{
 		NETLINK_LOG_INFO("Connector: connecting to {}:{}", mCurrentRequest->remote.IPAddress, mCurrentRequest->remote.port);
-		mCurrentRequest->state = ConnectionState::EstablishingTransport;
+		mCurrentRequest->state = ConnectionStateInternal::EstablishingTransport;
 		mCurrentRequest->client->connect(mCurrentRequest->remote.IPAddress, static_cast<unsigned short>(mCurrentRequest->remote.port));
 	}
 }
@@ -552,7 +552,7 @@ bool netlink::ConnectionService::retryConnection()
 	// Re-establish transport layer
 	mCurrentRequest->server.reset();
 	mCurrentRequest->client.reset();
-	mCurrentRequest->state = ConnectionState::EstablishingTransport;
+	mCurrentRequest->state = ConnectionStateInternal::EstablishingTransport;
 	mLocalReady.store(false);
 	mRemoteReady.store(false);
 
@@ -591,7 +591,7 @@ bool netlink::ConnectionService::determineLocalSessionRole()
 					return;
 
 				mCurrentRequest->session = session;
-				mCurrentRequest->state	 = ConnectionState::Connected;
+				mCurrentRequest->state	 = ConnectionStateInternal::Connected;
 				mLocalReady.store(true);
 				mConnected.store(true);
 				mConnecting.store(false);
@@ -631,7 +631,7 @@ bool netlink::ConnectionService::determineLocalSessionRole()
 					return;
 
 				mCurrentRequest->session = session;
-				mCurrentRequest->state	 = ConnectionState::Connected;
+				mCurrentRequest->state	 = ConnectionStateInternal::Connected;
 				mLocalReady.store(true);
 				mConnected.store(true);
 				mConnecting.store(false);
@@ -650,6 +650,11 @@ bool netlink::ConnectionService::determineLocalSessionRole()
 
 		mTimeoutService.startTimeout({ConnectionTimeouts::ReadyFlag, mCurrentRequest->remote.displayName}, mConfig.readyFlagTimeoutMs,
 									 [this](const TimeoutKey &key) { onTimeout(key); });
+	}
+	else
+	{
+		NETLINK_LOG_WARNING("Unknwon session role determined..");
+		return false;
 	}
 }
 

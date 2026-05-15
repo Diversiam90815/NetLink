@@ -58,7 +58,7 @@ struct ConnectionConfig
 
 struct ConnectionRequest
 {
-	ConnectionState						  state{ConnectionState::Idle};
+	ConnectionStateInternal						  state{ConnectionStateInternal::Idle};
 	ValidationResult					  validationResult;
 
 	DiscoveryEndpoint					  remote{};
@@ -99,7 +99,7 @@ public:
 	bool							 hasIncomingInvitation() const;
 
 	std::optional<DiscoveryEndpoint> getCurrentRemote() const;
-	ConnectionState					 getConnectionState() const;
+	ConnectionStateInternal					 getConnectionState() const;
 
 	// Sending helper
 	bool							 sendConnectionInvitation(const std::string &computerName);
