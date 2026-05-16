@@ -84,7 +84,6 @@ void			  netlink::NetLink::configure(const NetLinkConfig &config, const NetLinkC
 {
 	pImpl->config	 = config;
 	pImpl->callbacks = callbacks;
-	pImpl->connectionService.setLocalIP(config.localIPv4);
 
 	netlink::ConnectionServiceCallbacks svcCB;
 

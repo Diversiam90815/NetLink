@@ -98,8 +98,6 @@ struct NetLinkCallbacks
 struct NetLinkConfig
 {
 	std::string	   localDisplayName{};
-	std::string	   localIPv4{};
-	unsigned short port{0};
 	int			   discoveryPort{5555};
 	std::string	   broadcastAddress{"255.255.255.255"};
 	std::string	   secret{"NetLink"};
