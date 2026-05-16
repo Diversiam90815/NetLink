@@ -54,8 +54,9 @@ public:
 	explicit SignalingService(asio::io_context &ioContext);
 	~SignalingService();
 
-	bool init(const std::string &localIPv4);
+	bool init(const std::string &localComputerName);
 	void deinit();
+	void setLocalIPv4(const std::string &localIPv4);
 
 	int	 getBoundPort() const { return mBoundPort; }
 
@@ -93,8 +94,11 @@ private:
 	udp::socket							mSocket;
 	udp::endpoint						mSenderEndpoint;
 	std::array<char, 1024>				mRecvBuffer{};
-	int									mBoundPort{0};
+
 	std::string							mLocalComputerName;
+	std::string							mLocalIPv4;
+	int									mBoundPort{0};
+
 	std::atomic<bool>					mInitialized{false};
 	SignalingCallbacks					mCallbacks;
 

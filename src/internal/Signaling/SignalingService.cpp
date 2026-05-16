@@ -23,10 +23,12 @@ netlink::SignalingService::~SignalingService()
 }
 
 
-bool netlink::SignalingService::init(const std::string &localIPv4)
+bool netlink::SignalingService::init(const std::string &localComputerName)
 {
-	if (localIPv4.empty())
+	if (localComputerName.empty())
 		return false;
+
+	mLocalComputerName = localComputerName;
 
 	asio::error_code ec;
 	mSocket.open(udp::v4(), ec);
@@ -42,19 +44,7 @@ bool netlink::SignalingService::init(const std::string &localIPv4)
 	if (ec)
 		NETLINK_LOG_ERROR("Failed to set reuse_address option: {}", ec.message());
 
-	// Bind to port 0 (OS assign free port)
-	udp::endpoint localEndpoint(asio::ip::make_address_v4(localIPv4), 0);
-	mSocket.bind(localEndpoint, ec);
-
-	if (ec)
-	{
-		NETLINK_LOG_ERROR("Failed to bind signaling socket: {}", ec.message());
-		return false;
-	}
-
-	mBoundPort = static_cast<int>(mSocket.local_endpoint().port());
-	NETLINK_LOG_INFO("SignalingService bound to port {}", mBoundPort);
-
+	// Socket opened, binding deferred until setLocalIPv4() is called
 	mInitialized.store(true);
 	return true;
 }
@@ -77,6 +67,43 @@ void netlink::SignalingService::deinit()
 	stop();
 	mBoundPort = 0;
 	mInitialized.store(false);
+}
+
+
+void netlink::SignalingService::setLocalIPv4(const std::string &localIPv4)
+{
+	if (localIPv4.empty())
+		return;
+
+	asio::error_code ec;
+
+	// Rebind if already bound to a previous address
+	if (mBoundPort != 0)
+	{
+		mSocket.cancel(ec);
+		mSocket.close(ec);
+		mSocket.open(udp::v4(), ec);
+		if (ec)
+		{
+			NETLINK_LOG_ERROR("Failed to reopen signaling socket: {}", ec.message());
+			return;
+		}
+		mSocket.set_option(asio::socket_base::reuse_address(true), ec);
+	}
+
+	mLocalIPv4 = localIPv4;
+
+	udp::endpoint localEndpoint(asio::ip::make_address_v4(localIPv4), 0);
+	mSocket.bind(localEndpoint, ec);
+
+	if (ec)
+	{
+		NETLINK_LOG_ERROR("Failed to bind signaling socket to {}: {}", localIPv4, ec.message());
+		return;
+	}
+
+	mBoundPort = static_cast<int>(mSocket.local_endpoint().port());
+	NETLINK_LOG_INFO("SignalingService bound to {}:{}", localIPv4, mBoundPort);
 }
 
 
@@ -375,7 +402,7 @@ netlink::SignalPacket netlink::SignalingService::makeEnvelope(SignalType type) c
 	SignalPacket packet{};
 
 	packet.senderName = mLocalComputerName;
-	packet.senderIP	  = mSocket.local_endpoint().address().to_string();
+	packet.senderIP	  = mLocalIPv4;
 	packet.senderPort = mBoundPort;
 	packet.signalType = type;
 

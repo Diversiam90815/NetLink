@@ -115,15 +115,15 @@ void netlink::NetworkInformation::saveAdapter(const PIP_ADAPTER_ADDRESSES adapte
 	{
 		if (unicast->Address.lpSockaddr->sa_family == AF_INET)
 		{
-			std::string				 addressString	  = sockaddrToString(unicast->Address.lpSockaddr);
-			std::string				 subnetMaskString = prefixLengthToSubnetMask(unicast->Address.lpSockaddr->sa_family, unicast->OnLinkPrefixLength);
-			AdapterTypes			 type			  = filterAdapterType(adapter->IfType);
-			std::string				 networkName	  = getNetworkName(type, adapter->Luid, addressString);
-			const bool				 isDefaultRoute	  = defaultRouteLuidValues.find(adapter->Luid.Value) != defaultRouteLuidValues.end();
-			bool					 ipv4Enabled	  = adapter->Flags & 0x80;
+			std::string						 addressString	  = sockaddrToString(unicast->Address.lpSockaddr);
+			std::string						 subnetMaskString = prefixLengthToSubnetMask(unicast->Address.lpSockaddr->sa_family, unicast->OnLinkPrefixLength);
+			AdapterTypes					 type			  = filterAdapterType(adapter->IfType);
+			std::string						 networkName	  = getNetworkName(type, adapter->Luid, addressString);
+			const bool						 isDefaultRoute	  = defaultRouteLuidValues.find(adapter->Luid.Value) != defaultRouteLuidValues.end();
+			bool							 ipv4Enabled	  = adapter->Flags & 0x80;
 			netlink::AdapterPriorityInternal visibility		  = determinePriority(isDefaultRoute, ipv4Enabled, type, adapter->OperStatus);
 
-			auto					 createdAdapter	  = NetworkAdapterInternal(adapterName, networkName, addressString, subnetMaskString, ID, isDefaultRoute, type, visibility);
+			auto createdAdapter = NetworkAdapterInternal(adapterName, networkName, addressString, subnetMaskString, ID, isDefaultRoute, type, visibility);
 
 			mNetworkAdapters.push_back(createdAdapter);
 		}
@@ -159,6 +159,9 @@ bool netlink::NetworkInformation::setCurrentNetworkAdapter(const NetworkAdapterI
 	NETLINK_LOG_INFO("\t IPv4: \t\t\t{}", adapter.IPv4);
 	NETLINK_LOG_INFO("\t Subnet: \t\t{}", adapter.Subnet);
 	NETLINK_LOG_INFO("\t ID: \t\t\t{}", adapter.ID);
+
+	if (mOnAdapterChanged)
+		mOnAdapterChanged(adapter.IPv4);
 
 	return true;
 }

@@ -22,12 +22,15 @@
 #include <vector>
 #include <unordered_set>
 #include <memory>
+#include <function>
 
 #include "NetLinkLog.h"
 
 
 namespace netlink
 {
+
+using AdapterChangedCallback = std::function<void(const std::string &newIPv4)>;
 
 enum class AdapterTypes
 {
@@ -51,35 +54,35 @@ struct NetworkAdapterInternal
 {
 	NetworkAdapterInternal() = default;
 
-	NetworkAdapterInternal(const std::string &adapterName,
-						   const std::string &networkName,
-						   const std::string &ipv4,
-						   const std::string &subnet,
-						   const int		  id,
-						   bool				  isDefaultRoute,
-						   AdapterTypes		  type,
-						   AdapterPriorityInternal	  priority)
+	NetworkAdapterInternal(const std::string	  &adapterName,
+						   const std::string	  &networkName,
+						   const std::string	  &ipv4,
+						   const std::string	  &subnet,
+						   const int			   id,
+						   bool					   isDefaultRoute,
+						   AdapterTypes			   type,
+						   AdapterPriorityInternal priority)
 		: AdapterName(adapterName), NetworkName(networkName), IPv4(ipv4), Subnet(subnet), ID(id), IsDefaultRoute(isDefaultRoute), Type(type), Priority(priority)
 	{
 		Eligible = filterSubnetMask();
 	}
 
 
-	bool			operator==(const NetworkAdapterInternal &other) const { return std::tie(AdapterName, Subnet) == std::tie(other.AdapterName, other.Subnet); }
-	bool			operator!=(const NetworkAdapterInternal &other) const { return !(*this == other); }
+	bool					operator==(const NetworkAdapterInternal &other) const { return std::tie(AdapterName, Subnet) == std::tie(other.AdapterName, other.Subnet); }
+	bool					operator!=(const NetworkAdapterInternal &other) const { return !(*this == other); }
 
-	bool			isValid() const { return !AdapterName.empty() && !IPv4.empty() && ID != 0; }
+	bool					isValid() const { return !AdapterName.empty() && !IPv4.empty() && ID != 0; }
 
-	bool			filterSubnetMask() const { return Subnet == "255.255.255.0"; }
+	bool					filterSubnetMask() const { return Subnet == "255.255.255.0"; }
 
-	std::string		AdapterName{};
-	std::string		NetworkName{};
-	std::string		IPv4{};
-	std::string		Subnet{};
-	int				ID{0};
-	bool			IsDefaultRoute{false};
-	bool			Eligible{false};
-	AdapterTypes	Type{AdapterTypes::Other};
+	std::string				AdapterName{};
+	std::string				NetworkName{};
+	std::string				IPv4{};
+	std::string				Subnet{};
+	int						ID{0};
+	bool					IsDefaultRoute{false};
+	bool					Eligible{false};
+	AdapterTypes			Type{AdapterTypes::Other};
 	AdapterPriorityInternal Priority{};
 };
 
@@ -105,6 +108,7 @@ public:
 
 	const std::vector<NetworkAdapterInternal> &getAvailableNetworkAdapters() const;
 
+	void									   setOnAdapterChanged(AdapterChangedCallback cb) { mOnAdapterChanged = std::move(cb); }
 
 private:
 	// RAII helpers
@@ -159,22 +163,22 @@ private:
 
 	using AdapterBuffer = std::unique_ptr<IP_ADAPTER_ADDRESSES, void (*)(IP_ADAPTER_ADDRESSES *)>;
 
-	void			saveAdapter(const PIP_ADAPTER_ADDRESSES adapter, const int ID, std::unordered_set<ULONG64> &defaultRouteLuidValues);
-	bool			getNetworkInformationFromOS();
+	void					saveAdapter(const PIP_ADAPTER_ADDRESSES adapter, const int ID, std::unordered_set<ULONG64> &defaultRouteLuidValues);
+	bool					getNetworkInformationFromOS();
 
-	std::string		sockaddrToString(SOCKADDR *sa) const;
-	std::string		prefixLengthToSubnetMask(USHORT family, ULONG prefixLength) const;
-	AdapterTypes	filterAdapterType(const DWORD Type) const;
+	std::string				sockaddrToString(SOCKADDR *sa) const;
+	std::string				prefixLengthToSubnetMask(USHORT family, ULONG prefixLength) const;
+	AdapterTypes			filterAdapterType(const DWORD Type) const;
 	AdapterPriorityInternal determinePriority(bool isDefaultRoute, bool IPv4Enabled, AdapterTypes type, IF_OPER_STATUS status);
 
-	bool			getDefaultInterfaces(std::vector<NET_LUID> &pLUIDs);
-	std::string		getHostName(const SOCKADDR *ip, const socklen_t ipLength);
-	std::string		getWifiSsid(const AdapterTypes type, const NET_LUID luid);
-	std::string		getNetworkGatename(const AdapterTypes type, const NET_LUID_LH luid, const std::string address);
-	std::string		getNetworkName(const AdapterTypes type, const NET_LUID_LH luid, const std::string address);
+	bool					getDefaultInterfaces(std::vector<NET_LUID> &pLUIDs);
+	std::string				getHostName(const SOCKADDR *ip, const socklen_t ipLength);
+	std::string				getWifiSsid(const AdapterTypes type, const NET_LUID luid);
+	std::string				getNetworkGatename(const AdapterTypes type, const NET_LUID_LH luid, const std::string address);
+	std::string				getNetworkName(const AdapterTypes type, const NET_LUID_LH luid, const std::string address);
 
 
-	std::string		WStringToStdString(const std::wstring &wstr)
+	std::string				WStringToStdString(const std::wstring &wstr)
 	{
 		if (wstr.empty())
 			return {};
@@ -198,6 +202,8 @@ private:
 
 	std::vector<NetworkAdapterInternal> mNetworkAdapters{};
 	NetworkAdapterInternal				mCurrentNetworkAdapter{};
+
+	AdapterChangedCallback				mOnAdapterChanged;
 };
 
 
