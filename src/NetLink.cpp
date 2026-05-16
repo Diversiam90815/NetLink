@@ -144,7 +144,39 @@ void			  netlink::NetLink::configure(const NetLinkConfig &config, const NetLinkC
 
 bool netlink::NetLink::init()
 {
-	return false;
+	// Initialize services and setup internal callbacks
+
+	if (!pImpl->network.init())
+		return false;
+
+	pImpl->network.processAdapter();
+
+	// Wire adapter changes -> propagate new IP to all services
+	pImpl->network.setOnAdapterChanged(
+		[this](const std::string &newIPv4)
+		{
+			pImpl->signaling.setLocalIPv4(newIPv4);
+			pImpl->connectionService.setLocalIP(newIPv4);
+
+			DiscoveryConfig discCfg;
+			discCfg.localIPv4	= newIPv4;
+			discCfg.displayName = pImpl->config.localDisplayName;
+			// @TODO: set other discovery config fields from pImpl->config...
+			pImpl->discovery.init(discCfg);
+		});
+
+	if (!pImpl->signaling.init(pImpl->config.localDisplayName))
+		return false;
+
+	// Apply the current adapter immediately if one is already set
+	const auto &adapter = pImpl->network.getCurrentNetworkAdapter();
+	if (adapter.isValid())
+	{
+		pImpl->signaling.setLocalIPv4(adapter.IPv4);
+		pImpl->connectionService.setLocalIP(adapter.IPv4);
+	}
+
+	return true;
 }
 
 
@@ -229,5 +261,6 @@ std::vector<netlink::NetworkAdapter> netlink::NetLink::getAvailableAdapters()
 
 bool netlink::NetLink::setActiveAdapter(const int &adapterID)
 {
+	// setCurrentNetworkAdapter fires onAdapterChanged internally
 	return pImpl->network.setCurrentNetworkAdapter(adapterID);
 }
