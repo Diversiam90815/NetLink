@@ -102,43 +102,20 @@ void netlink::SignalingService::sendConnectRequest(const std::string &computerNa
 	if (!peer.isValid())
 		return;
 
-	SignalPacket packet{};
-	packet.signalType  = SignalType::ConnectRequest;
-	packet.senderIP	   = mSocket.local_endpoint().address().to_string();
-	packet.senderPort  = mBoundPort;
-	packet.displayName = computerName;
+	auto packet = makeEnvelope(SignalType::ConnectRequest);
 
 	sendPacket(peer.IPv4, peer.signalingPort, packet);
 }
 
 
-void netlink::SignalingService::sendConnectAccept(const std::string &computerName)
+void netlink::SignalingService::sendConnectAnswer(const std::string &computerName, bool requestAccepted)
 {
 	auto peer = resolvePeer(computerName);
 	if (!peer.isValid())
 		return;
 
-	SignalPacket packet{};
-	packet.signalType  = SignalType::ConnectAccept;
-	packet.senderIP	   = mSocket.local_endpoint().address().to_string();
-	packet.senderPort  = mBoundPort;
-	packet.displayName = computerName;
-
-	sendPacket(peer.IPv4, peer.signalingPort, packet);
-}
-
-
-void netlink::SignalingService::sendConnectDecline(const std::string &computerName)
-{
-	auto peer = resolvePeer(computerName);
-	if (!peer.isValid())
-		return;
-
-	SignalPacket packet{};
-	packet.signalType  = SignalType::ConnectDecline;
-	packet.senderIP	   = mSocket.local_endpoint().address().to_string();
-	packet.senderPort  = mBoundPort;
-	packet.displayName = computerName;
+	auto packet	   = makeEnvelope(SignalType::ConnectAnswer);
+	packet.payload = PayloadConnectAnswer{requestAccepted};
 
 	sendPacket(peer.IPv4, peer.signalingPort, packet);
 }
@@ -150,14 +127,11 @@ void netlink::SignalingService::sendDisconnect(const std::string &computerName)
 	if (!peer.isValid())
 		return;
 
-	SignalPacket packet{};
-	packet.signalType  = SignalType::Disconnect;
-	packet.senderIP	   = mSocket.local_endpoint().address().to_string();
-	packet.senderPort  = mBoundPort;
-	packet.displayName = computerName;
+	auto packet = makeEnvelope(SignalType::Disconnect);
 
 	sendPacket(peer.IPv4, peer.signalingPort, packet);
 }
+
 
 void netlink::SignalingService::sendReadyFlag(const std::string &computerName)
 {
@@ -165,11 +139,20 @@ void netlink::SignalingService::sendReadyFlag(const std::string &computerName)
 	if (!peer.isValid())
 		return;
 
-	SignalPacket packet{};
-	packet.signalType  = SignalType::ReadyFlag;
-	packet.senderIP	   = mSocket.local_endpoint().address().to_string();
-	packet.senderPort  = mBoundPort;
-	packet.displayName = computerName;
+	auto packet = makeEnvelope(SignalType::ReadyFlag);
+
+	sendPacket(peer.IPv4, peer.signalingPort, packet);
+}
+
+
+void netlink::SignalingService::sendDataPort(const std::string &computerName, int dataPort)
+{
+	auto peer = resolvePeer(computerName);
+	if (!peer.isValid())
+		return;
+
+	auto packet	   = makeEnvelope(SignalType::DataPort);
+	packet.payload = PayloadDataPort{dataPort};
 
 	sendPacket(peer.IPv4, peer.signalingPort, packet);
 }
@@ -178,14 +161,13 @@ void netlink::SignalingService::sendReadyFlag(const std::string &computerName)
 void netlink::SignalingService::sendValidationRequest(const std::string &computerName, RemoteRequest request)
 {
 	auto peer = resolvePeer(computerName);
-
 	if (!peer.isValid())
 		return;
 
-	// @TODO: build packet and send
-	SignalPacket packet;
+	auto packet	   = makeEnvelope(SignalType::ValidationRequest);
+	packet.payload = PayloadValidationRequest{static_cast<uint8_t>(request)};
 
-	//	sendPacket(peer.IPv4, peer.signalingPort, );
+	sendPacket(peer.IPv4, peer.signalingPort, packet);
 }
 
 
@@ -196,28 +178,36 @@ void netlink::SignalingService::sendSecretResponse(const std::string &computerNa
 	if (!peer.isValid())
 		return;
 
-	// @TODO: build packet and send
-	SignalPacket packet;
+	auto packet	   = makeEnvelope(SignalType::SecretResponse);
+	packet.payload = PayloadSecretResponse{(secret)};
 
-	//	sendPacket(peer.IPv4, peer.signalingPort, );
+	sendPacket(peer.IPv4, peer.signalingPort, packet);
 }
 
 
 void netlink::SignalingService::sendVersionResponse(const std::string &computerName, const std::string &version)
 {
 	auto peer = resolvePeer(computerName);
-
 	if (!peer.isValid())
 		return;
 
-	// @TODO: build packet and send
-	SignalPacket packet;
+	auto packet	   = makeEnvelope(SignalType::VersionResponse);
+	packet.payload = PayloadVersionResponse{(version)};
 
-	//	sendPacket(peer.IPv4, peer.signalingPort, );
+	sendPacket(peer.IPv4, peer.signalingPort, packet);
 }
 
 
-void				  netlink::SignalingService::sendValidationHandshake(const std::string &computerName) {}
+void netlink::SignalingService::sendValidationHandshake(const std::string &computerName)
+{
+	auto peer = resolvePeer(computerName);
+	if (!peer.isValid())
+		return;
+
+	auto packet = makeEnvelope(SignalType::ValidationHandshake);
+
+	sendPacket(peer.IPv4, peer.signalingPort, packet);
+}
 
 
 netlink::PeerEndpoint netlink::SignalingService::resolvePeer(const std::string &computerName) const
@@ -286,31 +276,70 @@ void netlink::SignalingService::handleReceive(const asio::error_code &error, siz
 
 void netlink::SignalingService::routePacket(const SignalPacket &packet)
 {
+	const std::string &sender = packet.senderName;
+
 	switch (packet.signalType)
 	{
 	case SignalType::ConnectRequest:
+	{
 		if (mCallbacks.onConnectRequested)
-			mCallbacks.onConnectRequested(packet);
+			mCallbacks.onConnectRequested(sender);
 		break;
+	}
 
-	case SignalType::ConnectAccept:
-		if (mCallbacks.onConnectAccepted)
-			mCallbacks.onConnectAccepted(packet);
+	case SignalType::ConnectAnswer:
+	{
+		const auto &pl = std::get<PayloadConnectAnswer>(packet.payload);
+		if (mCallbacks.onConnectRequestAnswered)
+			mCallbacks.onConnectRequestAnswered(sender, pl.accepted);
 		break;
-
-	case SignalType::ConnectDecline:
-		if (mCallbacks.onConnectDeclined)
-			mCallbacks.onConnectDeclined(packet);
-		break;
+	}
 
 	case SignalType::Disconnect:
 		if (mCallbacks.onDisconnectReceived)
-			mCallbacks.onDisconnectReceived(packet);
+			mCallbacks.onDisconnectReceived(sender);
 		break;
 
 	case SignalType::ReadyFlag:
 		if (mCallbacks.onReadyFlagReceived)
-			mCallbacks.onReadyFlagReceived(packet);
+			mCallbacks.onReadyFlagReceived(sender);
+		break;
+
+	case SignalType::DataPort:
+	{
+		const auto &pl = std::get<PayloadDataPort>(packet.payload);
+		if (mCallbacks.onDataPortReceived)
+			mCallbacks.onDataPortReceived(sender, pl.dataPort);
+		break;
+	}
+
+	case SignalType::ValidationRequest:
+	{
+		const auto &pl = std::get<PayloadValidationRequest>(packet.payload);
+		if (mCallbacks.onValidationRequestReceived)
+			mCallbacks.onValidationRequestReceived(sender, pl.request);
+		break;
+	}
+
+	case SignalType::SecretResponse:
+	{
+		const auto &pl = std::get<PayloadSecretResponse>(packet.payload);
+		if (mCallbacks.onSecretResponseReceived)
+			mCallbacks.onSecretResponseReceived(sender, pl.secret);
+		break;
+	}
+
+	case SignalType::VersionResponse:
+	{
+		const auto &pl = std::get<PayloadVersionResponse>(packet.payload);
+		if (mCallbacks.onVersionResponseReceived)
+			mCallbacks.onVersionResponseReceived(sender, pl.version);
+		break;
+	}
+
+	case SignalType::ValidationHandshake:
+		if (mCallbacks.onValidationHandshakeReceived)
+			mCallbacks.onValidationHandshakeReceived(sender);
 		break;
 
 	default: NETLINK_LOG_WARNING("Unknown signal type received: {}", static_cast<int>(packet.signalType)); break;
@@ -338,4 +367,17 @@ void netlink::SignalingService::sendPacket(const std::string &targetIP, int targ
 		NETLINK_LOG_ERROR("Failed to send signal to {}:{} - {}", targetIP, targetPort, ec.message());
 	else
 		NETLINK_LOG_DEBUG("Signal sent to {}:{} (type={})", targetIP, targetPort, static_cast<int>(packet.signalType));
+}
+
+
+netlink::SignalPacket netlink::SignalingService::makeEnvelope(SignalType type) const
+{
+	SignalPacket packet{};
+
+	packet.senderName = mLocalComputerName;
+	packet.senderIP	  = mSocket.local_endpoint().address().to_string();
+	packet.senderPort = mBoundPort;
+	packet.signalType = type;
+
+	return packet;
 }

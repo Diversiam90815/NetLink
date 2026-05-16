@@ -25,12 +25,17 @@ namespace netlink
 
 struct SignalingCallbacks
 {
-	std::function<void(const SignalPacket &)> onConnectRequested;
-	std::function<void(const SignalPacket &)> onConnectAccepted;
-	std::function<void(const SignalPacket &)> onConnectDeclined;
-	std::function<void(const SignalPacket &)> onDisconnectReceived;
-	std::function<void(const SignalPacket &)> onReadyFlagReceived;
-	std::function<void(const SignalPacket &)> onDataPortReceived;
+	std::function<void(const std::string &computerName)>							 onConnectRequested;
+	std::function<void(const std::string &computerName, bool accepted)>				 onConnectRequestAnswered;
+	std::function<void(const std::string &computerName)>							 onDisconnectReceived;
+	std::function<void(const std::string &computerName)>							 onReadyFlagReceived;
+	std::function<void(const std::string &computerName, int dataPort)>				 onDataPortReceived;
+
+	// Validation
+	std::function<void(const std::string &computerName, uint8_t request)>			 onValidationRequestReceived;
+	std::function<void(const std::string &computerName, const std::string &secret)>	 onSecretResponseReceived;
+	std::function<void(const std::string &computerName, const std::string &version)> onVersionResponseReceived;
+	std::function<void(const std::string &computerName)>							 onValidationHandshakeReceived;
 };
 
 
@@ -61,10 +66,10 @@ public:
 	void unregisterPeer(const std::string &displayName);
 
 	void sendConnectRequest(const std::string &computerName);
-	void sendConnectAccept(const std::string &computerName);
-	void sendConnectDecline(const std::string &computerName);
+	void sendConnectAnswer(const std::string &computerName, bool requestAccepted);
 	void sendDisconnect(const std::string &computerName);
 	void sendReadyFlag(const std::string &computerName);
+	void sendDataPort(const std::string &computerName, int dataPort);
 
 	// Validation signaling (called via PeerValidationSendCallbacks)
 	void sendValidationRequest(const std::string &computerName, RemoteRequest request);
@@ -73,7 +78,7 @@ public:
 	void sendValidationHandshake(const std::string &computerName);
 
 private:
-	PeerEndpoint						resolvePeer(const std::string &displayName) const;
+	PeerEndpoint						resolvePeer(const std::string &computerName) const;
 
 	void								run() override;
 	void								receiveAsync();
@@ -81,11 +86,15 @@ private:
 	void								routePacket(const SignalPacket &packet);
 	void								sendPacket(const std::string &targetIP, int targetPort, const SignalPacket &packet);
 
+	SignalPacket						makeEnvelope(SignalType type) const;
+
+
 	asio::io_context				   *mIoContext{nullptr};
 	udp::socket							mSocket;
 	udp::endpoint						mSenderEndpoint;
 	std::array<char, 1024>				mRecvBuffer{};
 	int									mBoundPort{0};
+	std::string							mLocalComputerName;
 	std::atomic<bool>					mInitialized{false};
 	SignalingCallbacks					mCallbacks;
 
