@@ -104,7 +104,7 @@ void netlink::SignalingService::sendConnectRequest(const std::string &computerNa
 
 	auto packet = makeEnvelope(SignalType::ConnectRequest);
 
-	sendPacket(peer.IPv4, peer.signalingPort, packet);
+	sendPacket(peer, packet);
 }
 
 
@@ -117,7 +117,7 @@ void netlink::SignalingService::sendConnectAnswer(const std::string &computerNam
 	auto packet	   = makeEnvelope(SignalType::ConnectAnswer);
 	packet.payload = PayloadConnectAnswer{requestAccepted};
 
-	sendPacket(peer.IPv4, peer.signalingPort, packet);
+	sendPacket(peer, packet);
 }
 
 
@@ -129,7 +129,7 @@ void netlink::SignalingService::sendDisconnect(const std::string &computerName)
 
 	auto packet = makeEnvelope(SignalType::Disconnect);
 
-	sendPacket(peer.IPv4, peer.signalingPort, packet);
+	sendPacket(peer, packet);
 }
 
 
@@ -141,7 +141,7 @@ void netlink::SignalingService::sendReadyFlag(const std::string &computerName)
 
 	auto packet = makeEnvelope(SignalType::ReadyFlag);
 
-	sendPacket(peer.IPv4, peer.signalingPort, packet);
+	sendPacket(peer, packet);
 }
 
 
@@ -154,7 +154,7 @@ void netlink::SignalingService::sendDataPort(const std::string &computerName, in
 	auto packet	   = makeEnvelope(SignalType::DataPort);
 	packet.payload = PayloadDataPort{dataPort};
 
-	sendPacket(peer.IPv4, peer.signalingPort, packet);
+	sendPacket(peer, packet);
 }
 
 
@@ -167,7 +167,7 @@ void netlink::SignalingService::sendValidationRequest(const std::string &compute
 	auto packet	   = makeEnvelope(SignalType::ValidationRequest);
 	packet.payload = PayloadValidationRequest{static_cast<uint8_t>(request)};
 
-	sendPacket(peer.IPv4, peer.signalingPort, packet);
+	sendPacket(peer, packet);
 }
 
 
@@ -181,7 +181,7 @@ void netlink::SignalingService::sendSecretResponse(const std::string &computerNa
 	auto packet	   = makeEnvelope(SignalType::SecretResponse);
 	packet.payload = PayloadSecretResponse{(secret)};
 
-	sendPacket(peer.IPv4, peer.signalingPort, packet);
+	sendPacket(peer, packet);
 }
 
 
@@ -194,7 +194,7 @@ void netlink::SignalingService::sendVersionResponse(const std::string &computerN
 	auto packet	   = makeEnvelope(SignalType::VersionResponse);
 	packet.payload = PayloadVersionResponse{(version)};
 
-	sendPacket(peer.IPv4, peer.signalingPort, packet);
+	sendPacket(peer, packet);
 }
 
 
@@ -206,7 +206,7 @@ void netlink::SignalingService::sendValidationHandshake(const std::string &compu
 
 	auto packet = makeEnvelope(SignalType::ValidationHandshake);
 
-	sendPacket(peer.IPv4, peer.signalingPort, packet);
+	sendPacket(peer, packet);
 }
 
 
@@ -347,7 +347,7 @@ void netlink::SignalingService::routePacket(const SignalPacket &packet)
 }
 
 
-void netlink::SignalingService::sendPacket(const std::string &targetIP, int targetPort, const SignalPacket &packet)
+void netlink::SignalingService::sendPacket(const PeerEndpoint &endpoint, const SignalPacket &packet)
 {
 	if (!mInitialized.load())
 	{
@@ -358,15 +358,15 @@ void netlink::SignalingService::sendPacket(const std::string &targetIP, int targ
 	json			 j	 = packet;
 	std::string		 msg = j.dump();
 
-	udp::endpoint	 target(asio::ip::make_address_v4(targetIP), static_cast<unsigned short>(targetPort));
+	udp::endpoint	 target(asio::ip::make_address_v4(endpoint.IPv4), static_cast<unsigned short>(endpoint.signalingPort));
 	asio::error_code ec;
 
 	mSocket.send_to(asio::buffer(msg), target, 0, ec);
 
 	if (ec)
-		NETLINK_LOG_ERROR("Failed to send signal to {}:{} - {}", targetIP, targetPort, ec.message());
+		NETLINK_LOG_ERROR("Failed to send signal to {}:{} - {}", endpoint.IPv4, endpoint.signalingPort, ec.message());
 	else
-		NETLINK_LOG_DEBUG("Signal sent to {}:{} (type={})", targetIP, targetPort, static_cast<int>(packet.signalType));
+		NETLINK_LOG_DEBUG("Signal sent to {}:{} (type={})", endpoint.IPv4, endpoint.signalingPort, static_cast<int>(packet.signalType));
 }
 
 
