@@ -154,6 +154,10 @@ bool netlink::ConnectionService::initiateConnection(const std::string &computerN
 	// update current state
 	mCurrentRequest->state = ConnectionStateInternal::InvitationSent;
 
+	// Start timeout waiting for remote to respond to our invitation
+	mTimeoutService.startTimeout({ConnectionTimeouts::Invitation, computerName}, mConfig.invitationTimeoutMs,
+								 [this](const TimeoutKey &key) { onTimeout(key); });
+
 	NETLINK_LOG_INFO("Connection invitation sent to {}", computerName);
 	return true;
 }
@@ -419,9 +423,12 @@ void netlink::ConnectionService::onReceivedInvitation(const std::string &compute
 		return;
 	}
 
-	// prompt the app to decide
+	// prompt the app to decide; start a timeout in case it never responds
 	if (mCallbacks.onConnectionRequested)
 		mCallbacks.onConnectionRequested(mCurrentRequest->remote);
+
+	mTimeoutService.startTimeout({ConnectionTimeouts::Invitation, computerName}, mConfig.invitationTimeoutMs,
+								 [this](const TimeoutKey &key) { onTimeout(key); });
 }
 
 
@@ -671,6 +678,21 @@ bool netlink::ConnectionService::determineLocalSessionRole()
 					mCallbacks.onConnected(session);
 			});
 
+		client->setConnectTimeoutHandler(
+			[this]()
+			{
+				NETLINK_LOG_ERROR("TCP connection attempt timed out or was refused");
+				dispatchDeferred(
+					[this]()
+					{
+						std::lock_guard<std::mutex> lock(mConnectingMutex);
+						notifyStatus(ConnectionStatusUpdate::Type::Failed, "TCP connection timed out or refused", false);
+						if (mCallbacks.onConnectionFailed)
+							mCallbacks.onConnectionFailed("TCP connection timed out or refused");
+						clearCurrentConnection();
+					});
+			});
+
 		mCurrentRequest->client = std::move(client);
 
 		sendConnectionReadyFlag(mCurrentRequest->remote.displayName, true);
@@ -721,6 +743,8 @@ void netlink::ConnectionService::onTimeout(const TimeoutKey &key)
 	{
 		NETLINK_LOG_WARNING("Invitation timed out for {}", key.identifier);
 		notifyStatus(ConnectionStatusUpdate::Type::Failed, "Invitation timed out for " + key.identifier, false);
+		if (mCallbacks.onConnectionFailed)
+			mCallbacks.onConnectionFailed("Invitation timed out");
 		clearCurrentConnection();
 	}
 	else if (key.category == ConnectionTimeouts::ReadyFlag)
