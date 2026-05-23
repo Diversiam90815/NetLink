@@ -47,7 +47,7 @@ TEST(RemoteCommunication, InitWithValidSessionSetsInitialized)
     // init() may query isConnected internally — allow any number of calls
     EXPECT_CALL(*session, isConnected()).WillRepeatedly(Return(true));
 
-    bool ok = rc.init(session, "secret");
+    bool ok = rc.init(session);
     EXPECT_TRUE(ok)
         << "init() must return true when given a valid session for the first time";
     EXPECT_TRUE(rc.isInitialized())
@@ -62,7 +62,7 @@ TEST(RemoteCommunication, DeinitClearsInitialized)
     auto                session = makeMockSession();
     EXPECT_CALL(*session, isConnected()).WillRepeatedly(Return(true));
 
-    rc.init(session, "secret");
+    rc.init(session);
     rc.deinit();
 
     EXPECT_FALSE(rc.isInitialized())
@@ -75,9 +75,9 @@ TEST(RemoteCommunication, InitTwiceReturnsFalseSecondTime)
     auto                session = makeMockSession();
     EXPECT_CALL(*session, isConnected()).WillRepeatedly(Return(true));
 
-    EXPECT_TRUE(rc.init(session, "secret"))
+    EXPECT_TRUE(rc.init(session))
         << "The first init() call must succeed and return true";
-    EXPECT_FALSE(rc.init(session, "secret"))
+    EXPECT_FALSE(rc.init(session))
         << "A second init() call while already initialized must return false — double-init is a no-op";
     rc.deinit();
 }
@@ -88,7 +88,7 @@ TEST(RemoteCommunication, WriteDoesNotCrashBeforeStart)
     auto                session = makeMockSession();
     EXPECT_CALL(*session, isConnected()).WillRepeatedly(Return(true));
 
-    rc.init(session, "secret");
+    rc.init(session);
     // write() before start() should queue the message without crashing
     std::vector<uint8_t> data{0x01, 0x02, 0x03};
     EXPECT_NO_THROW(rc.write(1, data))
