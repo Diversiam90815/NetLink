@@ -130,7 +130,13 @@ void			  netlink::NetLink::configure(const NetLinkConfig &config, const NetLinkC
 			pImpl->signaling.registerPeer(ep.displayName, ep.IPAddress, ep.port);
 			pImpl->validation.onPeerDiscovered(ep);
 		});
+}
 
+
+bool netlink::NetLink::init()
+{
+	// Initialize services and setup internal callbacks
+	
 	// Wire PeerValidationSendCallbacks
 	PeerValidationSendCallbacks sendCb;
 	sendCb.sendRequest		   = [this](const std::string &name, RemoteRequest req) { pImpl->signaling.sendValidationRequest(name, req); };
@@ -138,31 +144,26 @@ void			  netlink::NetLink::configure(const NetLinkConfig &config, const NetLinkC
 	sendCb.sendVersionResponse = [this](const std::string &name, const std::string &v) { pImpl->signaling.sendVersionResponse(name, v); };
 	sendCb.sendHandshake	   = [this](const std::string &name) { pImpl->signaling.sendValidationHandshake(name); };
 	pImpl->validation.setSendCallbacks(std::move(sendCb));
-}
 
-
-bool netlink::NetLink::init()
-{
-	// Initialize services and setup internal callbacks
-
-	if (!pImpl->network.init())
-		return false;
-
-	pImpl->network.processAdapter();
-
-	// Wire adapter changes -> propagate new IP to all services
+	// Network adapter changed callback
 	pImpl->network.setOnAdapterChanged(
 		[this](const std::string &newIPv4)
 		{
 			pImpl->signaling.setLocalIPv4(newIPv4);
 			pImpl->connectionService.setLocalIP(newIPv4);
 
-			DiscoveryConfig discCfg;
-			discCfg.localIPv4	= newIPv4;
-			discCfg.displayName = pImpl->config.localDisplayName;
-			// @TODO: set other discovery config fields from pImpl->config...
-			pImpl->discovery.init(discCfg);
+			DiscoveryConfig disConf;
+			disConf.localIPv4		 = newIPv4;
+			disConf.displayName		 = pImpl->config.localDisplayName;
+			disConf.discoveryPort	 = pImpl->config.discoveryPort;
+			disConf.broadCastAddress = pImpl->config.broadcastAddress;
+			pImpl->discovery.init(disConf);
 		});
+
+	if (!pImpl->network.init())
+		return false;
+
+	pImpl->network.processAdapter();
 
 	if (!pImpl->signaling.init(pImpl->config.localDisplayName))
 		return false;
