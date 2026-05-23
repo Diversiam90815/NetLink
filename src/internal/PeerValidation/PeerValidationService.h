@@ -76,15 +76,17 @@ public:
 	~PeerValidationService() = default;
 
 	// Configuration
-	void			 setConfig(const PeerValidationConfig &config) { mConfig = config; }
-	void			 setValidationCallback(ValidationCallback cb) { mCallback = std::move(cb); }
-	void			 setSendCallbacks(PeerValidationSendCallbacks cb) { mSendCallbacks = std::move(cb); }
+	void						  setConfig(const PeerValidationConfig &config) { mConfig = config; }
+	void						  setValidationCallback(ValidationCallback cb) { mCallback = std::move(cb); }
+	void						  setSendCallbacks(PeerValidationSendCallbacks cb) { mSendCallbacks = std::move(cb); }
 
 	// Manual validation
-	ValidationResult validatePeer(const DiscoveryEndpoint &peer);
-	void			 clearValidatedPeer(const std::string &computerName);
+	ValidationResult			  validatePeer(const DiscoveryEndpoint &peer);
+	void						  clearValidatedPeer(const std::string &computerName);
 
-	void			 onPeerDiscovered(const DiscoveryEndpoint &remoteEndpoint);
+	void						  onPeerDiscovered(const DiscoveryEndpoint &remoteEndpoint);
+
+	std::vector<ValidationResult> getValidatedPeers();
 
 private:
 	// Validation logic
@@ -138,7 +140,7 @@ private:
 	PeerValidationSendCallbacks				 mSendCallbacks;
 
 	std::map<std::string, ValidationResult>	 mValidatedPeers;	  // key = Computername
-	std::mutex								 mValidatedPeerMutex;
+	mutable std::mutex						 mValidatedPeerMutex;
 
 	std::map<std::string, PendingValidation> mPendingValidations; // key = Computername
 	std::mutex								 mPendingValidationMutex;

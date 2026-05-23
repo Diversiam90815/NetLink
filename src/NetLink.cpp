@@ -90,9 +90,9 @@ void			  netlink::NetLink::configure(const NetLinkConfig &config, const NetLinkC
 	// Remote wants to connect -> ask app to accept/decline
 	svcCB.onConnectionRequested = [this](const DiscoveryEndpoint &remote)
 	{
-		pImpl->connectionState = ConnectionState::None;
+		pImpl->connectionState = ConnectionState::PendingInbound;
 		if (pImpl->callbacks.onConnectionChanged)
-			pImpl->callbacks.onConnectionChanged({ConnectionState::None, "", {remote.IPAddress, remote.port, remote.displayName}});
+			pImpl->callbacks.onConnectionChanged({ConnectionState::PendingInbound, "", {remote.IPAddress, remote.port, remote.displayName}});
 	};
 
 	// Both peers ready -> init messaging
@@ -213,23 +213,52 @@ void netlink::NetLink::stopDiscovery()
 }
 
 
-std::vector<netlink::Endpoint> netlink::NetLink::getDiscoveredEndpoints()
+std::vector<netlink::Endpoint> netlink::NetLink::getPotentialEndpoints()
 {
-	// TODO: map internal endpoints to public endpoints
-	return std::vector<Endpoint>();
+	auto				  validated = pImpl->validation.getValidatedPeers();
+
+	std::vector<Endpoint> result;
+	result.reserve(validated.size());
+
+	for (const auto &vr : validated)
+	{
+		result.push_back({vr.remoteEndpoint.IPAddress, vr.remoteEndpoint.port, vr.remoteEndpoint.displayName});
+	}
+
+	return result;
 }
 
 
 bool netlink::NetLink::connectTo(const Endpoint &remote)
 {
-	return true;
+	return pImpl->connectionService.initiateConnection(remote.displayName);
 }
 
 
-void					 netlink::NetLink::respondToConnection(bool accepted) {}
+void netlink::NetLink::respondToConnection(bool accepted)
+{
+	auto remoteOpt = pImpl->connectionService.getCurrentRemote();
+	if (!remoteOpt.has_value())
+		return;
+
+	const auto &name = remoteOpt->displayName;
+
+	if (accepted)
+		pImpl->connectionService.acceptIncomingConnection(name);
+	else
+		pImpl->connectionService.declineIncomingConnection(name, "User declined");
+}
 
 
-void					 netlink::NetLink::disconnect() {}
+void netlink::NetLink::disconnect()
+{
+	auto remoteOpt = pImpl->connectionService.getCurrentRemote();
+	if (remoteOpt.has_value())
+		pImpl->connectionService.closeConnection(remoteOpt->displayName);
+
+	pImpl->communication.deinit();
+	pImpl->connectionState = ConnectionState::Disconnected;
+}
 
 
 netlink::ConnectionState netlink::NetLink::getConnectionState() const

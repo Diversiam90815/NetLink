@@ -140,6 +140,23 @@ void netlink::PeerValidationService::onPeerDiscovered(const DiscoveryEndpoint &r
 }
 
 
+std::vector<netlink::ValidationResult> netlink::PeerValidationService::getValidatedPeers()
+{
+	std::lock_guard<std::mutex>	  lock(mValidatedPeerMutex);
+
+	std::vector<ValidationResult> result;
+	result.reserve(mValidatedPeers.size());
+
+	for (const auto &[name, vr] : mValidatedPeers)
+	{
+		if (vr.isReadyToConnect())
+			result.push_back(vr);
+	}
+
+	return result;
+}
+
+
 netlink::ValidationResult netlink::PeerValidationService::performValidation(const std::string &computerName)
 {
 	ValidationResult result;

@@ -62,6 +62,7 @@ enum class ConnectionState
 	None,
 	Hosting,
 	Searching,
+	PendingInbound,
 	Connected,
 	Disconnected,
 	Error,
@@ -136,8 +137,8 @@ public:
 	// Stop active discovery
 	void						stopDiscovery();
 
-	// Currently discovered remotes (snapshot)
-	std::vector<Endpoint>		getDiscoveredEndpoints();
+	// Currently validated remotes (snapshot)
+	std::vector<Endpoint>		getPotentialEndpoints();
 
 
 	// -- Connection ------------------------------
