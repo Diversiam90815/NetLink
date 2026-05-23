@@ -66,3 +66,7 @@ if(NETLINK_ENABLE_LOGGING)
 endif()
 
 target_link_libraries(${PROJECT_NAME} PUBLIC iphlpapi PRIVATE nlohmann_json::nlohmann_json)
+
+include(CTest)
+enable_testing()
+add_subdirectory(tests)
