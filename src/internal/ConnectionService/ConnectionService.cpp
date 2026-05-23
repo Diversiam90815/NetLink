@@ -14,16 +14,15 @@ netlink::ConnectionService::ConnectionService(asio::io_context &ioContext, Signa
 	: mIoContext(ioContext), mSignaling(signaling), mTransportFactory(transportFactory)
 {
 	SignalingCallbacks cb;
-	cb.onConnectRequested	= [this](const SignalPacket &pkt) { onReceivedInvitation(pkt.displayName); };
-	cb.onConnectAccepted	= [this](const SignalPacket &pkt) { onReceivedAnswerToInvite(pkt.displayName, true, ""); };
-	cb.onConnectDeclined	= [this](const SignalPacket &pkt) { onReceivedAnswerToInvite(pkt.displayName, false, "Declined"); };
+	cb.onConnectRequested		= [this](const std::string &computerName) { onReceivedInvitation(computerName); };
+	cb.onConnectRequestAnswered = [this](const std::string &computerName, bool accepted) { onReceivedAnswerToInvite(computerName, accepted, ""); };
 
-	cb.onDisconnectReceived = [this](const SignalPacket &pkt)
+	cb.onDisconnectReceived		= [this](const std::string &computerName)
 	{
 		asio::post(mIoContext,
-				   [this, pkt]()
+				   [this, computerName]()
 				   {
-					   NETLINK_LOG_INFO("Remote {} disconnected", pkt.displayName);
+					   NETLINK_LOG_INFO("Remote {} disconnected", computerName);
 
 					   clearCurrentConnection();
 
@@ -32,19 +31,24 @@ netlink::ConnectionService::ConnectionService(asio::io_context &ioContext, Signa
 				   });
 	};
 
-	cb.onReadyFlagReceived = [this](const SignalPacket &pkt)
+	cb.onReadyFlagReceived = [this](const std::string &computerName)
 	{
 		asio::post(mIoContext,
-				   [this, pkt]()
+				   [this, computerName]()
 				   {
-					   // pkt.senderPort carries the remote's TCP bound port (Acceptor advertises it)
 					   std::lock_guard<std::mutex> lock(mConnectingMutex);
-					   if (!mCurrentRequest.has_value())
-						   return;
-
-					   mCurrentRequest->remote.port = pkt.senderPort; // update with actual TCP port
-					   onReceivedConnectionReadyFlag(pkt.displayName);
+					   onReceivedConnectionReadyFlag(computerName);
 				   });
+	};
+
+	cb.onDataPortReceived = [this](const std::string &computerName, int dataPort)
+	{
+		std::lock_guard<std::mutex> lock(mConnectingMutex);
+		if (!mCurrentRequest.has_value())
+			return;
+
+		NETLINK_LOG_INFO("Received data port {} from {}", dataPort, computerName);
+		mCurrentRequest->remote.port = dataPort;
 	};
 
 	mSignaling.setCallbacks(std::move(cb));
@@ -315,10 +319,7 @@ bool netlink::ConnectionService::answerInvitation(const std::string &computerNam
 		return false;
 	}
 
-	if (connectionAccepted)
-		mSignaling.sendConnectAccept(computerName);
-	else
-		mSignaling.sendConnectDecline(computerName);
+	mSignaling.sendConnectAnswer(computerName, connectionAccepted);
 
 	return true;
 }
@@ -601,7 +602,8 @@ bool netlink::ConnectionService::determineLocalSessionRole()
 
 		mCurrentRequest->server = std::move(server);
 
-		// @TODO: communicate bound port
+		// communicate bound port
+		mSignaling.sendDataPort(mCurrentRequest->remote.displayName, boundPort);
 
 		sendConnectionReadyFlag(mCurrentRequest->remote.displayName, true);
 
