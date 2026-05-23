@@ -460,7 +460,7 @@ void netlink::ConnectionService::onReceivedConnectionReadyFlag(const std::string
 	if (mCurrentRequest->localRole == SessionRole::Connector && mCurrentRequest->client)
 	{
 		NETLINK_LOG_INFO("Connector: connecting to {}:{}", mCurrentRequest->remote.IPAddress, mCurrentRequest->remote.port);
-		mCurrentRequest->state = ConnectionStateInternal::EstablishingTransport;
+		mCurrentRequest->state = ConnectionStateInternal::Connected;
 		mCurrentRequest->client->connect(mCurrentRequest->remote.IPAddress, static_cast<unsigned short>(mCurrentRequest->remote.port));
 	}
 }
@@ -640,10 +640,19 @@ bool netlink::ConnectionService::determineLocalSessionRole()
 
 		sendConnectionReadyFlag(mCurrentRequest->remote.displayName, true);
 
-		// @TODO: Check if remote already ready and start connection flow
-
-		mTimeoutService.startTimeout({ConnectionTimeouts::ReadyFlag, mCurrentRequest->remote.displayName}, mConfig.readyFlagTimeoutMs,
-									 [this](const TimeoutKey &key) { onTimeout(key); });
+		// If the acceptor's dataport + readyflag already arrived before we got here, connect now
+		if (mRemoteReady.load() && mCurrentRequest->remote.port != 0)
+		{
+			NETLINK_LOG_INFO("Connector: remote already ready, connecting immediately to {}:{}", mCurrentRequest->remote.IPAddress, mCurrentRequest->remote.port);
+			mCurrentRequest->state = ConnectionStateInternal::Connected;
+			mCurrentRequest->client->connect(mCurrentRequest->remote.IPAddress, static_cast<unsigned short>(mCurrentRequest->remote.port));
+		}
+		else
+		{
+			// Wait for ReadyFlag from Acceptor (handled in onReceivedConnectionReadyFlag)
+			mTimeoutService.startTimeout({ConnectionTimeouts::ReadyFlag, mCurrentRequest->remote.displayName}, mConfig.readyFlagTimeoutMs,
+										 [this](const TimeoutKey &key) { onTimeout(key); });
+		}
 	}
 	else
 	{
