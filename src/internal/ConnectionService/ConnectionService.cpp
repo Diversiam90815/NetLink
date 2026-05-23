@@ -78,6 +78,13 @@ netlink::ConnectionService::ConnectionService(asio::io_context &ioContext, Signa
 netlink::ConnectionService::~ConnectionService()
 {
 	mDeferredRunning.store(false);
+
+	{
+		std::lock_guard<std::mutex> lock(mDeferredMutex);
+		while (!mDeferredQueue.empty())
+			mDeferredQueue.pop();
+	}
+
 	mDeferredCV.notify_all();
 
 	if (mDeferredThread.joinable())
