@@ -9,7 +9,7 @@
 #include "NetLinkLog.h"
 
 
-bool RemoteCommunication::init(std::shared_ptr<ISession> session, const std::string &secret)
+bool RemoteCommunication::init(std::shared_ptr<ISession> session)
 {
 	if (mIsInitialized.load())
 	{
@@ -29,7 +29,6 @@ bool RemoteCommunication::init(std::shared_ptr<ISession> session, const std::str
 	}
 
 	mSession = session;
-	mSecret		= secret;
 
 	if (mSendThread)
 		mSendThread->stop();
@@ -87,29 +86,8 @@ void RemoteCommunication::start()
 	mSession->startReadAsync(
 		[this](netlink::InternalMessage message)
 		{
-			const size_t secretLen = mSecret.size();
-
-			// Validate and process the received message body
-			if (message.data.size() < secretLen)
-			{
-				NETLINK_LOG_ERROR("Received message is too small to contain secret identifier.");
-				return;
-			}
-
-			if (memcmp(message.data.data(), mSecret.data(), secretLen) != 0)
-			{
-				NETLINK_LOG_ERROR("Secret mismatch — rejecting message.");
-				return;
-			}
-
-			// The secret is valid. Strip it from the data.
-			message.data.erase(message.data.begin(), message.data.begin() + secretLen);
-
-			// Queue the message
-			{
-				std::lock_guard<std::mutex> lock(mIncomingListMutex);
-				mIncomingMessages.push_back(message);
-			};
+			std::lock_guard<std::mutex> lock(mIncomingListMutex);
+			mIncomingMessages.push_back(message);
 		});
 
 	mSendThread->start();
@@ -151,11 +129,7 @@ void RemoteCommunication::write(uint32_t type, std::vector<uint8_t> data)
 
 	netlink::InternalMessage	message;
 	message.type = type;
-
-	// Prepend the secret to the message data
-	message.data.reserve(mSecret.size() + data.size());
-	message.data.insert(message.data.end(), mSecret.begin(), mSecret.end());
-	message.data.insert(message.data.end(), data.begin(), data.end());
+	message.data = std::move(data);
 
 	mOutgoingMessages.push_back(message);
 	mSendThread->triggerEvent();

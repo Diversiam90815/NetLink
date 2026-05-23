@@ -26,7 +26,7 @@ public:
 	RemoteCommunication()  = default;
 	~RemoteCommunication() = default;
 
-	bool init(std::shared_ptr<ISession> session, const std::string &secret);
+	bool init(std::shared_ptr<ISession> session);
 	void deinit();
 
 	void start();
@@ -46,7 +46,6 @@ private:
 
 
 	std::atomic<bool>					  mIsInitialized{false};
-	std::string							  mSecret;
 	MessageCallback						  mCallback;
 
 	std::shared_ptr<ISession>			  mSession;

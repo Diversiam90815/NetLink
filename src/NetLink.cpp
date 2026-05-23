@@ -98,7 +98,7 @@ void			  netlink::NetLink::configure(const NetLinkConfig &config, const NetLinkC
 	// Both peers ready -> init messaging
 	svcCB.onConnected = [this](ISession::pointer session)
 	{
-		pImpl->communication.init(session, pImpl->config.secret);
+		pImpl->communication.init(session);
 		pImpl->communication.start();
 		pImpl->connectionState = ConnectionState::Connected;
 
@@ -144,6 +144,7 @@ bool netlink::NetLink::init()
 	sendCb.sendVersionResponse = [this](const std::string &name, const std::string &v) { pImpl->signaling.sendVersionResponse(name, v); };
 	sendCb.sendHandshake	   = [this](const std::string &name) { pImpl->signaling.sendValidationHandshake(name); };
 	pImpl->validation.setSendCallbacks(std::move(sendCb));
+	pImpl->validation.setLocalSecret(pImpl->config.secret);
 
 	// Network adapter changed callback
 	pImpl->network.setOnAdapterChanged(

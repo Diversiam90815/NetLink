@@ -50,7 +50,7 @@ netlink::ValidationResult netlink::PeerValidationService::validatePeer(const Dis
 								[this](PendingValidation &pending)
 								{
 									pending.secretReceived = true;
-									pending.secret		   = ""; // @TODO : set to local secret
+									pending.secret		   = mLocalSecret;
 								});
 	}
 
@@ -67,7 +67,7 @@ netlink::ValidationResult netlink::PeerValidationService::validatePeer(const Dis
 								[this](PendingValidation &pending)
 								{
 									pending.versionReceived = true;
-									pending.version			= ""; // @TODO : set to local version
+									pending.version			= mLocalVersion;
 								});
 	}
 
