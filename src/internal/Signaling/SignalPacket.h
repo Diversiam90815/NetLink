@@ -139,6 +139,7 @@ inline void from_json(const nlohmann::json &j, SignalPacket &p)
 	p.signalType = static_cast<SignalType>(j.at(JSON_Serialization::SignalType).get<int>());
 	j.at(JSON_Serialization::SenderIPv4).get_to(p.senderIP);
 	j.at(JSON_Serialization::SenderPort).get_to(p.senderPort);
+	j.at(JSON_Serialization::ComputerName).get_to(p.senderName);
 
 	const auto &pl = j.contains(JSON_Serialization::Payload) ? j[JSON_Serialization::Payload] : nlohmann::json::object();
 

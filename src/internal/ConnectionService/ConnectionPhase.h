@@ -61,6 +61,7 @@ struct ConnectionStatusUpdate
 		{
 		case Type::Initiated: return "Initiated";
 		case Type::InvitationSent: return "Invitation Sent";
+		case Type::InvitationReceived: return "Invitation Received";
 		case Type::Accepted: return "Accepted";
 		case Type::Declined: return "Declined";
 		case Type::Establishing: return "Establishing";
