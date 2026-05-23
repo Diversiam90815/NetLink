@@ -77,6 +77,8 @@ public:
 
 	// Configuration
 	void						  setConfig(const PeerValidationConfig &config) { mConfig = config; }
+	void						  setLocalSecret(const std::string &secret) { mLocalSecret = secret; }
+	void						  setLocalVersion(const std::string &version) { mLocalVersion = version; }
 	void						  setValidationCallback(ValidationCallback cb) { mCallback = std::move(cb); }
 	void						  setSendCallbacks(PeerValidationSendCallbacks cb) { mSendCallbacks = std::move(cb); }
 

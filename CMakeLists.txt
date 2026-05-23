@@ -67,6 +67,10 @@ endif()
 
 target_link_libraries(${PROJECT_NAME} PUBLIC iphlpapi PRIVATE nlohmann_json::nlohmann_json)
 
-include(CTest)
-enable_testing()
-add_subdirectory(tests)
+option(NETLINK_BUILD_TESTS "Build NetLink tests" ${PROJECT_IS_TOP_LEVEL})
+
+if(NETLINK_BUILD_TESTS)
+    include(CTest)
+    enable_testing()
+    add_subdirectory(tests)
+endif()

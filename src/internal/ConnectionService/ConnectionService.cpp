@@ -45,9 +45,7 @@ netlink::ConnectionService::ConnectionService(asio::io_context &ioContext, Signa
 				NETLINK_LOG_INFO("Remote {} disconnected", computerName);
 
 				clearCurrentConnection();
-
-				if (mCallbacks.onDisconnected)
-					mCallbacks.onDisconnected();
+				notifyStatus(ConnectionStatusUpdate::Type::Closed, computerName + " disconnected");
 			});
 	};
 
@@ -78,6 +76,13 @@ netlink::ConnectionService::ConnectionService(asio::io_context &ioContext, Signa
 netlink::ConnectionService::~ConnectionService()
 {
 	mDeferredRunning.store(false);
+
+	{
+		std::lock_guard<std::mutex> lock(mDeferredMutex);
+		while (!mDeferredQueue.empty())
+			mDeferredQueue.pop();
+	}
+
 	mDeferredCV.notify_all();
 
 	if (mDeferredThread.joinable())
@@ -146,6 +151,10 @@ bool netlink::ConnectionService::initiateConnection(const std::string &computerN
 
 	// update current state
 	mCurrentRequest->state = ConnectionStateInternal::InvitationSent;
+
+	// Start timeout waiting for remote to respond to our invitation
+	mTimeoutService.startTimeout({ConnectionTimeouts::Invitation, computerName}, mConfig.invitationTimeoutMs,
+								 [this](const TimeoutKey &key) { onTimeout(key); });
 
 	NETLINK_LOG_INFO("Connection invitation sent to {}", computerName);
 	return true;
@@ -412,9 +421,18 @@ void netlink::ConnectionService::onReceivedInvitation(const std::string &compute
 		return;
 	}
 
-	// prompt the app to decide
-	if (mCallbacks.onConnectionRequested)
-		mCallbacks.onConnectionRequested(mCurrentRequest->remote);
+	// Notify with the remote endpoint so the app can show who is connecting.
+	// Start a timeout in case the app never responds.
+	{
+		ConnectionStatusUpdate update;
+		update.type	   = ConnectionStatusUpdate::Type::InvitationReceived;
+		update.endpoint = mCurrentRequest->remote;
+		update.success	= true;
+		notifyStatus(std::move(update));
+	}
+
+	mTimeoutService.startTimeout({ConnectionTimeouts::Invitation, computerName}, mConfig.invitationTimeoutMs,
+								 [this](const TimeoutKey &key) { onTimeout(key); });
 }
 
 
@@ -558,10 +576,6 @@ bool netlink::ConnectionService::retryConnection()
 		NETLINK_LOG_WARNING("Max connection retried ({}) reached!", mConfig.maxConnectionRetries);
 
 		notifyStatus(ConnectionStatusUpdate::Type::Failed, "Max retries reached", false);
-
-		if (mCallbacks.onConnectionFailed)
-			mCallbacks.onConnectionFailed("Max retries reached");
-
 		return false;
 	}
 
@@ -581,7 +595,28 @@ bool netlink::ConnectionService::retryConnection()
 }
 
 
-void netlink::ConnectionService::notifyStatus(ConnectionStatusUpdate::Type type, const std::string &message, bool success) {}
+void netlink::ConnectionService::notifyStatus(ConnectionStatusUpdate::Type type, const std::string &message, bool success)
+{
+	ConnectionStatusUpdate update;
+	update.type	   = type;
+	update.message = message;
+	update.success = success;
+	notifyStatus(std::move(update));
+}
+
+
+void netlink::ConnectionService::notifyStatus(ConnectionStatusUpdate update)
+{
+	update.timestamp = std::chrono::steady_clock::now();
+
+	if (update.success)
+		NETLINK_LOG_INFO("Connection [{}]: {}", update.getTypeString(), update.message);
+	else
+		NETLINK_LOG_WARNING("Connection [{}] failed: {}", update.getTypeString(), update.message);
+
+	if (mCallbacks.onStatusUpdate)
+		mCallbacks.onStatusUpdate(update);
+}
 
 
 bool netlink::ConnectionService::determineLocalSessionRole()
@@ -619,8 +654,11 @@ bool netlink::ConnectionService::determineLocalSessionRole()
 
 				mTimeoutService.cancelAll();
 
-				if (mCallbacks.onConnected)
-					mCallbacks.onConnected(session);
+				ConnectionStatusUpdate update;
+				update.type	   = ConnectionStatusUpdate::Type::Established;
+				update.session = session;
+				update.success = true;
+				notifyStatus(std::move(update));
 			});
 
 		server->startAccept();
@@ -660,8 +698,24 @@ bool netlink::ConnectionService::determineLocalSessionRole()
 
 				mTimeoutService.cancelAll();
 
-				if (mCallbacks.onConnected)
-					mCallbacks.onConnected(session);
+				ConnectionStatusUpdate update;
+				update.type	   = ConnectionStatusUpdate::Type::Established;
+				update.session = session;
+				update.success = true;
+				notifyStatus(std::move(update));
+			});
+
+		client->setConnectTimeoutHandler(
+			[this]()
+			{
+				NETLINK_LOG_ERROR("TCP connection attempt timed out or was refused");
+				dispatchDeferred(
+					[this]()
+					{
+						std::lock_guard<std::mutex> lock(mConnectingMutex);
+						notifyStatus(ConnectionStatusUpdate::Type::Failed, "TCP connection timed out or refused", false);
+						clearCurrentConnection();
+					});
 			});
 
 		mCurrentRequest->client = std::move(client);
