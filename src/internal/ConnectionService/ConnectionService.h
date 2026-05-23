@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <queue>
 #include <atomic>
 #include <functional>
 #include <memory>
@@ -81,6 +82,7 @@ class ConnectionService
 {
 public:
 	ConnectionService(asio::io_context &ioContext, SignalingService &signaling, ITransportFactory &transportFactory);
+	~ConnectionService();
 
 	// Configuration
 	void							 setCallbacks(ConnectionServiceCallbacks cb) { mCallbacks = std::move(cb); }
@@ -127,7 +129,10 @@ private:
 
 	// Define role
 	bool									determineLocalSessionRole();
-
+	
+	// Deferred action queue
+	void									dispatchDeferred(std::function<void()> fn);
+	
 	// Timeout expiry handler
 	void									onTimeout(const TimeoutKey &key);
 
@@ -140,6 +145,13 @@ private:
 	ConnectionConfig						mConfig;
 	ConnectionServiceCallbacks				mCallbacks;
 	std::string								mLocalIP{};
+
+
+	std::thread								mDeferredThread;
+	std::queue<std::function<void()>>		mDeferredQueue;
+	std::mutex								mDeferredMutex;
+	std::condition_variable					mDeferredCV;
+	std::atomic<bool>						mDeferredRunning{false};
 
 	// Validation result cache
 	std::map<std::string, ValidationResult> mValidatedResults; // Key : ComputerName

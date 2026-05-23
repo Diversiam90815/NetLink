@@ -13,32 +13,52 @@
 netlink::ConnectionService::ConnectionService(asio::io_context &ioContext, SignalingService &signaling, ITransportFactory &transportFactory)
 	: mIoContext(ioContext), mSignaling(signaling), mTransportFactory(transportFactory)
 {
+	mDeferredRunning.store(true);
+	mDeferredThread = std::thread(
+		[this]()
+		{
+			while (mDeferredRunning.load())
+			{
+				std::unique_lock<std::mutex> lock(mDeferredMutex);
+				mDeferredCV.wait(lock, [this] { return !mDeferredQueue.empty() || !mDeferredRunning.load(); });
+
+				while (!mDeferredQueue.empty())
+				{
+					auto fn = std::move(mDeferredQueue.front());
+					mDeferredQueue.pop();
+					lock.unlock();
+					fn();
+					lock.lock();
+				}
+			}
+		});
+
 	SignalingCallbacks cb;
 	cb.onConnectRequested		= [this](const std::string &computerName) { onReceivedInvitation(computerName); };
 	cb.onConnectRequestAnswered = [this](const std::string &computerName, bool accepted) { onReceivedAnswerToInvite(computerName, accepted, ""); };
 
 	cb.onDisconnectReceived		= [this](const std::string &computerName)
 	{
-		asio::post(mIoContext,
-				   [this, computerName]()
-				   {
-					   NETLINK_LOG_INFO("Remote {} disconnected", computerName);
+		dispatchDeferred(
+			[this, computerName]()
+			{
+				NETLINK_LOG_INFO("Remote {} disconnected", computerName);
 
-					   clearCurrentConnection();
+				clearCurrentConnection();
 
-					   if (mCallbacks.onDisconnected)
-						   mCallbacks.onDisconnected();
-				   });
+				if (mCallbacks.onDisconnected)
+					mCallbacks.onDisconnected();
+			});
 	};
 
 	cb.onReadyFlagReceived = [this](const std::string &computerName)
 	{
-		asio::post(mIoContext,
-				   [this, computerName]()
-				   {
-					   std::lock_guard<std::mutex> lock(mConnectingMutex);
-					   onReceivedConnectionReadyFlag(computerName);
-				   });
+		dispatchDeferred(
+			[this, computerName]()
+			{
+				std::lock_guard<std::mutex> lock(mConnectingMutex);
+				onReceivedConnectionReadyFlag(computerName);
+			});
 	};
 
 	cb.onDataPortReceived = [this](const std::string &computerName, int dataPort)
@@ -52,6 +72,16 @@ netlink::ConnectionService::ConnectionService(asio::io_context &ioContext, Signa
 	};
 
 	mSignaling.setCallbacks(std::move(cb));
+}
+
+
+netlink::ConnectionService::~ConnectionService()
+{
+	mDeferredRunning.store(false);
+	mDeferredCV.notify_all();
+
+	if (mDeferredThread.joinable())
+		mDeferredThread.join();
 }
 
 
@@ -378,9 +408,7 @@ void netlink::ConnectionService::onReceivedInvitation(const std::string &compute
 	if (mConfig.autoAcceptConnection)
 	{
 		NETLINK_LOG_INFO("Auto-accepting connection from {}", computerName);
-
-		// @ TODO: accept connection without acquiring lock
-
+		dispatchDeferred([this, computerName]() { acceptIncomingConnection(computerName); });
 		return;
 	}
 
@@ -659,6 +687,16 @@ bool netlink::ConnectionService::determineLocalSessionRole()
 		NETLINK_LOG_WARNING("Unknwon session role determined..");
 		return false;
 	}
+}
+
+
+void netlink::ConnectionService::dispatchDeferred(std::function<void()> fn)
+{
+	{
+		std::lock_guard<std::mutex> lock(mDeferredMutex);
+		mDeferredQueue.push(std::move(fn));
+	}
+	mDeferredCV.notify_one();
 }
 
 
