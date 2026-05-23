@@ -411,5 +411,3 @@ netlink::SignalPacket netlink::SignalingService::makeEnvelope(SignalType type) c
 
 	return packet;
 }
-
-void netlink::SignalingService::dispatchDeferred(std::function<void()> fn) {}
