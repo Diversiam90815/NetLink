@@ -595,7 +595,28 @@ bool netlink::ConnectionService::retryConnection()
 }
 
 
-void netlink::ConnectionService::notifyStatus(ConnectionStatusUpdate::Type type, const std::string &message, bool success) {}
+void netlink::ConnectionService::notifyStatus(ConnectionStatusUpdate::Type type, const std::string &message, bool success)
+{
+	ConnectionStatusUpdate update;
+	update.type	   = type;
+	update.message = message;
+	update.success = success;
+	notifyStatus(std::move(update));
+}
+
+
+void netlink::ConnectionService::notifyStatus(ConnectionStatusUpdate update)
+{
+	update.timestamp = std::chrono::steady_clock::now();
+
+	if (update.success)
+		NETLINK_LOG_INFO("Connection [{}]: {}", update.getTypeString(), update.message);
+	else
+		NETLINK_LOG_WARNING("Connection [{}] failed: {}", update.getTypeString(), update.message);
+
+	if (mCallbacks.onStatusUpdate)
+		mCallbacks.onStatusUpdate(update);
+}
 
 
 bool netlink::ConnectionService::determineLocalSessionRole()

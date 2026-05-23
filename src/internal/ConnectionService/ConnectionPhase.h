@@ -8,6 +8,7 @@
 #pragma once
 
 #include "Discovery/DiscoveryEndpoint.h"
+#include "Transport/TransportInterfaces.h"
 
 
 namespace netlink
@@ -50,6 +51,7 @@ struct ConnectionStatusUpdate
 	DiscoveryEndpoint					  endpoint;
 	std::string							  message;
 	bool								  success{true};
+	ISession::pointer					  session{};   // populated for Type::Established only
 
 	// Timing info
 	std::chrono::steady_clock::time_point timestamp;

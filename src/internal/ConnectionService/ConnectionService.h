@@ -126,6 +126,7 @@ private:
 	std::optional<ValidationResult>			findValidationResultByIPv4(const std::string &ipv4) const;
 	bool									retryConnection();
 	void									notifyStatus(ConnectionStatusUpdate::Type type, const std::string &message = "", bool success = true);
+	void									notifyStatus(ConnectionStatusUpdate update);
 
 	// Define role
 	bool									determineLocalSessionRole();
