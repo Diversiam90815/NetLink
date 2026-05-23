@@ -39,8 +39,7 @@ TEST(SignalPacketRoundtrip, EnvelopeFieldsPreserved)
         << "senderIP must be written and read back correctly";
     EXPECT_EQ(result.senderPort, 9000)
         << "senderPort must be written and read back correctly";
-    // senderName is serialized (to_json) but not deserialized (from_json) — known gap
-    EXPECT_EQ(result.senderName, "")
+	EXPECT_EQ(result.senderName, "pc-alpha")
         << "senderName is currently not deserialized in from_json; it must remain empty after round-trip";
     EXPECT_TRUE(std::holds_alternative<PayloadEmpty>(result.payload))
         << "A packet with no structured payload must deserialize to PayloadEmpty";

@@ -11,6 +11,12 @@
 
 bool RemoteCommunication::init(std::shared_ptr<ISession> session, const std::string &secret)
 {
+	if (mIsInitialized.load())
+	{
+		NETLINK_LOG_ERROR("Already initialized. Call deinit() first.");
+		return false;
+	}
+
 	if (!session)
 	{
 		NETLINK_LOG_ERROR("Session is not valid. We received a nullptr. Cannot initialize");
