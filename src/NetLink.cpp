@@ -87,38 +87,52 @@ void			  netlink::NetLink::configure(const NetLinkConfig &config, const NetLinkC
 
 	netlink::ConnectionServiceCallbacks svcCB;
 
-	// Remote wants to connect -> ask app to accept/decline
-	svcCB.onConnectionRequested = [this](const DiscoveryEndpoint &remote)
+	svcCB.onStatusUpdate = [this](const ConnectionStatusUpdate &update)
 	{
-		pImpl->connectionState = ConnectionState::PendingInbound;
-		if (pImpl->callbacks.onConnectionChanged)
-			pImpl->callbacks.onConnectionChanged({ConnectionState::PendingInbound, "", {remote.IPAddress, remote.port, remote.displayName}});
-	};
+		switch (update.type)
+		{
+		case ConnectionStatusUpdate::Type::Established:
+			// Wire the live session into the messaging layer and tell the app.
+			pImpl->communication.init(update.session);
+			pImpl->communication.start();
+			pImpl->connectionState = ConnectionState::Connected;
+			if (pImpl->callbacks.onConnectionChanged)
+				pImpl->callbacks.onConnectionChanged({ConnectionState::Connected, "", {}});
+			break;
 
-	// Both peers ready -> init messaging
-	svcCB.onConnected = [this](ISession::pointer session)
-	{
-		pImpl->communication.init(session);
-		pImpl->communication.start();
-		pImpl->connectionState = ConnectionState::Connected;
+		case ConnectionStatusUpdate::Type::InvitationReceived:
+			// Remote wants to connect — surface to app so it can call respondToConnection().
+			pImpl->connectionState = ConnectionState::PendingInbound;
+			if (pImpl->callbacks.onConnectionChanged)
+			{
+				const auto &ep = update.endpoint;
+				pImpl->callbacks.onConnectionChanged({ConnectionState::PendingInbound, "", {ep.IPAddress, ep.port, ep.displayName}});
+			}
+			break;
 
-		if (pImpl->callbacks.onConnectionChanged)
-			pImpl->callbacks.onConnectionChanged({ConnectionState::Connected, "", {}});
-	};
+		case ConnectionStatusUpdate::Type::Failed:
+		case ConnectionStatusUpdate::Type::Declined:
+			pImpl->connectionState = ConnectionState::Error;
+			if (pImpl->callbacks.onConnectionChanged)
+				pImpl->callbacks.onConnectionChanged({ConnectionState::Error, update.message, {}});
+			break;
 
-	svcCB.onConnectionFailed = [this](const std::string &reason)
-	{
-		pImpl->connectionState = ConnectionState::Error;
-		if (pImpl->callbacks.onConnectionChanged)
-			pImpl->callbacks.onConnectionChanged({ConnectionState::Error, reason, {}});
-	};
+		case ConnectionStatusUpdate::Type::Closed:
+			// Covers both local-initiated and remote-initiated disconnects.
+			pImpl->communication.deinit();
+			pImpl->connectionState = ConnectionState::Disconnected;
+			if (pImpl->callbacks.onConnectionChanged)
+				pImpl->callbacks.onConnectionChanged({ConnectionState::Disconnected, update.message, {}});
+			break;
 
-	svcCB.onDisconnected = [this]()
-	{
-		pImpl->communication.deinit();
-		pImpl->connectionState = ConnectionState::Disconnected;
-		if (pImpl->callbacks.onConnectionChanged)
-			pImpl->callbacks.onConnectionChanged({ConnectionState::Disconnected, "", {}});
+		case ConnectionStatusUpdate::Type::Initiated:
+		case ConnectionStatusUpdate::Type::InvitationSent:
+		case ConnectionStatusUpdate::Type::Accepted:
+		case ConnectionStatusUpdate::Type::Establishing:
+		case ConnectionStatusUpdate::Type::Closing:
+			// In-progress transitions — no public state change yet.
+			break;
+		}
 	};
 
 	pImpl->connectionService.setCallbacks(std::move(svcCB));
@@ -256,9 +270,7 @@ void netlink::NetLink::disconnect()
 	auto remoteOpt = pImpl->connectionService.getCurrentRemote();
 	if (remoteOpt.has_value())
 		pImpl->connectionService.closeConnection(remoteOpt->displayName);
-
-	pImpl->communication.deinit();
-	pImpl->connectionState = ConnectionState::Disconnected;
+	// communication.deinit() and state update are handled by onStatusUpdate(Closed)
 }
 
 

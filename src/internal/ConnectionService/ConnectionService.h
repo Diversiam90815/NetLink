@@ -30,10 +30,7 @@ namespace netlink
 
 struct ConnectionServiceCallbacks
 {
-	std::function<void(const DiscoveryEndpoint &remote)> onConnectionRequested; // Inbound request arrived: app must call respondToConnection
-	std::function<void(ISession::pointer session)>		 onConnected;			// Both peers confirmed ready: session is ready for messaging
-	std::function<void(const std::string &reason)>		 onConnectionFailed;	// Connection failed (declined, timeout, transport error, validation)
-	std::function<void()>								 onDisconnected;		// Remote initiated a disconnect
+	std::function<void(const ConnectionStatusUpdate &update)> onStatusUpdate;
 };
 
 
