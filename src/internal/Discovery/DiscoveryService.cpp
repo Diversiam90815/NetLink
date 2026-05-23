@@ -28,7 +28,15 @@ bool DiscoveryService::init(const DiscoveryConfig &config)
 	if (config.localIPv4.empty() || config.displayName.empty())
 		return false;
 
-	mConfig = config;
+	const bool needsRebind = !mInitialized.load() || mConfig.localIPv4 != config.localIPv4 || mConfig.discoveryPort != config.discoveryPort;
+
+	mConfig				   = config;
+
+	if (!needsRebind)
+	{
+		NETLINK_LOG_DEBUG("DiscoveryService config updated (no rebind required)");
+		return true;
+	}
 
 	asio::error_code ec;
 	mSocket.open(udp::v4());
@@ -145,7 +153,7 @@ void DiscoveryService::sendPackage()
 	DiscoveryEndpoint local{};
 	local.IPAddress			 = mConfig.localIPv4;
 	local.displayName		 = mConfig.displayName;
-	local.port				 = 0; // @TODO: set port from SignalingService
+	local.port				 = mConfig.signalingPort;
 
 	json			 j		 = local;
 	std::string		 message = j.dump();

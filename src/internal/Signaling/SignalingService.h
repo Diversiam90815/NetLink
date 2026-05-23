@@ -38,6 +38,8 @@ struct SignalingCallbacks
 	std::function<void(const std::string &computerName)>							 onValidationHandshakeReceived;
 };
 
+using SocketBoundCallback = std::function<void(int boundPort)>;
+
 
 struct PeerEndpoint
 {
@@ -61,6 +63,7 @@ public:
 	int	 getBoundPort() const { return mBoundPort; }
 
 	void setCallbacks(SignalingCallbacks cb) { mCallbacks = std::move(cb); }
+	void setOnSocketBound(SocketBoundCallback cb) { mOnSocketBound = std::move(cb); }
 
 	// Peer registry
 	void registerPeer(const std::string &displayName, const std::string &ipv4, const int signalingPort);
@@ -101,6 +104,7 @@ private:
 
 	std::atomic<bool>					mInitialized{false};
 	SignalingCallbacks					mCallbacks;
+	SocketBoundCallback					mOnSocketBound;
 
 	std::map<std::string, PeerEndpoint> mPeerRegistry; // key = displayName
 	mutable std::mutex					mPeerRegistryMutex;

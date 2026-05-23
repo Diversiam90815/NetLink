@@ -136,7 +136,7 @@ void			  netlink::NetLink::configure(const NetLinkConfig &config, const NetLinkC
 bool netlink::NetLink::init()
 {
 	// Initialize services and setup internal callbacks
-	
+
 	// Wire PeerValidationSendCallbacks
 	PeerValidationSendCallbacks sendCb;
 	sendCb.sendRequest		   = [this](const std::string &name, RemoteRequest req) { pImpl->signaling.sendValidationRequest(name, req); };
@@ -158,6 +158,15 @@ bool netlink::NetLink::init()
 			disConf.discoveryPort	 = pImpl->config.discoveryPort;
 			disConf.broadCastAddress = pImpl->config.broadcastAddress;
 			pImpl->discovery.init(disConf);
+		});
+
+	// When signaling socket binds (on init or adapter change), update discovery with the new port
+	pImpl->signaling.setOnSocketBound(
+		[this](int boundPort)
+		{
+			DiscoveryConfig cfg = pImpl->discovery.getConfig(); // see note below
+			cfg.signalingPort	= boundPort;
+			pImpl->discovery.init(cfg);							// no rebind — only signalingPort changed
 		});
 
 	if (!pImpl->network.init())

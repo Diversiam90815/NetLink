@@ -104,6 +104,9 @@ void netlink::SignalingService::setLocalIPv4(const std::string &localIPv4)
 
 	mBoundPort = static_cast<int>(mSocket.local_endpoint().port());
 	NETLINK_LOG_INFO("SignalingService bound to {}:{}", localIPv4, mBoundPort);
+
+	if (mOnSocketBound)
+		mOnSocketBound(mBoundPort);
 }
 
 
@@ -408,3 +411,5 @@ netlink::SignalPacket netlink::SignalingService::makeEnvelope(SignalType type) c
 
 	return packet;
 }
+
+void netlink::SignalingService::dispatchDeferred(std::function<void()> fn) {}
