@@ -23,6 +23,7 @@
 #include <unordered_set>
 #include <memory>
 #include <functional>
+#include <string>
 
 #include "NetLinkLog.h"
 
