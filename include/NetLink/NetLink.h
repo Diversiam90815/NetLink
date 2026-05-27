@@ -173,6 +173,9 @@ public:
 	// Switch active adapter by ID
 	bool						setActiveAdapter(const int &adapterID);
 
+	// Get the ID of the currently active adapter (0 if none)
+	int							getActiveAdapterID() const;
+
 private:
 	struct Impl;
 	std::unique_ptr<Impl> pImpl{};

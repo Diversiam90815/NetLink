@@ -315,3 +315,9 @@ bool netlink::NetLink::setActiveAdapter(const int &adapterID)
 	// setCurrentNetworkAdapter fires onAdapterChanged internally
 	return pImpl->network.setCurrentNetworkAdapter(adapterID);
 }
+
+
+int netlink::NetLink::getActiveAdapterID() const
+{
+	return pImpl->network.getCurrentNetworkAdapter().id;
+}
