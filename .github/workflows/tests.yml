@@ -16,6 +16,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Setup MSVC environment (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - uses: lukka/get-cmake@latest
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.x'
