@@ -739,6 +739,8 @@ bool netlink::ConnectionService::determineLocalSessionRole()
 		NETLINK_LOG_WARNING("Unknwon session role determined..");
 		return false;
 	}
+
+	return true;
 }
 
 
