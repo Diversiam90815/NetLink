@@ -20,6 +20,8 @@
 #include <netlink/netlink.h>
 #include <linux/nl80211.h>
 
+#include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <sstream>
