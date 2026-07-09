@@ -45,7 +45,6 @@ def main():
 
     if args.build:
         runner.create_build_generator(platform=args.platform, architecture=args.architecture, configuration=args.configuration)
-        runner.build_csharp_project(configuration=args.configuration, architecture=args.architecture)
 
     if not args.prepare:
         runner.run_cpp_unit_tests(configuration=args.configuration, test_build_dir=test_dir, target="RUN_TESTS")
