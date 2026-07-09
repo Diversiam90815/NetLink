@@ -1,38 +1,152 @@
 /*
   ==============================================================================
-	Module:         NetworkInformation
+	Module:         NetworkInformation (Windows backend)
 	Description:    Information about the local Network setup
   ==============================================================================
 */
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+
 #include "NetworkInformation.h"
 
+#include <windows.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <iptypes.h>
+#include <iphlpapi.h>
+#include <netioapi.h>
+#include <wlanapi.h>
 
-netlink::NetworkInformation::~NetworkInformation()
+#include <unordered_set>
+#include <algorithm>
+
+
+namespace netlink
+{
+
+struct NetworkInformation::Impl
+{
+	// RAII helpers
+	struct WinsockSession
+	{
+		bool ok{false};
+		WinsockSession()
+		{
+			WSADATA wsa{};
+			ok = (WSAStartup(MAKEWORD(2, 2), &wsa) == 0);
+
+			if (!ok)
+				NETLINK_LOG_ERROR("WSAStartup failed!");
+		}
+
+		~WinsockSession()
+		{
+			if (ok)
+				WSACleanup();
+		}
+	};
+
+	struct IpForwardTable
+	{
+		MIB_IPFORWARD_TABLE2 *ptr{nullptr};
+		~IpForwardTable()
+		{
+			if (ptr)
+				FreeMibTable(ptr);
+		}
+	};
+
+	struct WlanHandle
+	{
+		HANDLE h{};
+		~WlanHandle()
+		{
+			if (h)
+				WlanCloseHandle(h, nullptr);
+		}
+	};
+
+	struct WlanQueryData
+	{
+		void *ptr{};
+		~WlanQueryData()
+		{
+			if (ptr)
+				WlanFreeMemory(ptr);
+		}
+	};
+
+	using AdapterBuffer = std::unique_ptr<IP_ADAPTER_ADDRESSES, void (*)(IP_ADAPTER_ADDRESSES *)>;
+
+	bool					getNetworkInformationFromOS();
+	void					saveAdapter(std::vector<NetworkAdapterInternal> &adapters, const PIP_ADAPTER_ADDRESSES adapter, const int ID, std::unordered_set<ULONG64> &defaultRouteLuidValues);
+
+	std::string				sockaddrToString(SOCKADDR *sa) const;
+	std::string				prefixLengthToSubnetMask(USHORT family, ULONG prefixLength) const;
+	AdapterTypes			filterAdapterType(const DWORD Type) const;
+	AdapterPriorityInternal determinePriority(bool isDefaultRoute, bool IPv4Enabled, AdapterTypes type, IF_OPER_STATUS status);
+
+	bool					getDefaultInterfaces(std::vector<NET_LUID> &pLUIDs);
+	std::string				getHostName(const SOCKADDR *ip, const socklen_t ipLength);
+	std::string				getWifiSsid(const AdapterTypes type, const NET_LUID luid);
+	std::string				getNetworkGatename(const AdapterTypes type, const NET_LUID_LH luid, const std::string address);
+	std::string				getNetworkName(const AdapterTypes type, const NET_LUID_LH luid, const std::string address);
+
+
+	std::string				WStringToStdString(const std::wstring &wstr)
+	{
+		if (wstr.empty())
+			return {};
+
+		std::string str{};
+		size_t		size{};
+		str.resize(wstr.length());
+		wcstombs_s(&size, &str[0], str.size() + 1, wstr.c_str(), wstr.size());
+		return str;
+	}
+
+
+	AdapterBuffer					 mAdapterAddresses{nullptr, [](IP_ADAPTER_ADDRESSES *p)
+									   {
+										   if (p)
+											   free(p);
+									   }};
+	ULONG							 mOutBufLen{0};
+
+	std::unique_ptr<WinsockSession> mWinsockSession;
+};
+
+
+NetworkInformation::NetworkInformation() : mImpl(std::make_unique<Impl>()) {}
+
+
+NetworkInformation::~NetworkInformation()
 {
 	deinit();
 }
 
 
-bool netlink::NetworkInformation::init()
+bool NetworkInformation::init()
 {
-	mWinsockSession = std::make_unique<WinsockSession>();
+	mImpl->mWinsockSession = std::make_unique<Impl::WinsockSession>();
 
-	if (!mWinsockSession->ok)
+	if (!mImpl->mWinsockSession->ok)
 		return false;
 
-	return getNetworkInformationFromOS();
+	return mImpl->getNetworkInformationFromOS();
 }
 
 
-void netlink::NetworkInformation::deinit()
+void NetworkInformation::deinit()
 {
-	mAdapterAddresses.reset();
+	mImpl->mAdapterAddresses.reset();
 	mNetworkAdapters.clear();
 }
 
 
-bool netlink::NetworkInformation::getNetworkInformationFromOS()
+bool NetworkInformation::Impl::getNetworkInformationFromOS()
 {
 	ULONG flags	 = GAA_FLAG_INCLUDE_PREFIX | GAA_FLAG_INCLUDE_GATEWAYS;
 
@@ -78,13 +192,13 @@ bool netlink::NetworkInformation::getNetworkInformationFromOS()
 }
 
 
-void netlink::NetworkInformation::processAdapter()
+void NetworkInformation::processAdapter()
 {
 	mNetworkAdapters.clear();
 
 	std::vector<NET_LUID> defaultRouteAdapters;
 
-	if (!getDefaultInterfaces(defaultRouteAdapters))
+	if (!mImpl->getDefaultInterfaces(defaultRouteAdapters))
 	{
 		NETLINK_LOG_WARNING("Could not get list of default route adapters!");
 		defaultRouteAdapters.clear();
@@ -98,16 +212,16 @@ void netlink::NetworkInformation::processAdapter()
 
 	int ID = 1; // Giving each network adapter an ID
 
-	for (auto *node = mAdapterAddresses.get(); node; node = node->Next, ++ID)
+	for (auto *node = mImpl->mAdapterAddresses.get(); node; node = node->Next, ++ID)
 	{
-		saveAdapter(node, ID, defaultRouteLuidValues);
+		mImpl->saveAdapter(mNetworkAdapters, node, ID, defaultRouteLuidValues);
 	}
 }
 
 
-void netlink::NetworkInformation::saveAdapter(const PIP_ADAPTER_ADDRESSES adapter, const int ID, std::unordered_set<ULONG64> &defaultRouteLuidValues)
+void NetworkInformation::Impl::saveAdapter(std::vector<NetworkAdapterInternal> &adapters, const PIP_ADAPTER_ADDRESSES adapter, const int ID, std::unordered_set<ULONG64> &defaultRouteLuidValues)
 {
-	std::string					adapterName = WStringToStdString(adapter->Description);
+	std::string					 adapterName = WStringToStdString(adapter->Description);
 
 	PIP_ADAPTER_UNICAST_ADDRESS unicast		= adapter->FirstUnicastAddress;
 
@@ -125,7 +239,7 @@ void netlink::NetworkInformation::saveAdapter(const PIP_ADAPTER_ADDRESSES adapte
 
 			auto createdAdapter = NetworkAdapterInternal(adapterName, networkName, addressString, subnetMaskString, ID, isDefaultRoute, type, visibility);
 
-			mNetworkAdapters.push_back(createdAdapter);
+			adapters.push_back(createdAdapter);
 		}
 
 		unicast = unicast->Next;
@@ -133,66 +247,7 @@ void netlink::NetworkInformation::saveAdapter(const PIP_ADAPTER_ADDRESSES adapte
 }
 
 
-bool netlink::NetworkInformation::setCurrentNetworkAdapter(const int adapterID)
-{
-	auto it = std::find_if(mNetworkAdapters.begin(), mNetworkAdapters.end(), [adapterID](const NetworkAdapterInternal &a) { return a.ID == adapterID; });
-
-	if (it == mNetworkAdapters.end())
-	{
-		NETLINK_LOG_WARNING("No adapter found with ID {}", adapterID);
-		return false;
-	}
-
-	return setCurrentNetworkAdapter(*it);
-}
-
-
-bool netlink::NetworkInformation::setCurrentNetworkAdapter(const NetworkAdapterInternal &adapter)
-{
-	if (mCurrentNetworkAdapter == adapter)
-		return false;
-
-	mCurrentNetworkAdapter = adapter;
-
-	NETLINK_LOG_INFO("Set user defined adapter to :");
-	NETLINK_LOG_INFO("\t Adapter:\t {}", adapter.AdapterName);
-	NETLINK_LOG_INFO("\t IPv4: \t\t\t{}", adapter.IPv4);
-	NETLINK_LOG_INFO("\t Subnet: \t\t{}", adapter.Subnet);
-	NETLINK_LOG_INFO("\t ID: \t\t\t{}", adapter.ID);
-
-	if (mOnAdapterChanged)
-		mOnAdapterChanged(adapter.IPv4);
-
-	return true;
-}
-
-
-const netlink::NetworkAdapterInternal &netlink::NetworkInformation::getCurrentNetworkAdapter() const
-{
-	return mCurrentNetworkAdapter;
-}
-
-
-netlink::NetworkAdapterInternal netlink::NetworkInformation::isAdapterCurrentlyAvailable(const NetworkAdapterInternal &adapter)
-{
-	// If the adapter is available we return the adapter current version (with maybe a new ID set)
-	for (auto &it : mNetworkAdapters)
-	{
-		if (it == adapter)
-			return it;
-	}
-
-	return {};
-}
-
-
-const std::vector<netlink::NetworkAdapterInternal> &netlink::NetworkInformation::getAvailableNetworkAdapters() const
-{
-	return mNetworkAdapters;
-}
-
-
-std::string netlink::NetworkInformation::sockaddrToString(SOCKADDR *sa) const
+std::string NetworkInformation::Impl::sockaddrToString(SOCKADDR *sa) const
 {
 	char addressBuffer[INET6_ADDRSTRLEN] = {0};
 
@@ -211,7 +266,7 @@ std::string netlink::NetworkInformation::sockaddrToString(SOCKADDR *sa) const
 }
 
 
-std::string netlink::NetworkInformation::prefixLengthToSubnetMask(USHORT family, ULONG prefixLength) const
+std::string NetworkInformation::Impl::prefixLengthToSubnetMask(USHORT family, ULONG prefixLength) const
 {
 	if (family == AF_INET && prefixLength <= 32)
 	{
@@ -234,7 +289,7 @@ std::string netlink::NetworkInformation::prefixLengthToSubnetMask(USHORT family,
 }
 
 
-netlink::AdapterTypes netlink::NetworkInformation::filterAdapterType(const DWORD Type) const
+netlink::AdapterTypes NetworkInformation::Impl::filterAdapterType(const DWORD Type) const
 {
 	switch (Type)
 	{
@@ -247,7 +302,7 @@ netlink::AdapterTypes netlink::NetworkInformation::filterAdapterType(const DWORD
 }
 
 
-netlink::AdapterPriorityInternal netlink::NetworkInformation::determinePriority(bool isDefaultRoute, bool IPv4Enabled, AdapterTypes type, IF_OPER_STATUS status)
+netlink::AdapterPriorityInternal NetworkInformation::Impl::determinePriority(bool isDefaultRoute, bool IPv4Enabled, AdapterTypes type, IF_OPER_STATUS status)
 {
 	// Preferred device should be
 	//	- Real
@@ -271,7 +326,7 @@ netlink::AdapterPriorityInternal netlink::NetworkInformation::determinePriority(
 }
 
 
-bool netlink::NetworkInformation::getDefaultInterfaces(std::vector<NET_LUID> &pLUIDs)
+bool NetworkInformation::Impl::getDefaultInterfaces(std::vector<NET_LUID> &pLUIDs)
 {
 	MIB_IPFORWARD_TABLE2 *routingTable = nullptr;
 	pLUIDs.clear();
@@ -297,7 +352,7 @@ bool netlink::NetworkInformation::getDefaultInterfaces(std::vector<NET_LUID> &pL
 }
 
 
-std::string netlink::NetworkInformation::getHostName(const SOCKADDR *ip, const socklen_t ipLength)
+std::string NetworkInformation::Impl::getHostName(const SOCKADDR *ip, const socklen_t ipLength)
 {
 	char nameBuffer[NI_MAXHOST];
 
@@ -310,7 +365,7 @@ std::string netlink::NetworkInformation::getHostName(const SOCKADDR *ip, const s
 }
 
 
-std::string netlink::NetworkInformation::getWifiSsid(const AdapterTypes type, const NET_LUID luid)
+std::string NetworkInformation::Impl::getWifiSsid(const AdapterTypes type, const NET_LUID luid)
 {
 	std::string networkName = (type == AdapterTypes::Virtual) ? "Virtual WiFi" : "WiFi";
 
@@ -359,7 +414,7 @@ std::string netlink::NetworkInformation::getWifiSsid(const AdapterTypes type, co
 }
 
 
-std::string netlink::NetworkInformation::getNetworkGatename(const AdapterTypes type, const NET_LUID_LH luid, const std::string address)
+std::string NetworkInformation::Impl::getNetworkGatename(const AdapterTypes type, const NET_LUID_LH luid, const std::string address)
 {
 	std::string networkName = (type == AdapterTypes::Virtual) ? "Virtual Ethernet" : "Ethernet";
 
@@ -419,7 +474,7 @@ std::string netlink::NetworkInformation::getNetworkGatename(const AdapterTypes t
 }
 
 
-std::string netlink::NetworkInformation::getNetworkName(const AdapterTypes type, const NET_LUID_LH luid, const std::string address)
+std::string NetworkInformation::Impl::getNetworkName(const AdapterTypes type, const NET_LUID_LH luid, const std::string address)
 {
 	std::string networkName = "";
 
@@ -430,3 +485,6 @@ std::string netlink::NetworkInformation::getNetworkName(const AdapterTypes type,
 
 	return networkName;
 }
+
+
+} // namespace netlink
