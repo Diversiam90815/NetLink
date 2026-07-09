@@ -1,0 +1,29 @@
+name: Static Analysis
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  clang-tidy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-tidy ninja-build jq libnl-genl-3-dev libnl-3-dev
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DNETLINK_BUILD_TESTS=OFF
+
+      - name: Run clang-tidy
+        run: |
+          set -e
+          for f in $(jq -r '.[].file' build/compile_commands.json); do
+            echo "::group::clang-tidy $f"
+            clang-tidy -p build "$f"
+            echo "::endgroup::"
+          done
