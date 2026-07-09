@@ -18,7 +18,6 @@ def main():
     os.chdir(ROOT_DIR)
 
     build_dir = get_build_dir(str(args.architecture))
-    test_dir = build_dir / "tests"
     runner = BuildRunner(root_dir=ROOT_DIR, build_dir=build_dir, project_name="NetLink")
 
     runner.update_environment()
@@ -27,7 +26,6 @@ def main():
     print("==== NetLink Configuration ====")
     print(f"Current Directory:          {ROOT_DIR}")
     print(f"Build Directory:            {build_dir}")
-    print(f"Test Build Directory:       {test_dir}")
     print(f"Architecture:               {args.architecture}")
 
     if not args.prepare:
@@ -41,13 +39,13 @@ def main():
         runner.prepare_cmake_project(platform=args.platform, architecture=args.architecture)
 
     if args.runtest:
-        runner.run_cpp_unit_tests(configuration=args.configuration, test_build_dir=test_dir, target="RUN_TESTS")
+        runner.run_cpp_unit_tests(configuration=args.configuration, build_dir=build_dir, target="NetLinkTests")
 
     if args.build:
         runner.create_build_generator(platform=args.platform, architecture=args.architecture, configuration=args.configuration)
 
     if not args.prepare:
-        runner.run_cpp_unit_tests(configuration=args.configuration, test_build_dir=test_dir, target="RUN_TESTS")
+        runner.run_cpp_unit_tests(configuration=args.configuration, build_dir=build_dir, target="NetLinkTests")
 
 
 

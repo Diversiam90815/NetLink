@@ -88,13 +88,12 @@ class BuildRunner:
         )
 
 
-    def run_cpp_unit_tests(self, configuration: Configuration, test_build_dir, target) -> None:
-
-        with working_directory(test_build_dir):
+    def run_cpp_unit_tests(self, configuration: Configuration, build_dir, target) -> None:
+        with working_directory(build_dir):
             BuildUtils.execute_command(
                 [
                     "cmake",
-                    "--build", str(test_build_dir),
+                    "--build", str(build_dir),
                     "--config", str(configuration),
                     "--target", str(target),
                 ],
@@ -104,7 +103,7 @@ class BuildRunner:
             BuildUtils.execute_command(
                 [
                     "ctest",
-                    "--test-dir", str(test_build_dir),
+                    "--test-dir", str(build_dir),
                     "-C", str(configuration),
                     "--output-on-failure",
                 ],
