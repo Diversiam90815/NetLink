@@ -89,7 +89,10 @@ TEST(TimeoutService, CallbackFiredAfterTimeout)
     TimeoutService    svc;
     std::atomic<bool> fired{false};
     svc.startTimeout({"cat", "id"}, 100, [&](const TimeoutKey &) { fired.store(true); });
-    std::this_thread::sleep_for(200ms);
+    // TimeoutService polls on a 50ms granularity via a real OS thread (std::async), so
+    // margin here also has to absorb thread-creation/scheduling jitter - generous on
+    // slower/contended CI runners (observed flaky on GitHub's macOS runners at 200ms).
+    std::this_thread::sleep_for(500ms);
     EXPECT_TRUE(fired.load())
         << "The timeout callback must be invoked after the 100 ms deadline expires";
 }
@@ -113,7 +116,10 @@ TEST(TimeoutService, RestartTimeoutCancelsPrevious)
     TimeoutKey       key{"cat", "id"};
     svc.startTimeout(key, 100, [&](const TimeoutKey &) { ++count; });
     svc.startTimeout(key, 100, [&](const TimeoutKey &) { ++count; });
-    std::this_thread::sleep_for(250ms);
+    // Restarting blocks on cancelling the first timer (up to one 50ms poll interval)
+    // before the second timer's 100ms starts counting, so give extra slack on top of
+    // that for CI scheduling jitter (observed flaky on GitHub's macOS runners at 250ms).
+    std::this_thread::sleep_for(500ms);
     EXPECT_EQ(count.load(), 1)
         << "Starting a timeout with an already-active key must cancel the previous one, so the callback fires exactly once";
 }
@@ -124,7 +130,8 @@ TEST(TimeoutService, MultipleTimeoutsFireIndependently)
     std::atomic<int> count{0};
     svc.startTimeout({"a", "1"}, 100, [&](const TimeoutKey &) { ++count; });
     svc.startTimeout({"b", "2"}, 100, [&](const TimeoutKey &) { ++count; });
-    std::this_thread::sleep_for(250ms);
+    // See CallbackFiredAfterTimeout for why the margin is this wide.
+    std::this_thread::sleep_for(500ms);
     EXPECT_EQ(count.load(), 2)
         << "Two independent timeouts must both fire, each incrementing the counter once";
 }

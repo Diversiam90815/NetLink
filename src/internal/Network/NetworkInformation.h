@@ -7,23 +7,11 @@
 
 #pragma once
 
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-
-#include <windows.h>
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#include <iptypes.h>
-#include <iphlpapi.h>
-#include <netioapi.h>
-#include <wlanapi.h>
-
 #include <vector>
-#include <unordered_set>
 #include <memory>
 #include <functional>
 #include <string>
+#include <tuple>
 
 #include "NetLinkLog.h"
 
@@ -92,7 +80,7 @@ struct NetworkAdapterInternal
 class NetworkInformation
 {
 public:
-	NetworkInformation() = default;
+	NetworkInformation();
 	~NetworkInformation();
 
 	bool									   init();
@@ -112,99 +100,14 @@ public:
 	void									   setOnAdapterChanged(AdapterChangedCallback cb) { mOnAdapterChanged = std::move(cb); }
 
 private:
-	// RAII helpers
-	struct WinsockSession
-	{
-		bool ok{false};
-		WinsockSession()
-		{
-			WSADATA wsa{};
-			ok = (WSAStartup(MAKEWORD(2, 2), &wsa) == 0);
-
-			if (!ok)
-				NETLINK_LOG_ERROR("WSAStartup failed!");
-		}
-
-		~WinsockSession()
-		{
-			if (ok)
-				WSACleanup();
-		}
-	};
-
-	struct IpForwardTable
-	{
-		MIB_IPFORWARD_TABLE2 *ptr{nullptr};
-		~IpForwardTable()
-		{
-			if (ptr)
-				FreeMibTable(ptr);
-		}
-	};
-
-	struct WlanHandle
-	{
-		HANDLE h{};
-		~WlanHandle()
-		{
-			if (h)
-				WlanCloseHandle(h, nullptr);
-		}
-	};
-
-	struct WlanQueryData
-	{
-		void *ptr{};
-		~WlanQueryData()
-		{
-			if (ptr)
-				WlanFreeMemory(ptr);
-		}
-	};
-
-	using AdapterBuffer = std::unique_ptr<IP_ADAPTER_ADDRESSES, void (*)(IP_ADAPTER_ADDRESSES *)>;
-
-	void					saveAdapter(const PIP_ADAPTER_ADDRESSES adapter, const int ID, std::unordered_set<ULONG64> &defaultRouteLuidValues);
-	bool					getNetworkInformationFromOS();
-
-	std::string				sockaddrToString(SOCKADDR *sa) const;
-	std::string				prefixLengthToSubnetMask(USHORT family, ULONG prefixLength) const;
-	AdapterTypes			filterAdapterType(const DWORD Type) const;
-	AdapterPriorityInternal determinePriority(bool isDefaultRoute, bool IPv4Enabled, AdapterTypes type, IF_OPER_STATUS status);
-
-	bool					getDefaultInterfaces(std::vector<NET_LUID> &pLUIDs);
-	std::string				getHostName(const SOCKADDR *ip, const socklen_t ipLength);
-	std::string				getWifiSsid(const AdapterTypes type, const NET_LUID luid);
-	std::string				getNetworkGatename(const AdapterTypes type, const NET_LUID_LH luid, const std::string address);
-	std::string				getNetworkName(const AdapterTypes type, const NET_LUID_LH luid, const std::string address);
-
-
-	std::string				WStringToStdString(const std::wstring &wstr)
-	{
-		if (wstr.empty())
-			return {};
-
-		std::string str{};
-		size_t		size{};
-		str.resize(wstr.length());
-		wcstombs_s(&size, &str[0], str.size() + 1, wstr.c_str(), wstr.size());
-		return str;
-	}
-
-
-	AdapterBuffer						mAdapterAddresses{nullptr, [](IP_ADAPTER_ADDRESSES *p)
-									  {
-										  if (p)
-											  free(p);
-									  }};
-	ULONG								mOutBufLen{0};
-
-	std::unique_ptr<WinsockSession>		mWinsockSession;
+	// Platform-specific implementation, defined in NetworkInformation<Platform>.cpp/.mm
+	struct Impl;
+	std::unique_ptr<Impl>				 mImpl;
 
 	std::vector<NetworkAdapterInternal> mNetworkAdapters{};
-	NetworkAdapterInternal				mCurrentNetworkAdapter{};
+	NetworkAdapterInternal				 mCurrentNetworkAdapter{};
 
-	AdapterChangedCallback				mOnAdapterChanged;
+	AdapterChangedCallback				 mOnAdapterChanged;
 };
 
 

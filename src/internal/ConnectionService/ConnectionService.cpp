@@ -582,8 +582,6 @@ bool netlink::ConnectionService::retryConnection()
 	++mConnectionAttempts;
 	NETLINK_LOG_INFO("Retrying connection (attempt {}/{})", mConnectionAttempts, mConfig.maxConnectionRetries);
 
-	std::string computerName = mCurrentRequest->remote.displayName;
-
 	// Re-establish transport layer
 	mCurrentRequest->server.reset();
 	mCurrentRequest->client.reset();
@@ -741,6 +739,8 @@ bool netlink::ConnectionService::determineLocalSessionRole()
 		NETLINK_LOG_WARNING("Unknwon session role determined..");
 		return false;
 	}
+
+	return true;
 }
 
 
@@ -761,7 +761,7 @@ void netlink::ConnectionService::onTimeout(const TimeoutKey &key)
 	if (key.category == ConnectionTimeouts::Connection)
 	{
 		NETLINK_LOG_WARNING("Connection timed out for {}", key.identifier);
-		notifyStatus(ConnectionStatusUpdate::Type::Failed, "Invitation timed out for " + key.identifier, false);
+		notifyStatus(ConnectionStatusUpdate::Type::Failed, "Connection timed out for " + key.identifier, false);
 		clearCurrentConnection();
 	}
 	else if (key.category == ConnectionTimeouts::Invitation)

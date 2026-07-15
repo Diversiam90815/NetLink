@@ -9,7 +9,11 @@ set(PROJECT_VERSION 0.1.0.85)
 
 project(NetLink VERSION ${PROJECT_VERSION} LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 20)
+if(APPLE)
+    enable_language(OBJCXX)
+endif()
+
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
@@ -42,6 +46,18 @@ CPMAddPackage(
 file(GLOB_RECURSE NETWORKING_SOURCES src/*.cpp)
 file(GLOB_RECURSE NETWORKING_HEADERS include/*.h)
 
+# NetworkInformation has one backend per platform (Windows/macOS/Linux) - only
+# one of the platform-specific implementation files should ever be compiled.
+list(FILTER NETWORKING_SOURCES EXCLUDE REGEX ".*NetworkInformation(Windows|Linux)\\.cpp$")
+
+if(WIN32)
+    list(APPEND NETWORKING_SOURCES src/internal/Network/NetworkInformationWindows.cpp)
+elseif(APPLE)
+    list(APPEND NETWORKING_SOURCES src/internal/Network/NetworkInformationMac.mm)
+elseif(UNIX)
+    list(APPEND NETWORKING_SOURCES src/internal/Network/NetworkInformationLinux.cpp)
+endif()
+
 add_library(${PROJECT_NAME} STATIC ${NETWORKING_SOURCES} ${NETWORKING_HEADERS})
 
 target_include_directories(${PROJECT_NAME} PUBLIC include)
@@ -56,16 +72,38 @@ target_include_directories(${PROJECT_NAME}
 
 target_compile_definitions(${PROJECT_NAME} PUBLIC
     ASIO_STANDALONE
-    _WIN32_WINNT=0x0A00
-    WIN32_LEAN_AND_MEAN
+    ASIO_NO_DEPRECATED
 )
+
+if(WIN32)
+    target_compile_definitions(${PROJECT_NAME} PUBLIC
+        _WIN32_WINNT=0x0A00
+        WIN32_LEAN_AND_MEAN
+    )
+endif()
 
 if(NETLINK_ENABLE_LOGGING)
     target_compile_definitions(${PROJECT_NAME} PRIVATE NETLINK_LOGGING_ENABLED)
     target_link_libraries(${PROJECT_NAME} PRIVATE Logger)
 endif()
 
-target_link_libraries(${PROJECT_NAME} PUBLIC iphlpapi PRIVATE nlohmann_json::nlohmann_json)
+target_link_libraries(${PROJECT_NAME} PRIVATE nlohmann_json::nlohmann_json)
+
+if(WIN32)
+    target_link_libraries(${PROJECT_NAME} PUBLIC iphlpapi ws2_32 wlanapi)
+elseif(APPLE)
+    target_link_libraries(${PROJECT_NAME} PRIVATE
+        "-framework CoreWLAN"
+        "-framework Foundation"
+        "-framework SystemConfiguration"
+        "-framework CoreFoundation"
+    )
+elseif(UNIX)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(NL REQUIRED libnl-genl-3.0)
+    target_include_directories(${PROJECT_NAME} PRIVATE ${NL_INCLUDE_DIRS})
+    target_link_libraries(${PROJECT_NAME} PRIVATE ${NL_LIBRARIES})
+endif()
 
 option(NETLINK_BUILD_TESTS "Build NetLink tests" ${PROJECT_IS_TOP_LEVEL})
 

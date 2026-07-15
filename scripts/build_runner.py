@@ -88,26 +88,12 @@ class BuildRunner:
         )
 
 
-    def build_csharp_project(self, configuration: Configuration, architecture: Architecture) -> None:
-        # MSBuild only supports Debug and Release; treat RelWithDebInfo as Release
-        cs_config = "Release" if configuration == Configuration.RelWithDebInfo else str(configuration)
-        BuildUtils.execute_command(
-            [
-                "dotnet", "build",
-                str(GAME_PROJECT_FILE),
-                "-c", cs_config,
-                f"-p:Platform={architecture}",
-            ],
-            f"dotnet: Build Chess Game ({cs_config}|{architecture})",
-        )
-
-    def run_cpp_unit_tests(self, configuration: Configuration, test_build_dir, target) -> None:
-
-        with working_directory(test_build_dir):
+    def run_cpp_unit_tests(self, configuration: Configuration, build_dir, target) -> None:
+        with working_directory(build_dir):
             BuildUtils.execute_command(
                 [
                     "cmake",
-                    "--build", str(test_build_dir),
+                    "--build", str(build_dir),
                     "--config", str(configuration),
                     "--target", str(target),
                 ],
@@ -117,7 +103,7 @@ class BuildRunner:
             BuildUtils.execute_command(
                 [
                     "ctest",
-                    "--test-dir", str(test_build_dir),
+                    "--test-dir", str(build_dir),
                     "-C", str(configuration),
                     "--output-on-failure",
                 ],

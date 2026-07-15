@@ -1,0 +1,35 @@
+name: Static Analysis
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  clang-tidy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: lukka/get-cmake@latest
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-tidy ninja-build jq libnl-genl-3-dev libnl-3-dev
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DNETLINK_BUILD_TESTS=OFF -DNETLINK_ENABLE_LOGGING=ON
+
+      - name: Run clang-tidy
+        run: |
+          status=0
+          for f in $(jq -r '.[].file' build/compile_commands.json | grep -v '/_deps/'); do
+            echo "::group::clang-tidy $f"
+            if ! clang-tidy -p build "$f"; then
+              status=1
+              echo "::error file=${f}::clang-tidy reported issues in ${f}"
+            fi
+            echo "::endgroup::"
+          done
+          exit $status

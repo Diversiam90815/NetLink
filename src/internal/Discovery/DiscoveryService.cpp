@@ -19,7 +19,18 @@ DiscoveryService::DiscoveryService(asio::io_context &ioContext) : mSocket(ioCont
 
 DiscoveryService::~DiscoveryService()
 {
-	deinit();
+	try
+	{
+		deinit();
+	}
+	catch (const std::exception &e)
+	{
+		NETLINK_LOG_ERROR("Exception during DiscoveryService destruction: {}", e.what());
+	}
+	catch (...)
+	{
+		NETLINK_LOG_ERROR("Unknown exception during DiscoveryService destruction");
+	}
 }
 
 
