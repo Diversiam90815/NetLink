@@ -19,13 +19,14 @@ jobs:
           sudo apt-get install -y clang-tidy ninja-build jq libnl-genl-3-dev libnl-3-dev
 
       - name: Configure
-        run: cmake -S . -B build -G Ninja -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DNETLINK_BUILD_TESTS=OFF
+        run: cmake -S . -B build -G Ninja -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DNETLINK_BUILD_TESTS=OFF -DNETLINK_ENABLE_LOGGING=ON
 
       - name: Run clang-tidy
         run: |
-          set -e
+          status=0
           for f in $(jq -r '.[].file' build/compile_commands.json); do
             echo "::group::clang-tidy $f"
-            clang-tidy -p build "$f"
+            clang-tidy -p build "$f" || status=1
             echo "::endgroup::"
           done
+          exit $status
