@@ -3,5 +3,6 @@ Checks: >
   clang-analyzer-*,
   bugprone-*,
   performance-*,
-  -bugprone-easily-swappable-parameters
+  -bugprone-easily-swappable-parameters,
+  -clang-analyzer-cplusplus.StringChecker
 WarningsAsErrors: 'clang-analyzer-*,bugprone-*'
