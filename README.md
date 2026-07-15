@@ -6,7 +6,7 @@
 [![Tests](https://github.com/Diversiam90815/NetLink/actions/workflows/tests.yml/badge.svg)](https://github.com/Diversiam90815/NetLink/actions/workflows/tests.yml)
 [![Static Analysis](https://github.com/Diversiam90815/NetLink/actions/workflows/static-analysis.yml/badge.svg)](https://github.com/Diversiam90815/NetLink/actions/workflows/static-analysis.yml)
 
-A C++20 static library for **LAN peer discovery and peer-to-peer TCP communication**, designed to be embedded in any application as a zero-friction CMake dependency.
+A C++23 static library for **LAN peer discovery and peer-to-peer TCP communication**, designed to be embedded in any application as a zero-friction CMake dependency.
 
 ## Overview
 
@@ -176,7 +176,7 @@ set(NETLINK_BUILD_TESTS ON CACHE BOOL "" FORCE)
 
 ## Requirements
 
-- C++20 compiler (MSVC 2022 or later recommended)
+- C++23 compiler
 - CMake 4.0+
 - Windows 10+ (`_WIN32_WINNT=0x0A00`)
 
