@@ -8,6 +8,7 @@
 #pragma once
 
 #include <string>
+#include <chrono>
 
 #include "Discovery/DiscoveryEndpoint.h"
 
