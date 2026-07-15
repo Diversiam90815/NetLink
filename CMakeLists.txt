@@ -72,6 +72,7 @@ target_include_directories(${PROJECT_NAME}
 
 target_compile_definitions(${PROJECT_NAME} PUBLIC
     ASIO_STANDALONE
+    ASIO_NO_DEPRECATED
 )
 
 if(WIN32)
