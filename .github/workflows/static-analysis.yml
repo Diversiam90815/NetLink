@@ -24,9 +24,12 @@ jobs:
       - name: Run clang-tidy
         run: |
           status=0
-          for f in $(jq -r '.[].file' build/compile_commands.json); do
+          for f in $(jq -r '.[].file' build/compile_commands.json | grep -v '/_deps/'); do
             echo "::group::clang-tidy $f"
-            clang-tidy -p build "$f" || status=1
+            if ! clang-tidy -p build "$f"; then
+              status=1
+              echo "::error file=${f}::clang-tidy reported issues in ${f}"
+            fi
             echo "::endgroup::"
           done
           exit $status
