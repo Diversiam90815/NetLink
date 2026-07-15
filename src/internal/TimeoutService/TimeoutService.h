@@ -11,6 +11,9 @@
 #include <map>
 #include <future>
 #include <chrono>
+#include <mutex>
+#include <atomic>
+#include <thread>
 
 
 /**
