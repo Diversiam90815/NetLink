@@ -14,6 +14,9 @@ add_executable(NetLinkTests
     test_thread_base.cpp
     test_network_adapter.cpp
     test_remote_communication.cpp
+    test_task_queue.cpp
+    test_connection_retry_policy.cpp
+    test_ready_sync_tracker.cpp
 )
 
 target_link_libraries(NetLinkTests PRIVATE

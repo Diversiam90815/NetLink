@@ -8,7 +8,6 @@
 
 #pragma once
 
-#include <queue>
 #include <atomic>
 #include <functional>
 #include <memory>
@@ -17,12 +16,16 @@
 
 #include "ConnectionPhase.h"
 #include "RoleNegotiation.h"
-#include "PeerValidation/PeerValidationService.h"
+#include "ConnectionRetryPolicy.h"
+#include "ReadySyncTracker.h"
+#include "PeerValidation/ValidationResult.h"
+#include "PeerValidation/ValidatedPeerRegistry.h"
 #include "Discovery/DiscoveryEndpoint.h"
 #include "Signaling/SignalingService.h"
 #include "TimeoutService/TimeoutService.h"
 #include "Transport/TransportFactory.h"
 #include "Transport/TransportInterfaces.h"
+#include "Util/TaskQueue.h"
 
 
 namespace netlink
@@ -56,7 +59,7 @@ struct ConnectionConfig
 
 struct ConnectionRequest
 {
-	ConnectionStateInternal						  state{ConnectionStateInternal::Idle};
+	ConnectionStateInternal				  state{ConnectionStateInternal::Idle};
 	ValidationResult					  validationResult;
 
 	DiscoveryEndpoint					  remote{};
@@ -83,7 +86,7 @@ public:
 
 	// Configuration
 	void							 setCallbacks(ConnectionServiceCallbacks cb) { mCallbacks = std::move(cb); }
-	void							 setConfig(const ConnectionConfig &config) { mConfig = config; }
+	void							 setConfig(const ConnectionConfig &config);
 	void							 setLocalIP(const std::string &ip) { mLocalIP = ip; }
 
 	// Connection management
@@ -98,7 +101,7 @@ public:
 	bool							 hasIncomingInvitation() const;
 
 	std::optional<DiscoveryEndpoint> getCurrentRemote() const;
-	ConnectionStateInternal					 getConnectionState() const;
+	ConnectionStateInternal			 getConnectionState() const;
 
 	// Sending helper
 	bool							 sendConnectionInvitation(const std::string &computerName);
@@ -116,59 +119,40 @@ public:
 
 private:
 	// State management
-	void									clearCurrentConnection();
+	void							 clearCurrentConnection();
 
 	// Helper methods
-	std::optional<ValidationResult>			findValidationResult(const std::string &computerName) const;
-	std::optional<ValidationResult>			findValidationResultByIPv4(const std::string &ipv4) const;
-	bool									retryConnection();
-	void									notifyStatus(ConnectionStatusUpdate::Type type, const std::string &message = "", bool success = true);
-	void									notifyStatus(ConnectionStatusUpdate update);
+	bool							 retryConnection();
+	void							 notifyStatus(ConnectionStatusUpdate::Type type, const std::string &message = "", bool success = true);
+	void							 notifyStatus(ConnectionStatusUpdate update);
 
 	// Define role
-	bool									determineLocalSessionRole();
-	
-	// Deferred action queue
-	void									dispatchDeferred(std::function<void()> fn);
-	
+	bool							 determineLocalSessionRole();
+
 	// Timeout expiry handler
-	void									onTimeout(const TimeoutKey &key);
+	void							 onTimeout(const TimeoutKey &key);
 
 	// Dependencies
-	asio::io_context					   &mIoContext;
-	SignalingService					   &mSignaling;
-	ITransportFactory					   &mTransportFactory;
+	asio::io_context				&mIoContext;
+	SignalingService				&mSignaling;
+	ITransportFactory				&mTransportFactory;
 
 	// Configuration and callbacks
-	ConnectionConfig						mConfig;
-	ConnectionServiceCallbacks				mCallbacks;
-	std::string								mLocalIP{};
+	ConnectionConfig				 mConfig;
+	ConnectionServiceCallbacks		 mCallbacks;
+	std::string						 mLocalIP{};
 
-
-	std::thread								mDeferredThread;
-	std::queue<std::function<void()>>		mDeferredQueue;
-	std::mutex								mDeferredMutex;
-	std::condition_variable					mDeferredCV;
-	std::atomic<bool>						mDeferredRunning{false};
-
-	// Validation result cache
-	std::map<std::string, ValidationResult> mValidatedResults; // Key : ComputerName
-	mutable std::mutex						mValidationMutex;
-
-	// Timeout management
-	TimeoutService							mTimeoutService;
+	TaskQueue						 mTaskQueue;
+	ValidatedPeerRegistry			 mValidatedPeers;
+	ConnectionRetryPolicy			 mRetryPolicy;
+	ReadySyncTracker				 mReadySync;
+	TimeoutService					 mTimeoutService;
 
 	// State
-	std::atomic<bool>						mConnected{false};
-	std::atomic<bool>						mConnecting{false};
-	std::optional<ConnectionRequest>		mCurrentRequest;
-	mutable std::mutex						mConnectingMutex;
-
-	// Retry logic
-	int										mConnectionAttempts{0};
-
-	std::atomic<bool>						mLocalReady{false};
-	std::atomic<bool>						mRemoteReady{false};
+	std::atomic<bool>				 mConnected{false};
+	std::atomic<bool>				 mConnecting{false};
+	std::optional<ConnectionRequest> mCurrentRequest;
+	mutable std::mutex				 mConnectingMutex;
 };
 
 } // namespace netlink
