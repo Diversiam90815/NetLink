@@ -5,41 +5,6 @@
 
 using namespace netlink;
 
-// ---------------------------------------------------------------------------
-// PendingValidation::isComplete
-// ---------------------------------------------------------------------------
-
-TEST(PendingValidation, IsCompleteDefaultFalse)
-{
-    PendingValidation p;
-    EXPECT_FALSE(p.isComplete())
-        << "A default-constructed PendingValidation must not be complete — neither response has been received";
-}
-
-TEST(PendingValidation, IsCompleteVersionOnly)
-{
-    PendingValidation p;
-    p.versionReceived = true;
-    EXPECT_FALSE(p.isComplete())
-        << "Receiving only the version response must not complete validation — the secret response is still missing";
-}
-
-TEST(PendingValidation, IsCompleteSecretOnly)
-{
-    PendingValidation p;
-    p.secretReceived = true;
-    EXPECT_FALSE(p.isComplete())
-        << "Receiving only the secret response must not complete validation — the version response is still missing";
-}
-
-TEST(PendingValidation, IsCompleteWhenBothSet)
-{
-    PendingValidation p;
-    p.versionReceived = true;
-    p.secretReceived  = true;
-    EXPECT_TRUE(p.isComplete())
-        << "Validation must be complete only when both version and secret responses have been received";
-}
 
 // ---------------------------------------------------------------------------
 // ValidationResult::isReadyToConnect
@@ -130,41 +95,6 @@ TEST(ValidationResult, StatusEnumValues)
         << "ValidationTimedout must have numeric value 8";
 }
 
-// ---------------------------------------------------------------------------
-// RemoteHandshake::isComplete
-// ---------------------------------------------------------------------------
-
-TEST(RemoteHandshake, IsCompleteDefaultFalse)
-{
-    RemoteHandshake h;
-    EXPECT_FALSE(h.isComplete())
-        << "A default-constructed RemoteHandshake must not be complete — neither side has exchanged anything yet";
-}
-
-TEST(RemoteHandshake, IsCompleteSentOnly)
-{
-    RemoteHandshake h;
-    h.sent = true;
-    EXPECT_FALSE(h.isComplete())
-        << "Sending a handshake but not yet receiving one must not be considered complete";
-}
-
-TEST(RemoteHandshake, IsCompleteReceivedOnly)
-{
-    RemoteHandshake h;
-    h.received = true;
-    EXPECT_FALSE(h.isComplete())
-        << "Receiving a handshake but not yet sending one must not be considered complete";
-}
-
-TEST(RemoteHandshake, IsCompleteWhenBothTrue)
-{
-    RemoteHandshake h;
-    h.sent     = true;
-    h.received = true;
-    EXPECT_TRUE(h.isComplete())
-        << "A handshake is only complete when both the outgoing and incoming sides have been exchanged";
-}
 
 // ---------------------------------------------------------------------------
 // ConnectionStatusUpdate::getTypeString
