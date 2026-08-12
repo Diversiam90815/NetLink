@@ -155,26 +155,45 @@ TEST(TaskQueue, PendingReflectsQueueSizeBeforeExecution)
 
 TEST(TaskQueue, StopDropsUnexecutedPendingTasks)
 {
-	TaskQueue		 q;
-	std::atomic<int> executedCount{0};
+	TaskQueue				q;
+	std::atomic<int>		executedCount{0};
+	std::atomic<bool>		firstTaskStarted{false};
+
+	std::mutex				blockMutex;
+	std::condition_variable blockCV;
+	bool					releaseFirstTask = false;
 
 	q.start();
 
-	// Post many slow tasks so most remain queued when stop() is called.
-	for (int i = 0; i < 50; ++i)
+	q.post(
+		[&]()
+		{
+			firstTaskStarted.store(true);
+			std::unique_lock<std::mutex> lock(blockMutex);
+			blockCV.wait(lock, [&] { return releaseFirstTask; });
+			++executedCount;
+		});
+
+	for (int i = 0; i < 500 && !firstTaskStarted.load(); ++i)
+		std::this_thread::sleep_for(1ms);
+	ASSERT_TRUE(firstTaskStarted.load()) << "Precondition: the first task must have started before proceeding";
+
+	for (int i = 0; i < 49; ++i)
+		q.post([&executedCount]() { ++executedCount; });
+
+	std::thread stopper([&q]() { q.stop(); });
+	std::this_thread::sleep_for(50ms);
+
 	{
-		q.post(
-			[&executedCount]()
-			{
-				std::this_thread::sleep_for(20ms);
-				++executedCount;
-			});
+		std::lock_guard<std::mutex> lock(blockMutex);
+		releaseFirstTask = true;
 	}
+	blockCV.notify_one();
 
-	std::this_thread::sleep_for(30ms); // allow at most 1-2 tasks to complete
-	q.stop();
+	stopper.join();
 
-	EXPECT_LT(executedCount.load(), 50) << "stop() must drop tasks still queued rather than draining them all";
+	EXPECT_EQ(executedCount.load(), 1) << "Exactly the single in-flight task must complete; "
+										  "all 49 remaining queued tasks must be dropped by stop()";
 }
 
 
