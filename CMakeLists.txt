@@ -45,9 +45,9 @@ CPMAddPackage(
 
 file(GLOB_RECURSE NETWORKING_SOURCES src/*.cpp)
 file(GLOB_RECURSE NETWORKING_HEADERS include/*.h)
+file(GLOB_RECURSE NETWORKING_INTERNAL_HEADERS src/*.h)
 
-# NetworkInformation has one backend per platform (Windows/macOS/Linux) - only
-# one of the platform-specific implementation files should ever be compiled.
+# NetworkInformation has one backend per platform
 list(FILTER NETWORKING_SOURCES EXCLUDE REGEX ".*NetworkInformation(Windows|Linux)\\.cpp$")
 
 if(WIN32)
@@ -58,7 +58,10 @@ elseif(UNIX)
     list(APPEND NETWORKING_SOURCES src/internal/Network/NetworkInformationLinux.cpp)
 endif()
 
-add_library(${PROJECT_NAME} STATIC ${NETWORKING_SOURCES} ${NETWORKING_HEADERS})
+add_library(${PROJECT_NAME} STATIC ${NETWORKING_SOURCES} ${NETWORKING_HEADERS} ${NETWORKING_INTERNAL_HEADERS})
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/src PREFIX "Source Files" FILES ${NETWORKING_SOURCES} ${NETWORKING_INTERNAL_HEADERS})
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/include PREFIX "Header Files" FILES ${NETWORKING_HEADERS})
 
 target_include_directories(${PROJECT_NAME} PUBLIC include)
 

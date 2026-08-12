@@ -22,16 +22,8 @@ struct PendingValidation
 	std::string							  IPv4{};
 	DiscoveryEndpoint					  remoteEndpoint{};
 
-	bool								  versionReceived{false};
-	std::string							  version{};
-
-	bool								  secretReceived{false};
-	std::string							  secret{};
-
 	std::chrono::steady_clock::time_point requestTime{};
 	bool								  timedout{false};
-
-	bool								  isComplete() const { return versionReceived && secretReceived; }
 };
 
 
@@ -49,10 +41,10 @@ struct ValidationResult
 		ValidationTimedout = 8,
 	};
 
+	DiscoveryEndpoint remoteEndpoint{};
 	Status			  status{};
 	std::string		  message{};
 	std::string		  remoteVersion{};
-	DiscoveryEndpoint remoteEndpoint{};
 	bool			  canConnect{false};
 	bool			  needsAction{false};
 

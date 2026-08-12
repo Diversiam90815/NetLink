@@ -1,5 +1,4 @@
 /*
-/*
   ==============================================================================
 	Module:         PeerValidationService
 	Description:    Pre-connection peer validation with pluggable checks
