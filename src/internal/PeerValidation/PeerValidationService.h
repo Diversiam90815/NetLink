@@ -1,31 +1,29 @@
 /*
   ==============================================================================
 	Module:         PeerValidationService
-	Description:    Pre-connection peer validation with pluggable checks
+	Description:    Pre-connection peer validation orchestrator
   ==============================================================================
 */
 
 #pragma once
 
 #include <functional>
-#include <map>
+#include <memory>
 #include <mutex>
-#include <optional>
 #include <string>
+#include <vector>
 
 #include "ValidationResult.h"
+#include "PendingValidationStore.h"
+#include "ValidatedPeerRegistry.h"
+#include "HandshakeTracker.h"
+#include "Checks/ICompatibilityCheck.h"
 #include "Discovery/DiscoveryEndpoint.h"
 #include "TimeoutService/TimeoutService.h"
 
 
 namespace netlink
 {
-
-enum class RemoteRequest
-{
-	Secret	= 1,
-	Version = 2,
-};
 
 struct PeerValidationConfig
 {
@@ -47,23 +45,9 @@ struct PeerValidationSendCallbacks
 };
 
 
-struct RemoteHandshake
-{
-	std::string							  remoteName{};
-	DiscoveryEndpoint					  remoteEndpoint{};
-	bool								  sent{false};
-	bool								  received{false};
-	std::chrono::steady_clock::time_point initiatedTime;
-
-	bool								  isComplete() const { return sent && received; }
-};
-
-
 namespace PeerValidationTimouts
 {
-constexpr const char *Handshake		 = "handshake";
-constexpr const char *VersionRequest = "version_request";
-constexpr const char *SecretRequest	 = "secret_request";
+constexpr const char *Handshake = "handshake";
 } // namespace PeerValidationTimouts
 
 
@@ -72,85 +56,77 @@ class PeerValidationService
 public:
 	using ValidationCallback = std::function<void(const ValidationResult &)>;
 
-	PeerValidationService()	 = default;
+	PeerValidationService();
 	~PeerValidationService() = default;
 
 	// Configuration
-	void						  setConfig(const PeerValidationConfig &config) { mConfig = config; }
-	void						  setLocalSecret(const std::string &secret) { mLocalSecret = secret; }
-	void						  setLocalVersion(const std::string &version) { mLocalVersion = version; }
-	void						  setValidationCallback(ValidationCallback cb) { mCallback = std::move(cb); }
-	void						  setSendCallbacks(PeerValidationSendCallbacks cb) { mSendCallbacks = std::move(cb); }
+	void							setConfig(const PeerValidationConfig &config);
+	void							setLocalSecret(const std::string &secret);
+	void							setLocalVersion(const std::string &version);
+	void							setValidationCallback(ValidationCallback cb) { mCallback = std::move(cb); }
+	void							setSendCallbacks(PeerValidationSendCallbacks cb) { mSendCallbacks = std::move(cb); }
 
 	// Manual validation
-	ValidationResult			  validatePeer(const DiscoveryEndpoint &peer);
-	void						  clearValidatedPeer(const std::string &computerName);
+	ValidationResult				validatePeer(const DiscoveryEndpoint &peer);
+	void							clearValidatedPeer(const std::string &computerName);
 
-	void						  onPeerDiscovered(const DiscoveryEndpoint &remoteEndpoint);
+	void							onPeerDiscovered(const DiscoveryEndpoint &remoteEndpoint);
 
-	std::vector<ValidationResult> getValidatedPeers();
+	std::vector<ValidationResult>	getValidatedPeers();
 
-private:
-	// Validation logic
-	ValidationResult						 performValidation(const std::string &computerName);
-
-	// Pending validation
-	void									 addPendingValidation(const DiscoveryEndpoint &remote);
-	std::optional<PendingValidation>		 getPendingValidation(const std::string &computerName);
-	void									 updatePendingValidation(const std::string &computerName, std::function<void(PendingValidation &)> updateFunc);
-	void									 completePendingValidation(const std::string &computerName);
-	void									 removePendingValidation(const std::string &computerName);
+	// Incoming remote events (called by the signaling layer)
+	void							onRequestReceived(const std::string &computerName, RemoteRequest request);
+	void							onCheckResponseReceived(const std::string &computerName, RemoteRequest request, const std::string &value);
+	void							onHandshakeReceived(const std::string &computerName);
 
 	// State queries
-	ValidationResult						 getLastResult() const { return mLastResult; }
-	std::optional<ValidationResult>			 getValidationResult(const std::string &computerName);
-	void									 cancelAllPendingValidation();
+	ValidationResult				getLastResult() const;
+	std::optional<ValidationResult> getValidationResult(const std::string &computerName);
+	void							cancelAllPendingValidation();
+
+private:
+	// Validation logic - evaluates all registered checks concurrently
+	ValidationResult								  performValidation(const std::string &computerName);
+
+	void											  completePendingValidation(const std::string &computerName);
+	bool											  allChecksReady(const std::string &computerName);
 
 	// Request handlers -> Answer incoming requests
-	void									 handleSecretRequest(const std::string &computerName);
-	void									 handleVersionRequest(const std::string &computerName);
-
-	// Received requests -> Handle answers to our requests
-	void									 onRequestReceived(const std::string &computerName, const RemoteRequest request);
-	void									 onSecretResponseReceived(const std::string &computerName, const std::string &secret);
-	void									 onVersionResponseReceived(const std::string &computerName, const std::string &version);
-	void									 onHandshakeReceived(const std::string &computerName);
+	void											  handleSecretRequest(const std::string &computerName);
+	void											  handleVersionRequest(const std::string &computerName);
 
 	// Sending requests to remote
-	void									 sendRequestToRemote(const std::string &computerName, const RemoteRequest request);
-
-	// Check compatibility
-	bool									 checkVersionCompatibility(const std::string remoteVersion);
-	bool									 checkSecretCompatibility(const std::string remoteSecret);
+	void											  sendRequestToRemote(const std::string &computerName, ICompatibilityCheck &check);
 
 	// Handshake
-	void									 sendHandshake(const std::string &computerName);
-	void									 checkAndStartValidation(const std::string &computerName);
+	void											  sendHandshake(const std::string &computerName);
+	void											  checkAndStartValidation(const std::string &computerName);
 
-	void									 onTimeout(const TimeoutKey &key);
+	void											  onTimeout(const TimeoutKey &key);
+
+	// Rebuild mChecks from current config/secret/version
+	void											  rebuildChecks();
+	ICompatibilityCheck								 *findCheck(RemoteRequest wireType);
 
 
-	PeerValidationConfig					 mConfig;
-	ValidationResult						 mLastResult;
+	PeerValidationConfig							  mConfig;
+	ValidationResult								  mLastResult;
+	mutable std::mutex								  mStateMutex;
 
-	std::string								 mLocalVersion{};
-	std::string								 mLocalSecret{};
+	std::string										  mLocalVersion{};
+	std::string										  mLocalSecret{};
 
-	TimeoutService							 mTimeoutService;
+	TimeoutService									  mTimeoutService;
 
-	ValidationCallback						 mCallback;
-	PeerValidationSendCallbacks				 mSendCallbacks;
+	ValidationCallback								  mCallback;
+	PeerValidationSendCallbacks						  mSendCallbacks;
 
-	std::map<std::string, ValidationResult>	 mValidatedPeers;	  // key = Computername
-	mutable std::mutex						 mValidatedPeerMutex;
+	std::vector<std::unique_ptr<ICompatibilityCheck>> mChecks;
+	std::mutex										  mChecksMutex;
 
-	std::map<std::string, PendingValidation> mPendingValidations; // key = Computername
-	std::mutex								 mPendingValidationMutex;
-
-	std::map<std::string, RemoteHandshake>	 mPendingHandshakes;  // Key = Computername
-	std::mutex								 mHandshakeMutex;
-
-	std::mutex								 mStateMutex;
+	ValidatedPeerRegistry							  mValidatedPeers;
+	PendingValidationStore							  mPendingValidations;
+	HandshakeTracker								  mHandshakes;
 };
 
 } // namespace netlink

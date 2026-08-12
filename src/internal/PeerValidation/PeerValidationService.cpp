@@ -1,13 +1,44 @@
 /*
   ==============================================================================
 	Module:         PeerValidationService
-	Description:    Pre-connection peer validation with pluggable checks
+	Description:    Pre-connection peer validation orchestrator
   ==============================================================================
 */
 
+
+#include <future>
+
 #include "PeerValidationService.h"
+#include "Checks/SecretCompatibilityCheck.h"
+#include "Checks/VersionCompatibilityCheck.h"
 #include "NetLinkLog.h"
 
+
+netlink::PeerValidationService::PeerValidationService()
+{
+	rebuildChecks();
+}
+
+
+void netlink::PeerValidationService::setConfig(const PeerValidationConfig &config)
+{
+	mConfig = config;
+	rebuildChecks();
+}
+
+
+void netlink::PeerValidationService::setLocalSecret(const std::string &secret)
+{
+	mLocalSecret = secret;
+	rebuildChecks();
+}
+
+
+void netlink::PeerValidationService::setLocalVersion(const std::string &version)
+{
+	mLocalVersion = version;
+	rebuildChecks();
+}
 
 
 netlink::ValidationResult netlink::PeerValidationService::validatePeer(const DiscoveryEndpoint &peer)
@@ -20,54 +51,29 @@ netlink::ValidationResult netlink::PeerValidationService::validatePeer(const Dis
 	result.needsAction	  = false;
 
 	// Check if already validated
+	if (auto existing = mValidatedPeers.get(peer.displayName))
 	{
-		std::lock_guard<std::mutex> lock(mValidatedPeerMutex);
-		auto						it = mValidatedPeers.find(result.remoteEndpoint.displayName);
-
-		if (it != mValidatedPeers.end())
-		{
-			NETLINK_LOG_INFO("Peer {} already validated.", result.remoteEndpoint.displayName);
-			result		  = it->second;
-			result.status = ValidationResult::Status::AlreadyValidated;
-			return result;
-		}
+		NETLINK_LOG_INFO("Peer {} already validated.", peer.displayName);
+		result		  = *existing;
+		result.status = ValidationResult::Status::AlreadyValidated;
+		return result;
 	}
 
 	// start async validation by adding pending validation
-	addPendingValidation(peer);
+	mPendingValidations.add(peer);
 
-	// 1. Request remote secret
-	if (mConfig.enableSecretCheck)
+	// kick off every registered check concurrently
 	{
-		NETLINK_LOG_INFO("Requesting secret from {}", peer.displayName);
-		sendRequestToRemote(peer.displayName, RemoteRequest::Secret);
-	}
-	else
-	{
-		// mark secret as received and matching if check is disabled
-		updatePendingValidation(peer.displayName,
-								[this](PendingValidation &pending)
-								{
-									pending.secretReceived = true;
-									pending.secret		   = mLocalSecret;
-								});
-	}
+		std::lock_guard<std::mutex> checksLock(mChecksMutex);
 
-	// 2. Request remote version
-	if (mConfig.enableVersionCheck)
-	{
-		NETLINK_LOG_INFO("Requesting version from {}", peer.displayName);
-		sendRequestToRemote(peer.displayName, RemoteRequest::Version);
-	}
-	else
-	{
-		// mark version as received and matching if check is disabled
-		updatePendingValidation(peer.displayName,
-								[this](PendingValidation &pending)
-								{
-									pending.versionReceived = true;
-									pending.version			= mLocalVersion;
-								});
+		for (auto &check : mChecks)
+		{
+			if (check->requiresRemoteRequest())
+			{
+				NETLINK_LOG_INFO("Requesting {} from {}", check->name(), peer.displayName);
+				sendRequestToRemote(peer.displayName, *check);
+			}
+		}
 	}
 
 	// Return early result
@@ -83,15 +89,8 @@ void netlink::PeerValidationService::clearValidatedPeer(const std::string &compu
 {
 	NETLINK_LOG_INFO("Clearing validated peer cache for {}", computerName);
 
-	{
-		std::lock_guard<std::mutex> lock(mValidatedPeerMutex);
-		mValidatedPeers.erase(computerName);
-	}
-
-	{
-		std::lock_guard<std::mutex> lock(mHandshakeMutex);
-		mPendingHandshakes.erase(computerName);
-	}
+	mValidatedPeers.remove(computerName);
+	mHandshakes.remove(computerName);
 }
 
 
@@ -99,34 +98,7 @@ void netlink::PeerValidationService::onPeerDiscovered(const DiscoveryEndpoint &r
 {
 	NETLINK_LOG_INFO("Found a remote peer : {}", remoteEndpoint.displayName);
 
-	bool startedNewHandshake = false;
-
-	// Track handshake initiation
-	{
-		std::lock_guard<std::mutex> lock(mHandshakeMutex);
-		auto						it = mPendingHandshakes.find(remoteEndpoint.displayName);
-
-		if (it == mPendingHandshakes.end())
-		{
-			// There is no handshake yet, so we create one
-			RemoteHandshake handshake;
-			handshake.remoteName						   = remoteEndpoint.displayName;
-			handshake.remoteEndpoint					   = remoteEndpoint;
-			handshake.sent								   = false;
-			handshake.received							   = false;
-			handshake.initiatedTime						   = std::chrono::steady_clock::now();
-
-			mPendingHandshakes[remoteEndpoint.displayName] = handshake;
-			startedNewHandshake							   = true;
-		}
-		else
-		{
-			// update handshake with remote endpoint (it was received when receiving a handshake without the endpoint info
-			it->second.remoteEndpoint = remoteEndpoint;
-
-			NETLINK_LOG_DEBUG("Updated existing handshake for {} with RemoteEndpoint", remoteEndpoint.displayName);
-		}
-	}
+	bool startedNewHandshake = mHandshakes.beginForDiscoveredPeer(remoteEndpoint);
 
 	if (startedNewHandshake)
 	{
@@ -134,25 +106,13 @@ void netlink::PeerValidationService::onPeerDiscovered(const DiscoveryEndpoint &r
 		mTimeoutService.startTimeout(key, mConfig.handshakeTimeoutMs, [this](const TimeoutKey &key) { onTimeout(key); });
 	}
 
-	// send the handshake
 	sendHandshake(remoteEndpoint.displayName);
 }
 
 
 std::vector<netlink::ValidationResult> netlink::PeerValidationService::getValidatedPeers()
 {
-	std::lock_guard<std::mutex>	  lock(mValidatedPeerMutex);
-
-	std::vector<ValidationResult> result;
-	result.reserve(mValidatedPeers.size());
-
-	for (const auto &[name, vr] : mValidatedPeers)
-	{
-		if (vr.isReadyToConnect())
-			result.push_back(vr);
-	}
-
-	return result;
+	return mValidatedPeers.getAllReadyToConnect();
 }
 
 
@@ -160,8 +120,7 @@ netlink::ValidationResult netlink::PeerValidationService::performValidation(cons
 {
 	ValidationResult result;
 
-	// get pending validation data
-	auto			 pending = getPendingValidation(computerName);
+	auto			 pending = mPendingValidations.get(computerName);
 	if (!pending)
 	{
 		NETLINK_LOG_ERROR("No pending validation found for {}", computerName);
@@ -172,37 +131,43 @@ netlink::ValidationResult netlink::PeerValidationService::performValidation(cons
 
 	result.remoteEndpoint = pending->remoteEndpoint;
 
-	// 1. validate secret
-	if (mConfig.enableSecretCheck)
-	{
-		bool secretCompatible = checkSecretCompatibility(pending->secret);
+	// Evaluate every registered check concurrently
+	std::vector<std::pair<ICompatibilityCheck *, std::future<bool>>> futures;
 
-		if (!secretCompatible)
+	{
+		std::lock_guard<std::mutex> lock(mChecksMutex);
+		futures.reserve(mChecks.size());
+
+		for (auto &check : mChecks)
 		{
-			// secret is not compatible
-			result.status	  = ValidationResult::Status::SecretMissmatch;
-			result.message	  = "Secret missmatch";
-			result.canConnect = false;
-			return result;
+			ICompatibilityCheck *checkPtr = check.get();
+			futures.emplace_back(checkPtr, std::async(std::launch::async, [checkPtr, computerName] { return checkPtr->evaluate(computerName); }));
 		}
 	}
 
-	// 2. check version
-	if (mConfig.enableVersionCheck)
-	{
-		bool versionCompatible = checkVersionCompatibility(pending->version);
+	ICompatibilityCheck *firstFailure = nullptr;
 
-		if (!versionCompatible)
-		{
-			result.status		 = ValidationResult::Status::VersionMissmatch;
-			result.message		 = "Version missmatch";
-			result.remoteVersion = pending->version;
-			result.canConnect	 = false;
-			return result;
-		}
+	for (auto &[check, future] : futures)
+	{
+		bool passed = future.get();
+
+		if (!passed && firstFailure == nullptr)
+			firstFailure = check;
 	}
 
-	// all checks have passed
+	// Pull remote version (if that check ran) for reporting purposes, regardless of pass/fail
+	if (auto *versionCheck = dynamic_cast<VersionCompatibilityCheck *>(findCheck(RemoteRequest::Version)))
+		result.remoteVersion = versionCheck->remoteVersion(computerName);
+
+	if (firstFailure != nullptr)
+	{
+		result.status	  = firstFailure->name() == "secret_request" ? ValidationResult::Status::SecretMissmatch : ValidationResult::Status::VersionMissmatch;
+		result.message	  = firstFailure->failureMessage(computerName);
+		result.canConnect = false;
+		return result;
+	}
+
+	// all checks passed
 	result.status	   = ValidationResult::Status::ReadyToConnect;
 	result.message	   = "Peer validated and is ready to connect";
 	result.canConnect  = true;
@@ -213,52 +178,9 @@ netlink::ValidationResult netlink::PeerValidationService::performValidation(cons
 }
 
 
-void netlink::PeerValidationService::addPendingValidation(const DiscoveryEndpoint &remote)
-{
-	std::lock_guard<std::mutex> lock(mPendingValidationMutex);
-
-	PendingValidation			pending;
-	pending.computerName					= remote.displayName;
-	pending.IPv4							= remote.IPAddress;
-	pending.remoteEndpoint					= remote;
-	pending.requestTime						= std::chrono::steady_clock::now();
-
-	mPendingValidations[remote.displayName] = pending;
-
-	NETLINK_LOG_DEBUG("Added pending validation for {}", remote.displayName);
-}
-
-
-std::optional<netlink::PendingValidation> netlink::PeerValidationService::getPendingValidation(const std::string &computerName)
-{
-	std::lock_guard<std::mutex> lock(mPendingValidationMutex);
-
-	auto						it = mPendingValidations.find(computerName);
-
-	if (it != mPendingValidations.end())
-		return it->second;
-
-	return std::nullopt;
-}
-
-
-void netlink::PeerValidationService::updatePendingValidation(const std::string &computerName, std::function<void(PendingValidation &)> updateFunc)
-{
-	std::lock_guard<std::mutex> lock(mPendingValidationMutex);
-
-	auto						it = mPendingValidations.find(computerName);
-
-	if (it != mPendingValidations.end())
-	{
-		updateFunc(it->second);
-		NETLINK_LOG_DEBUG("Updated pending validation for {}", computerName);
-	}
-}
-
-
 void netlink::PeerValidationService::completePendingValidation(const std::string &computerName)
 {
-	auto pending = getPendingValidation(computerName);
+	auto pending = mPendingValidations.get(computerName);
 
 	if (!pending)
 	{
@@ -271,58 +193,63 @@ void netlink::PeerValidationService::completePendingValidation(const std::string
 	// perform final validation
 	auto result = performValidation(computerName);
 
-	// store result
-	{
-		std::lock_guard<std::mutex> lock(mValidatedPeerMutex);
-		mValidatedPeers[computerName] = result;
-	}
+	mValidatedPeers.store(computerName, result);
 
-	// store the last result
-	mLastResult = result;
+	{
+		std::lock_guard<std::mutex> lock(mStateMutex);
+		mLastResult = result;
+	}
 
 	// notify
 	if (mCallback)
 		mCallback(result);
 
 	// remove from pending
-	removePendingValidation(computerName);
+	mPendingValidations.remove(computerName);
+
+	// Reset per-peer state on every check so a future re-validation starts clean
+	{
+		std::lock_guard<std::mutex> lock(mChecksMutex);
+		for (auto &check : mChecks)
+			check->reset(computerName);
+	}
 
 	NETLINK_LOG_INFO("Validation completed for {} with status {}", computerName, static_cast<int>(result.status));
 }
 
 
-void netlink::PeerValidationService::removePendingValidation(const std::string &computerName)
+bool netlink::PeerValidationService::allChecksReady(const std::string &computerName)
 {
-	std::lock_guard<std::mutex> lock(mPendingValidationMutex);
+	std::lock_guard<std::mutex> checksLock(mChecksMutex);
 
-	mPendingValidations.erase(computerName);
-	NETLINK_LOG_DEBUG("Removed pending validation for {}", computerName);
+	for (const auto &check : mChecks)
+	{
+		if (!check->isReady(computerName))
+			return false;
+	}
+
+	return true;
+}
+
+
+netlink::ValidationResult netlink::PeerValidationService::getLastResult() const
+{
+	std::lock_guard<std::mutex> lock(mStateMutex);
+	return mLastResult;
 }
 
 
 std::optional<netlink::ValidationResult> netlink::PeerValidationService::getValidationResult(const std::string &computerName)
 {
-	std::lock_guard<std::mutex> lock(mValidatedPeerMutex);
-
-	auto						it = mValidatedPeers.find(computerName);
-
-	if (it != mValidatedPeers.end())
-		return it->second;
-
-	return std::nullopt;
+	return mValidatedPeers.get(computerName);
 }
 
 
 void netlink::PeerValidationService::cancelAllPendingValidation()
 {
-	{
-		std::lock_guard<std::mutex> lock(mPendingValidationMutex);
-		mPendingValidations.clear();
-	}
-
+	mPendingValidations.clear();
 	mTimeoutService.cancelAll();
 }
-
 
 
 void netlink::PeerValidationService::handleSecretRequest(const std::string &computerName)
@@ -349,6 +276,33 @@ void netlink::PeerValidationService::handleVersionRequest(const std::string &com
 }
 
 
+void netlink::PeerValidationService::sendRequestToRemote(const std::string &computerName, ICompatibilityCheck &check)
+{
+	auto wireType = check.wireRequestType();
+	if (!wireType.has_value())
+		return; // check has its own means of gathering data (e.g. purely local)
+
+	int timeoutMS = 0;
+
+	switch (*wireType)
+	{
+	case RemoteRequest::Secret: timeoutMS = mConfig.secretRequestTimeoutMs; break;
+	case RemoteRequest::Version: timeoutMS = mConfig.versionRequestTimeoutMs; break;
+	}
+
+	NETLINK_LOG_DEBUG("Sending request {} to {}", check.name(), computerName);
+
+	if (mSendCallbacks.sendRequest)
+		mSendCallbacks.sendRequest(computerName, *wireType);
+
+	if (timeoutMS > 0)
+	{
+		TimeoutKey key{check.name(), computerName};
+		mTimeoutService.startTimeout(key, timeoutMS, [this](const TimeoutKey &key) { onTimeout(key); });
+	}
+}
+
+
 void netlink::PeerValidationService::onRequestReceived(const std::string &computerName, const RemoteRequest request)
 {
 	switch (request)
@@ -360,50 +314,23 @@ void netlink::PeerValidationService::onRequestReceived(const std::string &comput
 }
 
 
-void netlink::PeerValidationService::onSecretResponseReceived(const std::string &computerName, const std::string &secret)
+void netlink::PeerValidationService::onCheckResponseReceived(const std::string &computerName, RemoteRequest request, const std::string &value)
 {
-	NETLINK_LOG_INFO("Received secret answer from {}", computerName);
+	ICompatibilityCheck *check = findCheck(request);
 
-	// cancel timeout
-	mTimeoutService.cancelTimeout({PeerValidationTimouts::SecretRequest, computerName});
+	if (check == nullptr)
+	{
+		NETLINK_LOG_WARNING("Received response for unknown/disabled check ({}) from {}", static_cast<int>(request), computerName);
+		return;
+	}
 
-	std::lock_guard<std::mutex> lock(mStateMutex);
+	NETLINK_LOG_INFO("Received {} answer from {}", check->name(), computerName);
 
-	updatePendingValidation(computerName,
-							[&secret](PendingValidation &pending)
-							{
-								pending.secretReceived = true;
-								pending.secret		   = secret;
-							});
+	mTimeoutService.cancelTimeout({check->name(), computerName});
 
-	// check if this completes the validation
-	auto pending = getPendingValidation(computerName);
+	check->onRemoteDataReceived(computerName, value);
 
-	if (pending && pending->isComplete())
-		completePendingValidation(computerName);
-}
-
-
-void netlink::PeerValidationService::onVersionResponseReceived(const std::string &computerName, const std::string &version)
-{
-	NETLINK_LOG_INFO("Received version answer from {}", computerName);
-
-	// cancel timeout
-	mTimeoutService.cancelTimeout({PeerValidationTimouts::VersionRequest, computerName});
-
-	std::lock_guard<std::mutex> lock(mStateMutex);
-
-	updatePendingValidation(computerName,
-							[&version](PendingValidation &pending)
-							{
-								pending.versionReceived = true;
-								pending.version			= version;
-							});
-
-	// check if this completes the validation
-	auto pending = getPendingValidation(computerName);
-
-	if (pending && pending->isComplete())
+	if (allChecksReady(computerName))
 		completePendingValidation(computerName);
 }
 
@@ -412,84 +339,16 @@ void netlink::PeerValidationService::onHandshakeReceived(const std::string &comp
 {
 	NETLINK_LOG_INFO("Received remote handshake from {}", computerName);
 
-	bool isNewHandshake = false;
+	bool	   isNewHandshake = mHandshakes.markReceived(computerName);
 
-	{
-		std::lock_guard<std::mutex> lock(mHandshakeMutex);
-		auto						it = mPendingHandshakes.find(computerName);
+	TimeoutKey key			  = {PeerValidationTimouts::Handshake, computerName};
 
-		if (it != mPendingHandshakes.end())
-			it->second.received = true;
-		else
-		{
-			// remote sent handshake before we discovered them
-			RemoteHandshake handshake;
-			handshake.remoteName			 = computerName;
-			handshake.received				 = true;
-			handshake.sent					 = false;
-			handshake.initiatedTime			 = std::chrono::steady_clock::now();
-
-			mPendingHandshakes[computerName] = handshake;
-			isNewHandshake					 = true;
-		}
-	}
-
-	// Start timeout for new handshake
 	if (isNewHandshake)
-	{
-		TimeoutKey key = {PeerValidationTimouts::Handshake, computerName};
 		mTimeoutService.startTimeout(key, mConfig.handshakeTimeoutMs, [this](const TimeoutKey &key) { onTimeout(key); });
-	}
 	else
-	{
-		// this is not a new handshake, so we stop a potential timer
-		TimeoutKey key = {PeerValidationTimouts::Handshake, computerName};
 		mTimeoutService.cancelTimeout(key);
-	}
 
-	// check if handshake is complete and start validation
 	checkAndStartValidation(computerName);
-}
-
-
-void netlink::PeerValidationService::sendRequestToRemote(const std::string &computerName, const RemoteRequest request)
-{
-	// create timeout for the request
-	int		   timeoutMS = 0;
-	TimeoutKey key;
-
-	switch (request)
-	{
-	case RemoteRequest::Secret:
-		key		  = {PeerValidationTimouts::SecretRequest, computerName};
-		timeoutMS = mConfig.secretRequestTimeoutMs;
-		break;
-	case RemoteRequest::Version:
-		key		  = {PeerValidationTimouts::VersionRequest, computerName};
-		timeoutMS = mConfig.versionRequestTimeoutMs;
-		break;
-	}
-
-	NETLINK_LOG_DEBUG("Sending request {} to {}", static_cast<int>(request), computerName);
-
-	// send request
-	if (mSendCallbacks.sendRequest)
-		mSendCallbacks.sendRequest(computerName, request);
-
-	if (timeoutMS > 0)
-		mTimeoutService.startTimeout(key, timeoutMS, [this](const TimeoutKey &key) { onTimeout(key); });
-}
-
-
-bool netlink::PeerValidationService::checkVersionCompatibility(const std::string remoteVersion)
-{
-	return mLocalVersion == remoteVersion;
-}
-
-
-bool netlink::PeerValidationService::checkSecretCompatibility(const std::string remoteSecret)
-{
-	return mLocalSecret == remoteSecret;
 }
 
 
@@ -497,68 +356,26 @@ void netlink::PeerValidationService::sendHandshake(const std::string &computerNa
 {
 	NETLINK_LOG_INFO("Sending handshake to {}", computerName);
 
-	// mark that we sent handshake
-	{
-		std::lock_guard<std::mutex> lock(mHandshakeMutex);
+	mHandshakes.markSent(computerName);
 
-		auto						it = mPendingHandshakes.find(computerName);
-
-		if (it != mPendingHandshakes.end())
-			it->second.sent = true;
-	}
-
-	// send handshake
 	if (mSendCallbacks.sendHandshake)
 		mSendCallbacks.sendHandshake(computerName);
 
-	// check if handshake is complete
 	checkAndStartValidation(computerName);
 }
 
 
 void netlink::PeerValidationService::checkAndStartValidation(const std::string &computerName)
 {
-	bool			  shouldStartValidation = false;
-	DiscoveryEndpoint remoteEndpoint;
+	auto remoteEndpoint = mHandshakes.tryCompleteAndRemove(computerName);
 
-	{
-		std::lock_guard<std::mutex> lock(mHandshakeMutex);
+	if (!remoteEndpoint.has_value())
+		return; // handshake still incomplete (or unknown)
 
-		auto						it = mPendingHandshakes.find(computerName);
+	mTimeoutService.cancelTimeout({PeerValidationTimouts::Handshake, computerName});
 
-		if (it != mPendingHandshakes.end())
-		{
-			NETLINK_LOG_INFO("Remote Handshake complete with {}. Starting validation..", computerName);
-			shouldStartValidation = true;
-
-			// Get peer endpoint
-			remoteEndpoint		  = it->second.remoteEndpoint;
-
-			// Cleanup handshake tracking
-			mPendingHandshakes.erase(it);
-		}
-	}
-
-	if (shouldStartValidation)
-	{
-		// Cancel handshake timeout
-		mTimeoutService.cancelTimeout({PeerValidationTimouts::Handshake, computerName});
-
-		if (!remoteEndpoint.isEmpty())
-			validatePeer(remoteEndpoint);
-	}
-	else
-	{
-		std::lock_guard<std::mutex> lock(mHandshakeMutex);
-
-		auto						it = mPendingHandshakes.find(computerName);
-
-		if (it != mPendingHandshakes.end())
-			NETLINK_LOG_DEBUG("Handshake incomplete for {} : sent: {}, received: {}. Waiting..", computerName, it->second.sent ? "true" : "false",
-							  it->second.received ? "true" : "false");
-		else
-			NETLINK_LOG_WARNING("Cannot start validation for {}. No pending handshake found!", computerName);
-	}
+	if (!remoteEndpoint->isEmpty())
+		validatePeer(*remoteEndpoint);
 }
 
 
@@ -568,40 +385,63 @@ void netlink::PeerValidationService::onTimeout(const TimeoutKey &key)
 
 	if (key.category == PeerValidationTimouts::Handshake)
 	{
-		// handshake timedout -> clean up handshake tracking
-		{
-			std::lock_guard<std::mutex> lock(mHandshakeMutex);
-			mPendingHandshakes.erase(key.identifier);
-		}
-
+		mHandshakes.remove(key.identifier);
 		NETLINK_LOG_WARNING("Handshake timed out for {}", key.identifier);
+		return;
 	}
-	else if (key.category == PeerValidationTimouts::SecretRequest || key.category == PeerValidationTimouts::VersionRequest)
+
+	// otherwise this must be one of the compatibility check timeouts - fail entire validation
+	auto pending = mPendingValidations.get(key.identifier);
+
+	if (!pending)
+		return;
+
+	ValidationResult result;
+	result.status		  = ValidationResult::Status::ValidationTimedout;
+	result.message		  = "Validation timed out waiting for " + key.category;
+	result.remoteEndpoint = pending->remoteEndpoint;
+	result.canConnect	  = false;
+	result.needsAction	  = false;
+
+	if (mCallback)
+		mCallback(result);
+
+	mPendingValidations.remove(key.identifier);
+	mTimeoutService.cancelByIdentifier(key.identifier);
+
 	{
-		// a request timed out -> fail entire validation for peer
-		auto pending = getPendingValidation(key.identifier);
-
-		if (!pending)
-			return;
-
-		// Create timedout result and notify
-		ValidationResult result;
-		result.status		  = ValidationResult::Status::ValidationTimedout;
-		result.message		  = "Validation timed out waiting for " + key.category;
-		result.remoteEndpoint = pending->remoteEndpoint;
-		result.canConnect	  = false;
-		result.needsAction	  = false;
-
-		// notify
-		if (mCallback)
-			mCallback(result);
-
-		// Remove pending validation
-		removePendingValidation(key.identifier);
-
-		// cancel any tother pending timeouts for this peer
-		mTimeoutService.cancelByIdentifier(key.identifier);
-
-		NETLINK_LOG_INFO("Validation failed due to timeout for {}", key.identifier);
+		std::lock_guard<std::mutex> lock(mChecksMutex);
+		for (auto &check : mChecks)
+			check->reset(key.identifier);
 	}
+
+	NETLINK_LOG_INFO("Validation failed due to timeout for {}", key.identifier);
+}
+
+
+void netlink::PeerValidationService::rebuildChecks()
+{
+	std::lock_guard<std::mutex> lock(mChecksMutex);
+
+	mChecks.clear();
+
+	if (mConfig.enableSecretCheck)
+		mChecks.push_back(std::make_unique<SecretCompatibilityCheck>(mLocalSecret));
+
+	if (mConfig.enableVersionCheck)
+		mChecks.push_back(std::make_unique<VersionCompatibilityCheck>(mLocalVersion));
+}
+
+
+netlink::ICompatibilityCheck *netlink::PeerValidationService::findCheck(RemoteRequest wireType)
+{
+	std::lock_guard<std::mutex> lock(mChecksMutex);
+
+	for (auto &check : mChecks)
+	{
+		if (check->wireRequestType() == wireType)
+			return check.get();
+	}
+
+	return nullptr;
 }
