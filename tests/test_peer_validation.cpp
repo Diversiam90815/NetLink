@@ -272,6 +272,8 @@ TEST(PeerValidationService, ClearValidatedPeer_AllowsRevalidation)
 
 TEST(PeerValidationService, ValidationCallback_FiresImmediately_WhenBothChecksDisabled)
 {
+	// With no checks registered there is nothing to wait for a remote response on, so
+	// validatePeer() must complete validation synchronously and fire the callback right away.
 	PeerValidationService svc;
 	PeerValidationConfig  cfg;
 	cfg.enableVersionCheck = false;
@@ -280,13 +282,18 @@ TEST(PeerValidationService, ValidationCallback_FiresImmediately_WhenBothChecksDi
 	svc.setSendCallbacks(makeNullCallbacks());
 
 	std::atomic<bool> callbackFired{false};
-	svc.setValidationCallback([&](const ValidationResult &) { callbackFired.store(true); });
+	ValidationResult  capturedResult;
+	svc.setValidationCallback(
+		[&](const ValidationResult &r)
+		{
+			capturedResult = r;
+			callbackFired.store(true);
+		});
 
 	svc.validatePeer(makeEndpoint("pc-j", "10.0.0.7"));
-	std::this_thread::sleep_for(50ms);
 
-	EXPECT_FALSE(callbackFired.load()) << "Calling validatePeer() directly (bypassing the handshake flow) with no checks registered "
-										  "does not go through completePendingValidation() and therefore must not fire the callback";
+	EXPECT_TRUE(waitUntil([&] { return callbackFired.load(); })) << "With zero checks registered, validatePeer() must complete synchronously and fire the callback";
+	EXPECT_EQ(capturedResult.status, ValidationResult::Status::ReadyToConnect) << "With no checks to fail, a peer with all checks disabled must be considered ReadyToConnect";
 }
 
 
@@ -571,4 +578,20 @@ TEST(PeerValidationService, OneCheckTimesOutBeforeOtherResponds_StillReportsTime
 
 	EXPECT_TRUE(waitUntil([&] { return callbackFired.load(); }, 800ms)) << "The secret check timing out must still fail the overall validation even if version succeeded";
 	EXPECT_EQ(capturedResult.status, ValidationResult::Status::ValidationTimedout);
+}
+
+
+TEST(PeerValidationService, ValidatePeer_NoChecksRegistered_CompletesAndIsRetrievable)
+{
+	PeerValidationService svc;
+	svc.setConfig(PeerValidationConfig{}); // both checks disabled
+	svc.setSendCallbacks(makeNullCallbacks());
+
+	svc.validatePeer(makeEndpoint("pc-q", "10.0.0.20"));
+
+	ASSERT_TRUE(waitUntil([&] { return svc.getValidationResult("pc-q").has_value(); }, 200ms)) << "validatePeer() must complete immediately when there are no checks to wait on";
+
+	auto ready = svc.getValidatedPeers();
+	ASSERT_EQ(ready.size(), 1u);
+	EXPECT_EQ(ready.front().remoteEndpoint.displayName, "pc-q");
 }

@@ -43,9 +43,8 @@ void netlink::PeerValidationService::setLocalVersion(const std::string &version)
 
 netlink::ValidationResult netlink::PeerValidationService::validatePeer(const DiscoveryEndpoint &peer)
 {
-	std::lock_guard<std::mutex> lock(mStateMutex);
 
-	ValidationResult			result;
+	ValidationResult result;
 	result.remoteEndpoint = peer;
 	result.canConnect	  = false;
 	result.needsAction	  = false;
@@ -79,7 +78,14 @@ netlink::ValidationResult netlink::PeerValidationService::validatePeer(const Dis
 	// Return early result
 	result.status  = ValidationResult::Status::ResultIncomplete;
 	result.message = "Validation in progress";
-	mLastResult	   = result;
+
+	{
+		std::lock_guard<std::mutex> lock(mStateMutex);
+		mLastResult = result;
+	}
+
+	if (allChecksReady(peer.displayName))
+		completePendingValidation(peer.displayName);
 
 	return result;
 }
