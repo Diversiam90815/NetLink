@@ -513,7 +513,7 @@ bool netlink::ConnectionService::retryConnection()
 	if (!mCurrentRequest.has_value())
 		return false;
 
-	if (mRetryPolicy.recordAttempt())
+	if (!mRetryPolicy.recordAttempt())
 	{
 		NETLINK_LOG_WARNING("Max connection retried ({}) reached!", mConfig.maxConnectionRetries);
 
