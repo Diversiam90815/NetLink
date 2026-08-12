@@ -2,85 +2,101 @@
   ==============================================================================
 	Module:         TaskQueue
 	Description:    Single-threaded, serial FIFO task queue used to marshal
-					 callbacks off their originating thread onto a dedicated worker 
-					 thread, guaranteeing in-order, non-reentrant execution.
+					 callbacks off their originating thread (e.g. signaling/IO)
+					 onto a dedicated worker thread, guaranteeing in-order,
+					 non-reentrant execution.
   ==============================================================================
 */
 
 #pragma once
 
+#include <atomic>
+#include <condition_variable>
 #include <functional>
-#include <queue>
 #include <mutex>
+#include <queue>
+#include <thread>
 
-#include "ThreadBase.h"
 
-
-class TaskQueue : public ThreadBase
+class TaskQueue
 {
 public:
 	using Task	= std::function<void()>;
 
 	TaskQueue() = default;
-	~TaskQueue() override { stop(); }
+	~TaskQueue() { stop(); }
 
 	TaskQueue(const TaskQueue &)			= delete;
 	TaskQueue &operator=(const TaskQueue &) = delete;
 
+	void	   start()
+	{
+		if (mRunning.exchange(true))
+			return;
+
+		mThread = std::thread(&TaskQueue::run, this);
+	}
+
+	void stop()
+	{
+		if (!mRunning.exchange(false))
+			return;
+
+		{
+			std::lock_guard<std::mutex> lock(mMutex);
+			std::queue<Task>			empty;
+			std::swap(mQueue, empty);
+		}
+		mCV.notify_all();
+
+		if (mThread.joinable())
+			mThread.join();
+	}
+
 	// Enqueues a task for execution on the worker thread (FIFO order).
-	void	   post(Task task)
+	void post(Task task)
 	{
 		{
-			std::lock_guard<std::mutex> lock(mQueueMutex);
+			std::lock_guard<std::mutex> lock(mMutex);
 			mQueue.push(std::move(task));
 		}
-		triggerEvent();
+		mCV.notify_one();
 	}
 
 	// Number of tasks currently pending (not yet started).
 	size_t pending() const
 	{
-		std::lock_guard<std::mutex> lock(mQueueMutex);
+		std::lock_guard<std::mutex> lock(mMutex);
 		return mQueue.size();
 	}
 
-	// Stops the worker thread. Any tasks still queued at the time of stop()
-	// are dropped (not executed). Call drain-before-stop manually if needed.
-	void stop() override
-	{
-		ThreadBase::stop();
+	bool isRunning() const { return mRunning.load(); }
 
-		std::lock_guard<std::mutex> lock(mQueueMutex);
-		std::queue<Task>			empty;
-		std::swap(mQueue, empty);
-	}
 
-protected:
-	void run() override
+private:
+	void run()
 	{
-		while (isRunning())
+		while (true)
 		{
-			waitForEvent();
-
-			for (;;)
+			Task task;
 			{
-				Task task;
-				{
-					std::lock_guard<std::mutex> lock(mQueueMutex);
-					if (mQueue.empty())
-						break;
+				std::unique_lock<std::mutex> lock(mMutex);
+				mCV.wait(lock, [this] { return !mQueue.empty() || !mRunning.load(); });
 
-					task = std::move(mQueue.front());
-					mQueue.pop();
-				}
+				if (!mRunning.load())
+					return;
 
-				// Executed outside the lock so post() isn't blocked while a task runs.
-				task();
+				task = std::move(mQueue.front());
+				mQueue.pop();
 			}
+
+			task();
 		}
 	}
 
-private:
-	mutable std::mutex mQueueMutex;
-	std::queue<Task>   mQueue;
+	std::thread				mThread;
+	std::atomic<bool>		mRunning{false};
+	mutable std::mutex		mMutex;
+	std::condition_variable mCV;
+	std::queue<Task>		mQueue;
 };
