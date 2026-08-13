@@ -521,7 +521,7 @@ bool netlink::ConnectionService::retryConnection()
 		return false;
 	}
 
-	NETLINK_LOG_INFO("Retrying connection (attempt {}/{})", mConnectionAttempts, mConfig.maxConnectionRetries);
+	NETLINK_LOG_INFO("Retrying connection (attempt {}/{})", mRetryPolicy.attempts(), mConfig.maxConnectionRetries);
 
 	// Re-establish transport layer
 	mCurrentRequest->server.reset();
