@@ -30,6 +30,10 @@ set(Utils_Tests
     ${Test_Directory}/UtilsTests/TimeoutServiceTests.cpp
 )
 
+set(TCP_Tests
+    ${Test_Directory}/TCPTests/TCPTransportTests.cpp
+)
+
 set(Validation_Tests
     ${Test_Directory}/ValidationTests/CompatibilityCheckTests.cpp
     ${Test_Directory}/ValidationTests/HandshakeTests.cpp
@@ -47,6 +51,7 @@ set(All_Tests
     ${Network_Tests}
     ${Utils_Tests}
     ${Validation_Tests}
+    ${TCP_Tests}
 )
 
 
