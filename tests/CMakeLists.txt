@@ -1,23 +1,55 @@
 include(Testing)
 
-add_executable(NetLinkTests
-    test_role_negotiation.cpp
-    test_signal_packet.cpp
-    test_discovery_endpoint.cpp
-    test_timeout_service.cpp
-    test_validation_types.cpp
-    test_peer_validation.cpp
-    test_pending_validation_store.cpp
-    test_validated_peer_registry.cpp
-    test_handshake_tracker.cpp
-    test_compatibility_checks.cpp
-    test_thread_base.cpp
-    test_network_adapter.cpp
-    test_remote_communication.cpp
-    test_task_queue.cpp
-    test_connection_retry_policy.cpp
-    test_ready_sync_tracker.cpp
+set(Test_Directory ${CMAKE_CURRENT_SOURCE_DIR})
+
+
+set(Discovery_Tests
+    ${Test_Directory}/DiscoveryTests/EndpointTests.cpp 
 )
+
+set(Communication_Tests
+    ${Test_Directory}/CommunicationTests/RemoteCommunicationTests.cpp
+    ${Test_Directory}/CommunicationTests/SignalPacketTests.cpp
+)
+
+set(Connection_Tests
+    ${Test_Directory}/ConnectionTests/RetryPolicyTests.cpp
+    ${Test_Directory}/ConnectionTests/ReadySyncTrackerTests.cpp
+    ${Test_Directory}/ConnectionTests/RoleNegotiationTests.cpp
+)
+
+set(Network_Tests
+    ${Test_Directory}/NetworkTests/AdapterTests.cpp
+)
+
+set(Utils_Tests
+    ${Test_Directory}/UtilsTests/TaskQueueTests.cpp
+    ${Test_Directory}/UtilsTests/ThreadBaseTests.cpp
+    ${Test_Directory}/UtilsTests/TimeoutServiceTests.cpp
+)
+
+set(Validation_Tests
+    ${Test_Directory}/ValidationTests/CompatibilityCheckTests.cpp
+    ${Test_Directory}/ValidationTests/HandshakeTests.cpp
+    ${Test_Directory}/ValidationTests/PeerValidationTests.cpp
+    ${Test_Directory}/ValidationTests/PendingValidationStoreTests.cpp
+    ${Test_Directory}/ValidationTests/ValidatedPeerRegistryTests.cpp
+    ${Test_Directory}/ValidationTests/ValidationTypesTests.cpp
+)
+
+
+set(All_Tests
+    ${Discovery_Tests}
+    ${Communication_Tests}
+    ${Connection_Tests}
+    ${Network_Tests}
+    ${Utils_Tests}
+    ${Validation_Tests}
+)
+
+
+add_executable(NetLinkTests ${All_Tests})
+
 
 target_link_libraries(NetLinkTests PRIVATE
     NetLink
@@ -34,3 +66,5 @@ target_include_directories(NetLinkTests PRIVATE
 )
 
 AddTests(NetLinkTests)
+
+source_group(TREE ${Test_Directory} FILES ${All_Tests})

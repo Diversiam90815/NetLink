@@ -5,7 +5,7 @@
 
 cmake_minimum_required(VERSION 4.0)
 
-set(PROJECT_VERSION 0.2.0.85)
+set(PROJECT_VERSION 0.2.0.141)
 
 project(NetLink VERSION ${PROJECT_VERSION} LANGUAGES CXX)
 
