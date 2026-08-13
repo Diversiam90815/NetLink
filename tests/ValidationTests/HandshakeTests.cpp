@@ -5,15 +5,13 @@
 using namespace netlink;
 
 
-namespace
+namespace ValidationTests
 {
 
-DiscoveryEndpoint makeEndpoint(const std::string &name, const std::string &ip = "10.0.0.1", int port = 5000)
+static DiscoveryEndpoint makeEndpoint(const std::string &name, const std::string &ip = "10.0.0.1", int port = 5000)
 {
 	return DiscoveryEndpoint{ip, port, name};
 }
-
-} // namespace
 
 
 TEST(HandshakeTracker, BeginForDiscoveredPeer_NewEntry_ReturnsTrue)
@@ -152,11 +150,13 @@ TEST(HandshakeTracker, OrderIndependence_ReceivedFirstThenDiscovered_CompletesCo
 	EXPECT_EQ(endpoint->port, 3333);
 }
 
+
 TEST(HandshakeTracker, IsCompleteDefaultFalse)
 {
 	RemoteHandshake h;
 	EXPECT_FALSE(h.isComplete()) << "A default-constructed RemoteHandshake must not be complete — neither side has exchanged anything yet";
 }
+
 
 TEST(HandshakeTracker, IsCompleteSentOnly)
 {
@@ -165,12 +165,14 @@ TEST(HandshakeTracker, IsCompleteSentOnly)
 	EXPECT_FALSE(h.isComplete()) << "Sending a handshake but not yet receiving one must not be considered complete";
 }
 
+
 TEST(HandshakeTracker, IsCompleteReceivedOnly)
 {
 	RemoteHandshake h;
 	h.received = true;
 	EXPECT_FALSE(h.isComplete()) << "Receiving a handshake but not yet sending one must not be considered complete";
 }
+
 
 TEST(HandshakeTracker, IsCompleteWhenBothTrue)
 {
@@ -179,3 +181,5 @@ TEST(HandshakeTracker, IsCompleteWhenBothTrue)
 	h.received = true;
 	EXPECT_TRUE(h.isComplete()) << "A handshake is only complete when both the outgoing and incoming sides have been exchanged";
 }
+
+} // namespace ValidationTests

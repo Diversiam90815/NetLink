@@ -8,6 +8,9 @@
 using namespace netlink;
 
 
+namespace ValidationTests
+{
+
 // ---------------------------------------------------------------------------
 // SecretCompatibilityCheck
 // ---------------------------------------------------------------------------
@@ -189,3 +192,5 @@ TEST(VersionCompatibilityCheck, SetLocalVersion_AffectsFutureEvaluations)
 
 	EXPECT_TRUE(check.evaluate("pc-a"));
 }
+
+} // namespace ValidationTests

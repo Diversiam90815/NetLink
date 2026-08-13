@@ -5,6 +5,9 @@
 using namespace netlink;
 
 
+namespace ConnectionTests
+{
+
 TEST(ConnectionRetryPolicy, DefaultConstructed_AllowsRetry)
 {
 	ConnectionRetryPolicy policy;
@@ -82,3 +85,5 @@ TEST(ConnectionRetryPolicy, ZeroMaxRetries_NeverAllowsRetry)
 	EXPECT_FALSE(policy.recordAttempt());
 	EXPECT_EQ(policy.attempts(), 0);
 }
+
+} // namespace ConnectionTests

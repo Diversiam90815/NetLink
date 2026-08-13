@@ -5,6 +5,9 @@
 using namespace netlink;
 
 
+namespace ConnectionTests
+{
+
 TEST(ReadySyncTracker, DefaultConstructed_NeitherSideReady)
 {
 	ReadySyncTracker tracker;
@@ -71,3 +74,5 @@ TEST(ReadySyncTracker, Reset_ClearsBothFlags)
 	EXPECT_FALSE(tracker.isRemoteReady());
 	EXPECT_FALSE(tracker.bothReady());
 }
+
+} // namespace ConnectionTests

@@ -8,15 +8,13 @@ using namespace netlink;
 using namespace std::chrono_literals;
 
 
-namespace
+namespace ValidationTests
 {
 
-DiscoveryEndpoint makeEndpoint(const std::string &name, const std::string &ip = "10.0.0.1", int port = 5000)
+static DiscoveryEndpoint makeEndpoint(const std::string &name, const std::string &ip = "10.0.0.1", int port = 5000)
 {
 	return DiscoveryEndpoint{ip, port, name};
 }
-
-} // namespace
 
 
 TEST(PendingValidationStore, Get_ReturnsNullopt_WhenNotPresent)
@@ -109,3 +107,5 @@ TEST(PendingValidationStore, ConcurrentAddAndGet_IsThreadSafe)
 			EXPECT_EQ(entry->remoteEndpoint.port, 5000 + i);
 	}
 }
+
+} // namespace ValidationTests

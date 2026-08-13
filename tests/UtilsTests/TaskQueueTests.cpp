@@ -11,6 +11,9 @@
 using namespace std::chrono_literals;
 
 
+namespace UtilsTests
+{
+
 // ---------------------------------------------------------------------------
 // Lifecycle
 // ---------------------------------------------------------------------------
@@ -209,3 +212,5 @@ TEST(TaskQueue, DestructorStopsCleanly)
 
 	EXPECT_TRUE(ran.load()) << "A task posted and given time to run before destruction should have executed";
 }
+
+} // namespace UtilsTests
