@@ -7,10 +7,11 @@
 using namespace netlink;
 
 
-namespace
+namespace ValidationTests
 {
 
-ValidationResult makeResult(ValidationResult::Status status, const std::string &name)
+
+static ValidationResult makeResult(ValidationResult::Status status, const std::string &name)
 {
 	ValidationResult r;
 	r.status					 = status;
@@ -18,8 +19,6 @@ ValidationResult makeResult(ValidationResult::Status status, const std::string &
 	r.canConnect				 = (status == ValidationResult::Status::ReadyToConnect);
 	return r;
 }
-
-} // namespace
 
 
 TEST(ValidatedPeerRegistry, Get_ReturnsNullopt_WhenNotPresent)
@@ -105,3 +104,5 @@ TEST(ValidatedPeerRegistry, ConcurrentStoreAndRead_IsThreadSafe)
 
 	EXPECT_EQ(registry.getAllReadyToConnect().size(), static_cast<size_t>(peerCount));
 }
+
+} // namespace ValidationTests

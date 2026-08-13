@@ -13,14 +13,15 @@ using namespace netlink;
 using namespace std::chrono_literals;
 
 
-namespace
+namespace ValidationTests
 {
-DiscoveryEndpoint makeEndpoint(const std::string &name, const std::string &ip = "10.0.0.1", int port = 5000)
+
+static DiscoveryEndpoint makeEndpoint(const std::string &name, const std::string &ip = "10.0.0.1", int port = 5000)
 {
 	return DiscoveryEndpoint{ip, port, name};
 }
 
-PeerValidationSendCallbacks makeNullCallbacks()
+static PeerValidationSendCallbacks makeNullCallbacks()
 {
 	return {}; // all function<> members are default-constructed (null)
 }
@@ -37,7 +38,6 @@ bool waitUntil(Predicate predicate, std::chrono::milliseconds timeout = 1s)
 	}
 	return predicate();
 }
-} // namespace
 
 
 // ---------------------------------------------------------------------------
@@ -68,6 +68,7 @@ TEST(PeerValidationService, ValidatePeer_ResultIncomplete_WhenBothChecksDisabled
 	EXPECT_EQ(result.status, ValidationResult::Status::ResultIncomplete) << "With both checks disabled no validation can complete synchronously — status must be ResultIncomplete";
 	EXPECT_EQ(result.remoteEndpoint.displayName, "pc-a") << "The returned result must carry the remote endpoint display name that was passed in";
 }
+
 
 TEST(PeerValidationService, ValidatePeer_WithNullSendCallbacks_DoesNotCrash)
 {
@@ -114,6 +115,7 @@ TEST(PeerValidationService, ValidatePeer_VersionCheck_SendsVersionRequest)
 	EXPECT_EQ(capturedReq, RemoteRequest::Version) << "The sendRequest callback must be called with RemoteRequest::Version when only the version check is enabled";
 }
 
+
 TEST(PeerValidationService, ValidatePeer_SecretCheck_SendsSecretRequest)
 {
 	PeerValidationService svc;
@@ -139,6 +141,7 @@ TEST(PeerValidationService, ValidatePeer_SecretCheck_SendsSecretRequest)
 	EXPECT_TRUE(requestSent.load()) << "Enabling the secret check must trigger an outgoing RemoteRequest via the sendRequest callback";
 	EXPECT_EQ(capturedReq, RemoteRequest::Secret) << "The sendRequest callback must be called with RemoteRequest::Secret when only the secret check is enabled";
 }
+
 
 TEST(PeerValidationService, ValidatePeer_BothChecks_SendsBothRequestsConcurrently)
 {
@@ -170,6 +173,7 @@ TEST(PeerValidationService, ValidatePeer_BothChecks_SendsBothRequestsConcurrentl
 		<< "A RemoteRequest::Secret must be among the sent requests when the secret check is enabled";
 }
 
+
 // ---------------------------------------------------------------------------
 // getValidatedPeers
 // ---------------------------------------------------------------------------
@@ -179,6 +183,7 @@ TEST(PeerValidationService, GetValidatedPeers_InitiallyEmpty)
 	PeerValidationService svc;
 	EXPECT_TRUE(svc.getValidatedPeers().empty()) << "A fresh PeerValidationService must have no validated peers";
 }
+
 
 // ---------------------------------------------------------------------------
 // onPeerDiscovered — handshake callback
@@ -206,6 +211,7 @@ TEST(PeerValidationService, OnPeerDiscovered_SendsHandshake)
 	EXPECT_EQ(capturedName, "pc-f") << "The sendHandshake callback must receive the correct computer name of the discovered peer";
 }
 
+
 TEST(PeerValidationService, OnPeerDiscovered_ThenOnHandshakeReceived_TriggersValidation)
 {
 	PeerValidationService svc;
@@ -224,6 +230,7 @@ TEST(PeerValidationService, OnPeerDiscovered_ThenOnHandshakeReceived_TriggersVal
 	EXPECT_TRUE(waitUntil([&] { return svc.getValidationResult("pc-g").has_value(); }))
 		<< "Once the handshake completes (sent && received) validation must be started for the peer";
 }
+
 
 TEST(PeerValidationService, OnHandshakeReceived_BeforeDiscovery_DoesNotStartValidationPrematurely)
 {
@@ -249,6 +256,7 @@ TEST(PeerValidationService, ClearValidatedPeer_NonExistent_DoesNotCrash)
 	PeerValidationService svc;
 	EXPECT_NO_THROW(svc.clearValidatedPeer("nonexistent")) << "clearValidatedPeer() must not throw or crash when the given name is not in the validated peers map";
 }
+
 
 TEST(PeerValidationService, ClearValidatedPeer_AllowsRevalidation)
 {
@@ -335,6 +343,7 @@ TEST(PeerValidationService, FullFlow_MatchingSecretAndVersion_ResultsInReadyToCo
 	EXPECT_EQ(validated.front().remoteEndpoint.displayName, "pc-k");
 }
 
+
 TEST(PeerValidationService, FullFlow_MismatchedSecret_ResultsInSecretMissmatch)
 {
 	PeerValidationService svc;
@@ -363,6 +372,7 @@ TEST(PeerValidationService, FullFlow_MismatchedSecret_ResultsInSecretMissmatch)
 	EXPECT_TRUE(svc.getValidatedPeers().empty()) << "A peer that failed validation must not appear among ready-to-connect peers";
 }
 
+
 TEST(PeerValidationService, FullFlow_MismatchedVersion_ResultsInVersionMissmatchAndReportsRemoteVersion)
 {
 	PeerValidationService svc;
@@ -389,6 +399,7 @@ TEST(PeerValidationService, FullFlow_MismatchedVersion_ResultsInVersionMissmatch
 	EXPECT_EQ(capturedResult.status, ValidationResult::Status::VersionMissmatch);
 	EXPECT_EQ(capturedResult.remoteVersion, "1.0.0") << "On version mismatch the result must still report the remote's reported version";
 }
+
 
 TEST(PeerValidationService, AlreadyValidatedPeer_ReturnsCachedResultWithoutSendingNewRequests)
 {
@@ -442,6 +453,7 @@ TEST(PeerValidationService, OnRequestReceived_Secret_SendsOurSecretBack)
 	EXPECT_EQ(sentValue, "my-secret") << "Our local secret must be sent back in response to a Secret request";
 }
 
+
 TEST(PeerValidationService, OnRequestReceived_Version_SendsOurVersionBack)
 {
 	PeerValidationService svc;
@@ -474,6 +486,7 @@ TEST(PeerValidationService, GetValidationResult_ReturnsNullopt_BeforeCompletion)
 	PeerValidationService svc;
 	EXPECT_FALSE(svc.getValidationResult("never-validated").has_value());
 }
+
 
 TEST(PeerValidationService, GetLastResult_ReflectsMostRecentValidatePeerCall)
 {
@@ -519,6 +532,7 @@ TEST(PeerValidationService, VersionTimeout_Fires_WithTimedoutStatus)
 	EXPECT_EQ(capturedResult.status, ValidationResult::Status::ValidationTimedout) << "When the version request times out the callback must report ValidationTimedout status";
 }
 
+
 TEST(PeerValidationService, SecretTimeout_Fires_WithTimedoutStatus)
 {
 	PeerValidationService svc;
@@ -546,6 +560,7 @@ TEST(PeerValidationService, SecretTimeout_Fires_WithTimedoutStatus)
 	EXPECT_TRUE(waitUntil([&] { return callbackFired.load(); }, 800ms)) << "The validation callback must fire after the secret request timeout (150 ms) elapses with no response";
 	EXPECT_EQ(capturedResult.status, ValidationResult::Status::ValidationTimedout) << "When the secret request times out the callback must report ValidationTimedout status";
 }
+
 
 TEST(PeerValidationService, OneCheckTimesOutBeforeOtherResponds_StillReportsTimeout)
 {
@@ -595,3 +610,5 @@ TEST(PeerValidationService, ValidatePeer_NoChecksRegistered_CompletesAndIsRetrie
 	ASSERT_EQ(ready.size(), 1u);
 	EXPECT_EQ(ready.front().remoteEndpoint.displayName, "pc-q");
 }
+
+} // namespace ValidationTests
