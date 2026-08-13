@@ -5,6 +5,7 @@ set(Test_Directory ${CMAKE_CURRENT_SOURCE_DIR})
 
 set(Discovery_Tests
     ${Test_Directory}/DiscoveryTests/EndpointTests.cpp 
+    ${Test_Directory}/DiscoveryTests/DiscoveryServiceTests.cpp
 )
 
 set(Communication_Tests
@@ -16,6 +17,7 @@ set(Connection_Tests
     ${Test_Directory}/ConnectionTests/RetryPolicyTests.cpp
     ${Test_Directory}/ConnectionTests/ReadySyncTrackerTests.cpp
     ${Test_Directory}/ConnectionTests/RoleNegotiationTests.cpp
+    ${Test_Directory}/ConnectionTests/ConnectionServiceTests.cpp
 )
 
 set(Network_Tests
