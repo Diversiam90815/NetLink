@@ -168,7 +168,7 @@ bool netlink::ConnectionService::acceptIncomingConnection(const std::string &com
 	// send acceptance
 	notifyStatus(ConnectionStatusUpdate::Type::Accepted, "Invitation from " + computerName + " accepted");
 
-	if (answerInvitation(computerName, true))
+	if (!answerInvitation(computerName, true))
 	{
 		NETLINK_LOG_ERROR("Failed to send acceptance!");
 		notifyStatus(ConnectionStatusUpdate::Type::Failed, "Failed to send connection acceptance", false);
@@ -178,7 +178,7 @@ bool netlink::ConnectionService::acceptIncomingConnection(const std::string &com
 
 	mCurrentRequest->state = ConnectionStateInternal::EstablishingTransport;
 
-	if (determineLocalSessionRole())
+	if (!determineLocalSessionRole())
 	{
 		NETLINK_LOG_ERROR("Failed to start transport role establishing");
 		notifyStatus(ConnectionStatusUpdate::Type::Failed, "Failed to start transport role establishing", false);
