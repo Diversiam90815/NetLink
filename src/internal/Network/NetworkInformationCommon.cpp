@@ -9,11 +9,12 @@
 #include "NetworkInformation.h"
 
 #include <algorithm>
+#include <ranges>
 
 
 bool netlink::NetworkInformation::setCurrentNetworkAdapter(const int adapterID)
 {
-	auto it = std::find_if(mNetworkAdapters.begin(), mNetworkAdapters.end(), [adapterID](const NetworkAdapterInternal &a) { return a.ID == adapterID; });
+	const auto it = std::ranges::find_if(mNetworkAdapters, [adapterID](const NetworkAdapterInternal &a) { return a.ID == adapterID; });
 
 	if (it == mNetworkAdapters.end())
 	{
