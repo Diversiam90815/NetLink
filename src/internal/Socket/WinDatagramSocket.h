@@ -18,6 +18,7 @@
 
 #pragma comment(lib, "Ws2_32.lib")
 
+
 struct WinsockScope
 {
 	WinsockScope();
