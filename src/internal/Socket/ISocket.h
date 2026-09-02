@@ -19,13 +19,13 @@ public:
 
 	virtual int sendTo(const std::string &address, const int port, const void *data, int size) = 0;
 
-	virtual int receiveFrom(void *buffer, int maxSize, std::string &remoteHost, int &remotePort, int timeoutMS) = 0;
+	virtual int recvFrom(void *buffer, int maxSize, std::string &remoteHost, int &remotePort, int timeoutMS) = 0;
 
 	virtual bool waitUntilReady(bool forReading, int timeoutMS) = 0;
 
 	virtual void close() = 0;
 
-	virtual bool isOpen() = 0;
+	virtual bool isOpen() const = 0;
 
 	virtual int getBoundPort() const = 0;
 };
