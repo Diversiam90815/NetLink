@@ -49,9 +49,9 @@ public:
 	int  getBoundPort() const override { return mBoundPort; }
 
 private:
-	void applyOptions(const NetLink::SocketBindOptions &options);
+	void applyOptions(const NetLink::BindOptions &options);
 
-	WinSockScope mWinScope;
+	WinsockScope mWinScope;
 	SOCKET       mSocket    = INVALID_SOCKET;
 	int          mBoundPort = 0;
 

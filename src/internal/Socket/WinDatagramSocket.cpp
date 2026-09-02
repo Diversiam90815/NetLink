@@ -72,7 +72,7 @@ NetLink::SocketBindResult WinDatagramSocket::bind(const std::string &address, co
 	{
 		result.nativeError = WSAEINVAL;
 		closesocket(mSocket);
-		mSOCKET = INVALID_SOCKET;
+		mSocket = INVALID_SOCKET;
 		return result;
 	}
 
@@ -80,14 +80,14 @@ NetLink::SocketBindResult WinDatagramSocket::bind(const std::string &address, co
 	{
 		result.nativeError = WSAGetLastError();
 		closesocket(mSocket);
-		mSOCKET = INVALID_SOCKET;
+		mSocket = INVALID_SOCKET;
 		return result;
 	}
 
 	// retrieve actual port
-	sockaddr boundAddr{};
-	int      addrLen = sizeof(boundAddr);
-	getsockname(mSocket, &boundAddr, &addrLen);
+	sockaddr_in boundAddr{};
+	int         addrLen = sizeof(boundAddr);
+	getsockname(mSocket, reinterpret_cast<sockaddr *>(&boundAddr), &addrLen);
 	mBoundPort = ntohs(boundAddr.sin_port);
 
 	mClosed          = false;
@@ -117,5 +117,10 @@ bool WinDatagramSocket::waitUntilReady(bool forReading, int timeoutMS)
 
 
 void WinDatagramSocket::close()
+{
+}
+
+
+void WinDatagramSocket::applyOptions(const NetLink::BindOptions &options)
 {
 }
