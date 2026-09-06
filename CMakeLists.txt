@@ -22,13 +22,6 @@ option(NETLINK_ENABLE_LOGGING "Enable logging via Logger library" OFF)
 
 include(cpm)
 
-CPMAddPackage(
-  NAME asio
-  GITHUB_REPOSITORY chriskohlhoff/asio
-  GIT_TAG asio-1-30-2
-  OPTIONS "ASIO_STANDALONE ON"
-)
-
 if(NETLINK_ENABLE_LOGGING)
     CPMAddPackage(
       NAME Logger
@@ -67,15 +60,9 @@ target_include_directories(${PROJECT_NAME} PUBLIC include)
 
 target_include_directories(${PROJECT_NAME} 
     PRIVATE 
-        ${asio_SOURCE_DIR}/asio/include
         src/internal/
         src/internal/Discovery
         src/internal/Util
-)
-
-target_compile_definitions(${PROJECT_NAME} PUBLIC
-    ASIO_STANDALONE
-    ASIO_NO_DEPRECATED
 )
 
 if(WIN32)
@@ -115,4 +102,3 @@ if(NETLINK_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
 endif()
- 
