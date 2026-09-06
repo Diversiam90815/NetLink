@@ -60,6 +60,24 @@ SocketBindResult NetlinkSocket::bind(const std::string &address, int port, const
 }
 
 
+bool NetlinkSocket::connect(const std::string &address, int port, int timeoutMS)
+{
+	return mSocket && mSocket->connect(address, port, timeoutMS);
+}
+
+
+bool NetlinkSocket::listen(int backlog)
+{
+	return mSocket && mSocket->listen(backlog);
+}
+
+
+bool NetlinkSocket::accept(int timeoutMS)
+{
+	return mSocket && mSocket->accept(timeoutMS);
+}
+
+
 int NetlinkSocket::sendTo(const std::string &address, int port, const void *data, int size)
 {
 	return mSocket ? mSocket->sendTo(address, port, data, size) : -1;

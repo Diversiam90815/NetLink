@@ -86,6 +86,11 @@ public:
 
 	SocketBindResult		 bind(const std::string &address, int port, const NetLink::BindOptions &options = {});
 
+	bool					 connect(const std::string &address, int port, int timeoutMS);
+	bool					 listen(int backlog);
+	bool					 accept(int timeoutMS);
+	bool					 isConnected() const { return mSocket && mSocket->isConnected(); }
+
 	int						 sendTo(const std::string &address, int port, const void *data, int size);
 	int						 sendTo(const std::string &address, int port, const std::vector<std::byte> &data);
 
