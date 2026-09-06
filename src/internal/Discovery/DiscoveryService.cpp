@@ -11,12 +11,6 @@
 using json = nlohmann::json;
 
 
-DiscoveryService::DiscoveryService(asio::io_context &ioContext) : mSocket(ioContext), mTimer(ioContext)
-{
-	mIoContext = &ioContext;
-}
-
-
 DiscoveryService::~DiscoveryService()
 {
 	try
@@ -36,62 +30,27 @@ DiscoveryService::~DiscoveryService()
 
 bool DiscoveryService::init(const DiscoveryConfig &config)
 {
-	if (config.localIPv4.empty() || config.displayName.empty())
+	mConfig = config;
+	mSocket = NetlinkSocket::createUDP();
+
+	NetLink::BindOptions options;
+	options.enableBroadcast = true;
+	options.reuseAddress	= true;
+
+	auto result				= mSocket.bind(config.localIPv4, config.discoveryPort, options);
+	if (!result.succeeded())
 		return false;
-
-	const bool needsRebind = !mInitialized.load() || mConfig.localIPv4 != config.localIPv4 || mConfig.discoveryPort != config.discoveryPort;
-
-	mConfig				   = config;
-
-	if (!needsRebind)
-	{
-		NETLINK_LOG_DEBUG("DiscoveryService config updated (no rebind required)");
-		return true;
-	}
-
-	asio::error_code ec;
-	mSocket.open(udp::v4());
-
-	mSocket.set_option(asio::socket_base::reuse_address(true), ec);
-
-	if (ec)
-		NETLINK_LOG_ERROR("Failed to set reuse_address option: {}", ec.message().c_str());
-
-	mLocalEndpoint	= udp::endpoint(udp::v4(), mConfig.discoveryPort);
-	mTargetEndpoint = udp::endpoint(asio::ip::make_address_v4(mConfig.broadCastAddress), mConfig.discoveryPort);
-
-	mSocket.bind(mLocalEndpoint, ec);
-
-	if (ec)
-	{
-		NETLINK_LOG_ERROR("Failed to bind UDP Socket: {}", ec.message().c_str());
-		return false;
-	}
-
-	mSocket.set_option(asio::socket_base::broadcast(true));
 
 	mInitialized.store(true);
+	start();
 	return true;
 }
 
 
 void DiscoveryService::deinit()
 {
-	asio::error_code ec;
-
-	// Cancel any pending async operations on the socket
-	mSocket.cancel(ec);
-
-	if (ec)
-		NETLINK_LOG_ERROR("Error cancelling socket operations: {}", ec.message().c_str());
-
-	mSocket.close(ec);
-
-	if (ec)
-		NETLINK_LOG_ERROR("Error occurred during closing of the socket! Error : {}", ec.message().c_str());
-
-	mTimer.cancel();
 	stop();
+	mSocket.close();
 	mInitialized.store(false);
 }
 
@@ -144,11 +103,17 @@ void DiscoveryService::addRemoteToList(DiscoveryEndpoint remote)
 
 void DiscoveryService::run()
 {
+	mNextSendTime = std::chrono::steady_clock::now();
+
 	while (isRunning())
 	{
-		receivePackage();
-		sendPackage();
-		waitForEvent(200);
+		if (std::chrono::steady_clock::now() >= mNextSendTime)
+		{
+			sendPackage();
+			mNextSendTime = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+		}
+
+		receivePackage(); // blocks internally via mSocket.receive(...)
 	}
 }
 
@@ -162,51 +127,34 @@ void DiscoveryService::sendPackage()
 	}
 
 	DiscoveryEndpoint local{};
-	local.IPAddress			 = mConfig.localIPv4;
-	local.displayName		 = mConfig.displayName;
-	local.port				 = mConfig.signalingPort;
+	local.IPAddress		= mConfig.localIPv4;
+	local.displayName	= mConfig.displayName;
+	local.port			= mConfig.signalingPort;
 
-	json			 j		 = local;
-	std::string		 message = j.dump();
+	json		j		= local;
+	std::string message = j.dump();
 
-	asio::error_code ec;
-
-	// Sending the message
-	size_t			 bytesSent = mSocket.send_to(asio::buffer(message), mTargetEndpoint, 0, ec);
-
-	if (ec)
-		NETLINK_LOG_ERROR("Error sending discovery package: {}", ec.message().c_str());
-	else
-		NETLINK_LOG_DEBUG("Discovery package sent ({} bytes)!", bytesSent);
+	mSocket.sendTo(mTargetAddress, mTargetPort, message.data(), static_cast<int>(message.size()));
 }
 
 
 void DiscoveryService::receivePackage()
 {
-	mSocket.async_receive(asio::buffer(mRecvBuffer), [this](const asio::error_code &error, size_t bytesReceived) { handleReceive(error, bytesReceived); });
-}
+	ReceivedPacket packet;
+	if (!mSocket.receive(packet, 200))
+		return; // nothing received this cycle
 
-
-void DiscoveryService::handleReceive(const asio::error_code &error, size_t bytesReceived)
-{
-	if (!error && bytesReceived > 0)
+	try
 	{
-		try
-		{
-			std::string		  receivedData(mRecvBuffer.data(), bytesReceived);
-			json			  j		 = json::parse(receivedData);
+		json			  j		 = json::parse(packet);
+		DiscoveryEndpoint remote = j.get<DiscoveryEndpoint>();
+		addRemoteToList(remote);
 
-			DiscoveryEndpoint remote = j.get<DiscoveryEndpoint>();
-
-			addRemoteToList(remote);
-		}
-		catch (std::exception &e)
-		{
-			NETLINK_LOG_ERROR("Error parsing discovery package: {}", e.what());
-		}
+		if (mOnRemoteFound)
+			mOnRemoteFound(remote);
 	}
-	else if (error)
+	catch (std::exception &e)
 	{
-		NETLINK_LOG_WARNING("Receive error occurred: {}", error.message().c_str());
+		NETLINK_LOG_ERROR("Error parsing discovery package: {}", e.what());
 	}
 }
