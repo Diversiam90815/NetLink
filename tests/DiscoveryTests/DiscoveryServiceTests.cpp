@@ -1,5 +1,4 @@
 #include <gtest/gtest.h>
-#include <asio.hpp>
 #include <atomic>
 #include <chrono>
 #include <mutex>
@@ -47,8 +46,7 @@ static DiscoveryConfig makeConfig(const std::string &name = "pc-a", const std::s
 
 TEST(DiscoveryService, Init_FailsWithEmptyIP)
 {
-	asio::io_context ioContext;
-	DiscoveryService svc(ioContext);
+	DiscoveryService svc;
 
 	DiscoveryConfig	 cfg = makeConfig();
 	cfg.localIPv4		 = "";
@@ -59,8 +57,7 @@ TEST(DiscoveryService, Init_FailsWithEmptyIP)
 
 TEST(DiscoveryService, Init_FailsWithEmptyDisplayName)
 {
-	asio::io_context ioContext;
-	DiscoveryService svc(ioContext);
+	DiscoveryService svc;
 
 	DiscoveryConfig	 cfg = makeConfig();
 	cfg.displayName		 = "";
@@ -71,8 +68,7 @@ TEST(DiscoveryService, Init_FailsWithEmptyDisplayName)
 
 TEST(DiscoveryService, Init_SucceedsWithValidConfig)
 {
-	asio::io_context ioContext;
-	DiscoveryService svc(ioContext);
+	DiscoveryService svc;
 
 	EXPECT_TRUE(svc.init(makeConfig("pc-a", "127.0.0.1", 45510))) << "init() must succeed with a valid display name, IP, and port";
 
@@ -82,8 +78,7 @@ TEST(DiscoveryService, Init_SucceedsWithValidConfig)
 
 TEST(DiscoveryService, Init_StoresConfig)
 {
-	asio::io_context ioContext;
-	DiscoveryService svc(ioContext);
+	DiscoveryService svc;
 
 	auto			 cfg = makeConfig("pc-a", "127.0.0.1", 45511);
 	ASSERT_TRUE(svc.init(cfg));
@@ -97,8 +92,7 @@ TEST(DiscoveryService, Init_StoresConfig)
 
 TEST(DiscoveryService, Init_NoRebindWhenSameAddressAndPort)
 {
-	asio::io_context ioContext;
-	DiscoveryService svc(ioContext);
+	DiscoveryService svc;
 
 	auto			 cfg = makeConfig("pc-a", "127.0.0.1", 45512);
 	ASSERT_TRUE(svc.init(cfg));
@@ -114,8 +108,7 @@ TEST(DiscoveryService, Init_NoRebindWhenSameAddressAndPort)
 
 TEST(DiscoveryService, Deinit_IsSafeToCallMultipleTimes)
 {
-	asio::io_context ioContext;
-	DiscoveryService svc(ioContext);
+	DiscoveryService svc;
 
 	ASSERT_TRUE(svc.init(makeConfig("pc-a", "127.0.0.1", 45513)));
 	svc.deinit();
@@ -125,8 +118,7 @@ TEST(DiscoveryService, Deinit_IsSafeToCallMultipleTimes)
 
 TEST(DiscoveryService, Deinit_WithoutInit_DoesNotCrash)
 {
-	asio::io_context ioContext;
-	DiscoveryService svc(ioContext);
+	DiscoveryService svc;
 
 	EXPECT_NO_THROW(svc.deinit()) << "deinit() must be safe to call even if init() was never called";
 }
@@ -138,8 +130,7 @@ TEST(DiscoveryService, Deinit_WithoutInit_DoesNotCrash)
 
 TEST(DiscoveryService, StartDiscovery_ThrowsWithoutInit)
 {
-	asio::io_context ioContext;
-	DiscoveryService svc(ioContext);
+	DiscoveryService svc;
 
 	EXPECT_THROW(svc.startDiscovery(), std::runtime_error) << "startDiscovery() must throw if the service has not been initialized";
 }
@@ -147,8 +138,7 @@ TEST(DiscoveryService, StartDiscovery_ThrowsWithoutInit)
 
 TEST(DiscoveryService, StartDiscovery_SucceedsAfterInit)
 {
-	asio::io_context ioContext;
-	DiscoveryService svc(ioContext);
+	DiscoveryService svc;
 
 	ASSERT_TRUE(svc.init(makeConfig("pc-a", "127.0.0.1", 45514)));
 	EXPECT_NO_THROW(svc.startDiscovery()) << "startDiscovery() must not throw once the service has been successfully initialized";
@@ -163,8 +153,7 @@ TEST(DiscoveryService, StartDiscovery_SucceedsAfterInit)
 
 TEST(DiscoveryService, AddRemoteToList_IgnoresInvalidEndpoint)
 {
-	asio::io_context ioContext;
-	DiscoveryService svc(ioContext);
+	DiscoveryService svc;
 	ASSERT_TRUE(svc.init(makeConfig("pc-a", "127.0.0.1", 45515)));
 
 	DiscoveryEndpoint invalid{}; // empty IP, port 0
@@ -178,8 +167,7 @@ TEST(DiscoveryService, AddRemoteToList_IgnoresInvalidEndpoint)
 
 TEST(DiscoveryService, AddRemoteToList_IgnoresLocalIP)
 {
-	asio::io_context ioContext;
-	DiscoveryService svc(ioContext);
+	DiscoveryService svc;
 	ASSERT_TRUE(svc.init(makeConfig("pc-a", "10.0.0.5", 45516)));
 
 	DiscoveryEndpoint self{"10.0.0.5", 6000, "pc-a"};
@@ -193,8 +181,7 @@ TEST(DiscoveryService, AddRemoteToList_IgnoresLocalIP)
 
 TEST(DiscoveryService, AddRemoteToList_AddsValidRemote)
 {
-	asio::io_context ioContext;
-	DiscoveryService svc(ioContext);
+	DiscoveryService svc;
 	ASSERT_TRUE(svc.init(makeConfig("pc-a", "10.0.0.5", 45517)));
 
 	DiscoveryEndpoint remote{"10.0.0.6", 6001, "pc-b"};
@@ -210,16 +197,13 @@ TEST(DiscoveryService, AddRemoteToList_AddsValidRemote)
 
 TEST(DiscoveryService, AddRemoteToList_IgnoresDuplicates)
 {
-	asio::io_context ioContext;
-	DiscoveryService svc(ioContext);
+	DiscoveryService svc;
 	ASSERT_TRUE(svc.init(makeConfig("pc-a", "10.0.0.5", 45518)));
 
 	DiscoveryEndpoint remote{"10.0.0.6", 6001, "pc-b"};
 	svc.addRemoteToList(remote);
 	svc.addRemoteToList(remote); // duplicate, must be filtered
 
-	// If duplicates were not filtered we couldn't tell directly from getEndpointFromIP,
-	// but we can at least verify the single valid entry is still retrievable and correct.
 	auto found = svc.getEndpointFromIP("10.0.0.6");
 	EXPECT_EQ(found.displayName, "pc-b");
 
@@ -229,8 +213,7 @@ TEST(DiscoveryService, AddRemoteToList_IgnoresDuplicates)
 
 TEST(DiscoveryService, GetEndpointFromIP_ReturnsEmptyForUnknownIP)
 {
-	asio::io_context ioContext;
-	DiscoveryService svc(ioContext);
+	DiscoveryService svc;
 	ASSERT_TRUE(svc.init(makeConfig("pc-a", "10.0.0.5", 45519)));
 
 	auto found = svc.getEndpointFromIP("192.168.99.99");
@@ -242,8 +225,7 @@ TEST(DiscoveryService, GetEndpointFromIP_ReturnsEmptyForUnknownIP)
 
 TEST(DiscoveryService, AddRemoteToList_TriggersOnRemoteFoundCallback)
 {
-	asio::io_context ioContext;
-	DiscoveryService svc(ioContext);
+	DiscoveryService svc;
 	ASSERT_TRUE(svc.init(makeConfig("pc-a", "10.0.0.5", 45520)));
 
 	std::atomic<bool> callbackFired{false};
@@ -267,8 +249,7 @@ TEST(DiscoveryService, AddRemoteToList_TriggersOnRemoteFoundCallback)
 
 TEST(DiscoveryService, AddRemoteToList_DuplicateDoesNotRetriggerCallback)
 {
-	asio::io_context ioContext;
-	DiscoveryService svc(ioContext);
+	DiscoveryService svc;
 	ASSERT_TRUE(svc.init(makeConfig("pc-a", "10.0.0.5", 45521)));
 
 	std::atomic<int> callCount{0};
@@ -290,11 +271,8 @@ TEST(DiscoveryService, AddRemoteToList_DuplicateDoesNotRetriggerCallback)
 
 TEST(DiscoveryService, TwoServices_DiscoverEachOtherOverLoopback)
 {
-	asio::io_context ioContextA;
-	asio::io_context ioContextB;
-
-	DiscoveryService svcA(ioContextA);
-	DiscoveryService svcB(ioContextB);
+	DiscoveryService svcA;
+	DiscoveryService svcB;
 
 	// Both bind to the same broadcast port on loopback; discovery packages are unicast-like via broadcast address 127.0.0.1
 	auto			 cfgA = makeConfig("pc-a", "127.0.0.1", 45599);

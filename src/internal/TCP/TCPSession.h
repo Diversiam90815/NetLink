@@ -32,6 +32,11 @@ public:
 	int			getBoundPort() const override { return mSocket.getBoundPort(); }
 	std::string getRemoteAddress() const override { return mSocket.getRemoteAddress(); }
 	int			getRemotePort() const override { return mSocket.getRemotePort(); }
+	void		close() override
+	{
+		mSocket.close();
+		stopReadAsync();
+	}
 
 private:
 	class ReadThread : public ThreadBase

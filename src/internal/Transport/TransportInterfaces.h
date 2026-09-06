@@ -35,6 +35,8 @@ public:
 	virtual int			getBoundPort() const							 = 0;
 	virtual std::string getRemoteAddress() const						 = 0;
 	virtual int			getRemotePort() const							 = 0;
+
+	virtual void		close()											 = 0;
 };
 
 

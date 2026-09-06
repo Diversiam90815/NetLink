@@ -1,5 +1,4 @@
 #include <gtest/gtest.h>
-#include <asio.hpp>
 #include <atomic>
 #include <chrono>
 #include <memory>
@@ -10,9 +9,9 @@
 #include "TCP/TCPServer.h"
 #include "TCP/TCPClient.h"
 #include "TCP/TCPSession.h"
+#include "Socket/NetlinkSocket.h"
 
 using namespace std::chrono_literals;
-using asio::ip::tcp;
 
 
 namespace TCPTests
@@ -34,25 +33,8 @@ bool waitUntil(Predicate predicate, std::chrono::milliseconds timeout = 2s)
 
 class TCPTransportTest : public ::testing::Test
 {
-protected:
-	void SetUp() override
-	{
-		work	 = std::make_unique<asio::executor_work_guard<asio::io_context::executor_type>>(asio::make_work_guard(ioContext));
-		ioThread = std::thread([this] { ioContext.run(); });
-	}
-
-	void TearDown() override
-	{
-		work.reset();
-		ioContext.stop();
-		if (ioThread.joinable())
-			ioThread.join();
-	}
-
-	asio::io_context															ioContext;
-	std::unique_ptr<asio::executor_work_guard<asio::io_context::executor_type>> work;
-	std::thread																	ioThread;
 };
+
 
 
 // ---------------------------------------------------------------------------
@@ -61,7 +43,8 @@ protected:
 
 TEST_F(TCPTransportTest, Server_BoundPortIsNonZeroAfterStartAccept)
 {
-	TCPServer server(ioContext);
+	TCPServer server;
+	ASSERT_TRUE(server.bindAndListen("127.0.0.1", 0));
 	server.setSessionHandler([](ISession::pointer) {});
 	server.startAccept();
 
@@ -71,8 +54,10 @@ TEST_F(TCPTransportTest, Server_BoundPortIsNonZeroAfterStartAccept)
 
 TEST_F(TCPTransportTest, Server_TwoInstances_GetDifferentPorts)
 {
-	TCPServer serverA(ioContext);
-	TCPServer serverB(ioContext);
+	TCPServer serverA;
+	TCPServer serverB;
+	ASSERT_TRUE(serverA.bindAndListen("127.0.0.1", 0));
+	ASSERT_TRUE(serverB.bindAndListen("127.0.0.1", 0));
 	serverA.setSessionHandler([](ISession::pointer) {});
 	serverB.setSessionHandler([](ISession::pointer) {});
 	serverA.startAccept();
@@ -84,7 +69,7 @@ TEST_F(TCPTransportTest, Server_TwoInstances_GetDifferentPorts)
 
 TEST_F(TCPTransportTest, Server_RespondToConnectionRequest_WithoutPendingSession_DoesNotCrash)
 {
-	TCPServer server(ioContext);
+	TCPServer server;
 	EXPECT_NO_THROW(server.respondToConnectionRequest(true)) << "respondToConnectionRequest() must be safe to call even when no connection is pending";
 	EXPECT_NO_THROW(server.respondToConnectionRequest(false));
 }
@@ -92,8 +77,8 @@ TEST_F(TCPTransportTest, Server_RespondToConnectionRequest_WithoutPendingSession
 
 TEST_F(TCPTransportTest, Server_AcceptsIncomingClientConnection)
 {
-	TCPServer server(ioContext);
-	server.startAccept();
+	TCPServer server;
+	ASSERT_TRUE(server.bindAndListen("127.0.0.1", 0));
 
 	std::atomic<bool> sessionHandlerCalled{false};
 	ISession::pointer serverSession;
@@ -103,8 +88,9 @@ TEST_F(TCPTransportTest, Server_AcceptsIncomingClientConnection)
 			serverSession = session;
 			sessionHandlerCalled.store(true);
 		});
+	server.startAccept();
 
-	TCPClient		  client(ioContext);
+	TCPClient		  client;
 	std::atomic<bool> clientConnected{false};
 	client.setConnectHandler([&](ISession::pointer) { clientConnected.store(true); });
 
@@ -123,7 +109,7 @@ TEST_F(TCPTransportTest, Server_AcceptsIncomingClientConnection)
 
 TEST_F(TCPTransportTest, Client_ConnectTimeoutHandler_FiresOnRefusedConnection)
 {
-	TCPClient		  client(ioContext);
+	TCPClient		  client;
 
 	std::atomic<bool> timedOutOrRefused{false};
 	client.setConnectTimeoutHandler([&] { timedOutOrRefused.store(true); });
@@ -139,11 +125,12 @@ TEST_F(TCPTransportTest, Client_ConnectTimeoutHandler_FiresOnRefusedConnection)
 
 TEST_F(TCPTransportTest, Client_SuccessfulConnect_ProvidesUsableSession)
 {
-	TCPServer server(ioContext);
+	TCPServer server;
+	ASSERT_TRUE(server.bindAndListen("127.0.0.1", 0));
 	server.startAccept();
 	server.setSessionHandler([](ISession::pointer) {});
 
-	TCPClient		  client(ioContext);
+	TCPClient		  client;
 	ISession::pointer clientSession;
 	std::atomic<bool> connected{false};
 	client.setConnectHandler(
@@ -168,7 +155,7 @@ TEST_F(TCPTransportTest, Client_SuccessfulConnect_ProvidesUsableSession)
 
 TEST_F(TCPTransportTest, Session_SendMessage_FailsWhenNotConnected)
 {
-	auto					 session = TCPSession::create(ioContext);
+	auto					 session = std::make_shared<TCPSession>(NetlinkSocket::createTCP()); // unconnected socket
 
 	netlink::InternalMessage msg;
 	msg.type = 42;
@@ -180,20 +167,23 @@ TEST_F(TCPTransportTest, Session_SendMessage_FailsWhenNotConnected)
 
 TEST_F(TCPTransportTest, Session_StartReadAsync_FailsWhenNotConnected)
 {
-	auto			  session = TCPSession::create(ioContext);
+	auto			  session = std::make_shared<TCPSession>(NetlinkSocket::createTCP());
 	std::atomic<bool> callbackCalled{false};
 
-	// Must not crash; per implementation it just logs and returns without starting the read loop.
+	// Must not crash; the read loop simply never delivers anything on a disconnected socket.
 	EXPECT_NO_THROW(session->startReadAsync([&](netlink::InternalMessage &) { callbackCalled.store(true); }));
 
 	std::this_thread::sleep_for(100ms);
 	EXPECT_FALSE(callbackCalled.load()) << "startReadAsync() on a disconnected socket must not begin delivering messages";
+
+	session->stopReadAsync();
 }
 
 
 TEST_F(TCPTransportTest, Session_MessageRoundTrip_ClientToServer)
 {
-	TCPServer server(ioContext);
+	TCPServer server;
+	ASSERT_TRUE(server.bindAndListen("127.0.0.1", 0));
 	server.startAccept();
 
 	ISession::pointer serverSession;
@@ -205,7 +195,7 @@ TEST_F(TCPTransportTest, Session_MessageRoundTrip_ClientToServer)
 			serverGotSession.store(true);
 		});
 
-	TCPClient		  client(ioContext);
+	TCPClient		  client;
 	ISession::pointer clientSession;
 	std::atomic<bool> clientConnected{false};
 	client.setConnectHandler(
@@ -242,7 +232,8 @@ TEST_F(TCPTransportTest, Session_MessageRoundTrip_ClientToServer)
 
 TEST_F(TCPTransportTest, Session_StopReadAsync_StopsDeliveringMessages)
 {
-	TCPServer server(ioContext);
+	TCPServer server;
+	ASSERT_TRUE(server.bindAndListen("127.0.0.1", 0));
 	server.startAccept();
 
 	ISession::pointer serverSession;
@@ -254,7 +245,7 @@ TEST_F(TCPTransportTest, Session_StopReadAsync_StopsDeliveringMessages)
 			serverGotSession.store(true);
 		});
 
-	TCPClient		  client(ioContext);
+	TCPClient		  client;
 	ISession::pointer clientSession;
 	std::atomic<bool> clientConnected{false};
 	client.setConnectHandler(
@@ -283,7 +274,8 @@ TEST_F(TCPTransportTest, Session_StopReadAsync_StopsDeliveringMessages)
 
 TEST_F(TCPTransportTest, Session_IsConnected_FalseAfterSocketClosed)
 {
-	TCPServer server(ioContext);
+	TCPServer server;
+	ASSERT_TRUE(server.bindAndListen("127.0.0.1", 0));
 	server.startAccept();
 
 	ISession::pointer serverSession;
@@ -295,7 +287,7 @@ TEST_F(TCPTransportTest, Session_IsConnected_FalseAfterSocketClosed)
 			serverGotSession.store(true);
 		});
 
-	TCPClient		  client(ioContext);
+	TCPClient		  client;
 	ISession::pointer clientSession;
 	std::atomic<bool> clientConnected{false};
 	client.setConnectHandler(
@@ -310,10 +302,9 @@ TEST_F(TCPTransportTest, Session_IsConnected_FalseAfterSocketClosed)
 
 	ASSERT_TRUE(clientSession->isConnected());
 
-	// Access the underlying socket via the concrete type to force-close it.
-	auto			 concreteClientSession = std::static_pointer_cast<TCPSession>(clientSession);
-	asio::error_code ec;
-	concreteClientSession->socket().close(ec);
+	// Close via ISession's own close() (added to the interface for exactly this purpose)
+	// instead of reaching into an asio-specific socket() accessor.
+	clientSession->close();
 
 	EXPECT_FALSE(clientSession->isConnected()) << "isConnected() must return false once the underlying socket has been closed";
 }
@@ -325,13 +316,14 @@ TEST_F(TCPTransportTest, Session_IsConnected_FalseAfterSocketClosed)
 
 TEST_F(TCPTransportTest, Server_RespondToConnectionRequest_Accepted_InvokesSessionHandlerAgain)
 {
-	TCPServer server(ioContext);
+	TCPServer server;
+	ASSERT_TRUE(server.bindAndListen("127.0.0.1", 0));
 	server.startAccept();
 
 	std::atomic<int> sessionHandlerCallCount{0};
 	server.setSessionHandler([&](ISession::pointer) { ++sessionHandlerCallCount; });
 
-	TCPClient client(ioContext);
+	TCPClient client;
 	client.setConnectHandler([](ISession::pointer) {});
 	client.connect("127.0.0.1", static_cast<unsigned short>(server.getBoundPort()));
 
@@ -346,7 +338,8 @@ TEST_F(TCPTransportTest, Server_RespondToConnectionRequest_Accepted_InvokesSessi
 
 TEST_F(TCPTransportTest, Server_RespondToConnectionRequest_Declined_ClosesSocket)
 {
-	TCPServer server(ioContext);
+	TCPServer server;
+	ASSERT_TRUE(server.bindAndListen("127.0.0.1", 0));
 	server.startAccept();
 
 	ISession::pointer pendingSession;
@@ -358,7 +351,7 @@ TEST_F(TCPTransportTest, Server_RespondToConnectionRequest_Declined_ClosesSocket
 			sessionHandlerCalled.store(true);
 		});
 
-	TCPClient client(ioContext);
+	TCPClient client;
 	client.setConnectHandler([](ISession::pointer) {});
 	client.connect("127.0.0.1", static_cast<unsigned short>(server.getBoundPort()));
 

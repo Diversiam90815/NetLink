@@ -1,6 +1,5 @@
 #include <gtest/gtest.h>
 #include <gmock/gmock.h>
-#include <asio.hpp>
 #include <atomic>
 #include <chrono>
 #include <mutex>
@@ -71,7 +70,7 @@ public:
 class FakeTransportFactory : public ITransportFactory
 {
 public:
-	std::unique_ptr<IServer> createServer(asio::io_context &) override
+	std::unique_ptr<IServer> createServer() override
 	{
 		auto server	  = std::make_unique<FakeServer>();
 		lastServer	  = server.get();
@@ -79,7 +78,7 @@ public:
 		return server;
 	}
 
-	std::unique_ptr<IClient> createClient(asio::io_context &) override
+	std::unique_ptr<IClient> createClient() override
 	{
 		auto client	  = std::make_unique<FakeClient>();
 		lastClient	  = client.get();
@@ -125,12 +124,11 @@ class ConnectionServiceTest : public ::testing::Test
 protected:
 	void SetUp() override
 	{
-		signaling = std::make_unique<SignalingService>(ioContext);
-		service	  = std::make_unique<ConnectionService>(ioContext, *signaling, factory);
+		signaling = std::make_unique<SignalingService>();
+		service	  = std::make_unique<ConnectionService>(*signaling, factory);
 		service->setLocalIP("10.0.0.1");
 	}
 
-	asio::io_context				   ioContext;
 	FakeTransportFactory			   factory;
 	std::unique_ptr<SignalingService>  signaling;
 	std::unique_ptr<ConnectionService> service;

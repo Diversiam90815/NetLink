@@ -166,6 +166,12 @@ std::string NetlinkSocket::getRemoteAddress() const
 }
 
 
+int NetlinkSocket::getRemotePort() const
+{
+	return mSocket ? mSocket->getRemotePort() : 0;
+}
+
+
 SocketBindResult NetlinkSocket::translate(const NetLink::SocketBindResult &raw, const std::string &address, int port)
 {
 	SocketBindResult result;

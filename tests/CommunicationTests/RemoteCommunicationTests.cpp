@@ -19,6 +19,9 @@ public:
 	MOCK_METHOD(void, startReadAsync, (MessageReceivedCallback), (override));
 	MOCK_METHOD(void, stopReadAsync, (), (override));
 	MOCK_METHOD(int, getBoundPort, (), (const, override));
+	MOCK_METHOD(std::string, getRemoteAddress, (), (const, override));
+	MOCK_METHOD(int, getRemotePort, (), (const, override));
+	MOCK_METHOD(void, close, (), (override));
 };
 
 
