@@ -1,59 +1,45 @@
 /*
   ==============================================================================
 	Module:         TCPServer
-	Description:    Server implementation used for the multiplayer mode
+	Description:    Server implementation for TCP Connections
   ==============================================================================
 */
 
-
 #pragma once
 
-#include <asio.hpp>
+#include <memory>
 
+#include "../Util/ThreadBase.h"
+#include "../Socket/NetlinkSocket.h"
 #include "Transport/TransportInterfaces.h"
 #include "TCPSession.h"
 
 
-using asio::ip::tcp;
-
-
-/**
- * @brief	Implements a TCP server that listens for and accepts incoming connections,
- *			creating TCPSession instances for each accepted socket.
- */
-class TCPServer : public IServer
+// Implements a TCP server that listens for and accepts incoming connections, TCPSession instances for each accepted socket.
+class TCPServer : public IServer, private ThreadBase
 {
 public:
-	TCPServer(asio::io_context &ioContext);
-	~TCPServer();
+	TCPServer() = default;
+	~TCPServer() override;
 
-	/**
-	 * @brief	Begin asynchronous accept loop. Each accepted connection invokes session handler.
-	 */
+	bool bindAndListen(const std::string &address, int port, int backlog = 8);
+
 	void startAccept() override;
+	void stopAccept();
 
 	int	 getBoundPort() const override;
 
-	/**
-	 * @brief	Register callback for accepted session creation.
-	 */
 	void setSessionHandler(SessionHandler handler) override;
 
-	/**
-	 * @brief	Respond to a pending connection request (e.g., handshake).
-	 * @param	accepted -> True to allow session progression, false to close.
-	 */
 	void respondToConnectionRequest(bool accepted) override;
 
-
 private:
-	asio::io_context		   &mIoContext;
+	void						run() override;
 
-	tcp::acceptor				mAcceptor;
 
+	NetlinkSocket				mAcceptorSocket; // TCP, listening
 	int							mBoundPort{0};
 
 	std::shared_ptr<TCPSession> mPendingSession;
-
 	SessionHandler				mSessionHandler;
 };

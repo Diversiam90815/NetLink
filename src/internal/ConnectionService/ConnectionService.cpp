@@ -10,8 +10,8 @@
 #include "NetLinkLog.h"
 
 
-netlink::ConnectionService::ConnectionService(asio::io_context &ioContext, SignalingService &signaling, ITransportFactory &transportFactory)
-	: mIoContext(ioContext), mSignaling(signaling), mTransportFactory(transportFactory)
+netlink::ConnectionService::ConnectionService(SignalingService &signaling, ITransportFactory &transportFactory)
+	: mSignaling(signaling), mTransportFactory(transportFactory)
 {
 	mTaskQueue.start();
 
@@ -572,7 +572,7 @@ bool netlink::ConnectionService::determineLocalSessionRole()
 
 	if (role == SessionRole::Acceptor)
 	{
-		auto server = mTransportFactory.createServer(mIoContext);
+		auto server = mTransportFactory.createServer();
 
 		server->setSessionHandler(
 			[this](ISession::pointer session)
@@ -616,7 +616,7 @@ bool netlink::ConnectionService::determineLocalSessionRole()
 	}
 	else if (role == SessionRole::Connector)
 	{
-		auto client = mTransportFactory.createClient(mIoContext);
+		auto client = mTransportFactory.createClient();
 
 		client->setConnectHandler(
 			[this](ISession::pointer session)

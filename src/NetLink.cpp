@@ -22,13 +22,12 @@ struct netlink::NetLink::Impl
 	NetLinkConfig				   config;
 	NetLinkCallbacks			   callbacks;
 
-	asio::io_context			   ioContext;
-	DiscoveryService			   discovery{ioContext};
-	SignalingService			   signaling{ioContext};
+	DiscoveryService			   discovery{};
+	SignalingService			   signaling{};
 	netlink::NetworkInformation	   network;
 	netlink::TCPTransportFactory   transportFactory;
 	netlink::PeerValidationService validation;
-	netlink::ConnectionService	   connectionService{ioContext, signaling, transportFactory};
+	netlink::ConnectionService	   connectionService{signaling, transportFactory};
 	RemoteCommunication			   communication;
 
 	ConnectionState				   connectionState{ConnectionState::None};

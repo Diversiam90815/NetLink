@@ -81,7 +81,7 @@ struct ConnectionRequest
 class ConnectionService
 {
 public:
-	ConnectionService(asio::io_context &ioContext, SignalingService &signaling, ITransportFactory &transportFactory);
+	ConnectionService(SignalingService &signaling, ITransportFactory &transportFactory);
 	~ConnectionService();
 
 	// Configuration
@@ -133,7 +133,6 @@ private:
 	void							 onTimeout(const TimeoutKey &key);
 
 	// Dependencies
-	asio::io_context				&mIoContext;
 	SignalingService				&mSignaling;
 	ITransportFactory				&mTransportFactory;
 

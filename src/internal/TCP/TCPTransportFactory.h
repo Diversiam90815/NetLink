@@ -18,9 +18,8 @@ namespace netlink
 class TCPTransportFactory : public ITransportFactory
 {
 public:
-	std::unique_ptr<IServer> createServer(asio::io_context &ioContext) override { return std::make_unique<TCPServer>(ioContext); }
-
-	std::unique_ptr<IClient> createClient(asio::io_context &ioContext) override { return std::make_unique<TCPClient>(ioContext); }
+	std::unique_ptr<IServer> createServer() override { return std::make_unique<TCPServer>(); }
+	std::unique_ptr<IClient> createClient() override { return std::make_unique<TCPClient>(); }
 };
 
 } // namespace netlink

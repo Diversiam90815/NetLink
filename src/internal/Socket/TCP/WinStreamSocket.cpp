@@ -117,6 +117,45 @@ bool WinStreamSocket::accept(int timeoutMS)
 }
 
 
+std::unique_ptr<ISocket> WinStreamSocket::acceptNew(int timeoutMS)
+{
+	if (mSocket == INVALID_SOCKET || mClosed.load())
+		return nullptr;
+
+	if (!waitOn(mSocket, true, timeoutMS))
+		return nullptr; // timeout
+
+	sockaddr_in peerAddr{};
+	int			peerLen	 = sizeof(peerAddr);
+
+	SOCKET		accepted = ::accept(mSocket, reinterpret_cast<sockaddr *>(&peerAddr), &peerLen);
+
+	if (accepted == INVALID_SOCKET)
+	{
+		NETLINK_LOG_ERROR("acceptNew failed: WSA error {}", WSAGetLastError());
+		return nullptr;
+	}
+
+	auto newSocket		  = std::make_unique<WinStreamSocket>();
+
+	// The new connection is already established; wire it up directly rather than via bind()/connect().
+	newSocket->mSocket	  = accepted;
+	newSocket->mConnected = accepted; // data socket == the accepted socket itself for this new instance
+
+	char ipStr[INET_ADDRSTRLEN];
+	inet_ntop(AF_INET, &peerAddr.sin_addr, ipStr, sizeof(ipStr));
+	newSocket->mRemoteAddress = ipStr;
+	newSocket->mRemotePort	  = ntohs(peerAddr.sin_port);
+
+	sockaddr_in localAddr{};
+	int			localLen = sizeof(localAddr);
+	getsockname(accepted, reinterpret_cast<sockaddr *>(&localAddr), &localLen);
+	newSocket->mBoundPort = ntohs(localAddr.sin_port);
+
+	return newSocket;
+}
+
+
 bool WinStreamSocket::connect(const std::string &address, int port, int timeoutMS)
 {
 	if (mSocket == INVALID_SOCKET || mClosed.load())

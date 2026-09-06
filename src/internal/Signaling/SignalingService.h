@@ -7,7 +7,6 @@
 
 #pragma once
 
-#include <asio.hpp>
 #include <functional>
 #include <string>
 #include <atomic>
@@ -16,9 +15,8 @@
 #include "SignalPacket.h"
 #include "ThreadBase.h"
 #include "PeerValidation/PeerValidationService.h"
+#include "../Socket/NetlinkSocket.h"
 
-
-using asio::ip::udp;
 
 namespace netlink
 {
@@ -53,7 +51,7 @@ struct PeerEndpoint
 class SignalingService : public ThreadBase
 {
 public:
-	explicit SignalingService(asio::io_context &ioContext);
+	SignalingService() = default;
 	~SignalingService();
 
 	bool init(const std::string &localComputerName);
@@ -85,18 +83,14 @@ private:
 	PeerEndpoint						resolvePeer(const std::string &computerName) const;
 
 	void								run() override;
-	void								receiveAsync();
-	void								handleReceive(const asio::error_code &error, size_t bytesReceived);
-	void								routePacket(const SignalPacket &packet);
 	void								sendPacket(const PeerEndpoint &endpoint, const SignalPacket &packet);
+	void								receivePackage();
+	void								routePacket(const SignalPacket &packet);
 
 	SignalPacket						makeEnvelope(SignalType type) const;
 
 
-	asio::io_context				   *mIoContext{nullptr};
-	udp::socket							mSocket;
-	udp::endpoint						mSenderEndpoint;
-	std::array<char, 1024>				mRecvBuffer{};
+	NetlinkSocket						mSocket; // UDP
 
 	std::string							mLocalComputerName;
 	std::string							mLocalIPv4;

@@ -86,6 +86,8 @@ public:
 
 	SocketBindResult		 bind(const std::string &address, int port, const NetLink::BindOptions &options = {});
 
+	NetlinkSocket			 takeAcceptedConnection(int timeoutMS = 250);
+
 	bool					 connect(const std::string &address, int port, int timeoutMS);
 	bool					 listen(int backlog);
 	bool					 accept(int timeoutMS);
@@ -102,6 +104,8 @@ public:
 	void					 close();
 	bool					 isOpen() const;
 	int						 getBoundPort() const;
+	std::string				 getRemoteAddress() const;
+	int						 getRemotePort() const;
 
 	NetLink::SocketTransport getTransport() const { return mTransport; }
 

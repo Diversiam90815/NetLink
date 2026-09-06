@@ -7,29 +7,20 @@
 
 #pragma once
 
-#include <asio.hpp>
 #include <memory>
 
 #include "Transport/TransportInterfaces.h"
 #include "TCPSession.h"
 
 
-using asio::ip::tcp;
-
-
-/**
- * @brief	Implements a TCP client responsible for connecting to a remote host
- *			and establishing a TCPSession.
- */
+// Implements a TCP client responsible for connecting to a remote host and establishing a TCPSession
 class TCPClient : public IClient
 {
 public:
-	TCPClient(asio::io_context &ioContext);
-	~TCPClient() = default;
+	TCPClient() = default;
+	~TCPClient() override;
 
-	/**
-	 * @brief	Initiate asynchronous connection to host:port.
-	 */
+	// Initiate asynchronous connection to host:port.
 	void connect(const std::string &host, unsigned short port) override;
 
 	void setConnectHandler(ConnectHandler handler) override;
@@ -41,5 +32,5 @@ private:
 
 	const int			  mTimeoutInSeconds = 10;
 
-	asio::io_context	 &mIoContext;
+	std::thread			  mConnectThread;
 };

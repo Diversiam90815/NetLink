@@ -7,13 +7,15 @@
 
 #pragma once
 
+#include <memory>
+
 #include "SocketTypes.h"
 
 
 class ISocket
 {
 public:
-	virtual ~ISocket() = default;
+	virtual ~ISocket()																											   = default;
 
 	virtual NetLink::SocketBindResult bind(const std::string &address, const int port, const NetLink::BindOptions &options)		   = 0;
 
@@ -24,9 +26,12 @@ public:
 
 	// TCP-only lifecycle
 	virtual bool					  listen(int backlog) { return false; }
-	virtual bool					  accept(int timeoutMS) { return false; } // blocks until a client connects (or times out)
+	virtual std::unique_ptr<ISocket>  acceptNew(int timeoutMS) { return nullptr; } // returns fresh ISocket for the new connection
+	virtual bool					  accept(int timeoutMS) { return false; }	   // blocks until a client connects (or times out)
 	virtual bool					  connect(const std::string &address, int port, int timeoutMS) { return false; }
 	virtual bool					  isConnected() const { return false; }
+	virtual std::string				  getRemoteAddress() const { return {}; }
+	virtual int						  getRemotePort() const { return 0; }
 
 	virtual void					  close()			   = 0;
 	virtual bool					  isOpen() const	   = 0;

@@ -11,12 +11,6 @@
 using json = nlohmann::json;
 
 
-netlink::SignalingService::SignalingService(asio::io_context &ioContext) : mSocket(ioContext)
-{
-	mIoContext = &ioContext;
-}
-
-
 netlink::SignalingService::~SignalingService()
 {
 	deinit();
@@ -29,20 +23,7 @@ bool netlink::SignalingService::init(const std::string &localComputerName)
 		return false;
 
 	mLocalComputerName = localComputerName;
-
-	asio::error_code ec;
-	mSocket.open(udp::v4(), ec);
-
-	if (ec)
-	{
-		NETLINK_LOG_ERROR("Failed to open signaling socket: {}", ec.message());
-		return false;
-	}
-
-	mSocket.set_option(asio::socket_base::reuse_address(true), ec);
-
-	if (ec)
-		NETLINK_LOG_ERROR("Failed to set reuse_address option: {}", ec.message());
+	mSocket			   = NetlinkSocket::createUDP();
 
 	// Socket opened, binding deferred until setLocalIPv4() is called
 	mInitialized.store(true);
@@ -52,19 +33,8 @@ bool netlink::SignalingService::init(const std::string &localComputerName)
 
 void netlink::SignalingService::deinit()
 {
-	asio::error_code ec;
-
-	mSocket.cancel(ec);
-
-	if (ec)
-		NETLINK_LOG_ERROR("Error cancelling socket operations: {}", ec.message());
-
-	mSocket.close(ec);
-
-	if (ec)
-		NETLINK_LOG_ERROR("Error closing signaling socket: {}", ec.message());
-
 	stop();
+	mSocket.close();
 	mBoundPort = 0;
 	mInitialized.store(false);
 }
@@ -75,34 +45,24 @@ void netlink::SignalingService::setLocalIPv4(const std::string &localIPv4)
 	if (localIPv4.empty())
 		return;
 
-	asio::error_code ec;
-
 	// Rebind if already bound to a previous address
 	if (mBoundPort != 0)
-	{
-		mSocket.cancel(ec);
-		mSocket.close(ec);
-		mSocket.open(udp::v4(), ec);
-		if (ec)
-		{
-			NETLINK_LOG_ERROR("Failed to reopen signaling socket: {}", ec.message());
-			return;
-		}
-		mSocket.set_option(asio::socket_base::reuse_address(true), ec);
-	}
+		mSocket = NetlinkSocket::createUDP();
 
 	mLocalIPv4 = localIPv4;
 
-	udp::endpoint localEndpoint(asio::ip::make_address_v4(localIPv4), 0);
-	mSocket.bind(localEndpoint, ec);
+	NetLink::BindOptions options;
+	options.reuseAddress = true;
 
-	if (ec)
+	auto result			 = mSocket.bind(localIPv4, 0, options);
+
+	if (!result.succeeded())
 	{
-		NETLINK_LOG_ERROR("Failed to bind signaling socket to {}: {}", localIPv4, ec.message());
+		NETLINK_LOG_ERROR("Failed to bind signaling socket to {}: {}", localIPv4, result.getStatusString());
 		return;
 	}
 
-	mBoundPort = static_cast<int>(mSocket.local_endpoint().port());
+	mBoundPort = mSocket.getBoundPort();
 	NETLINK_LOG_INFO("SignalingService bound to {}:{}", localIPv4, mBoundPort);
 
 	if (mOnSocketBound)
@@ -257,50 +217,11 @@ netlink::PeerEndpoint netlink::SignalingService::resolvePeer(const std::string &
 
 void netlink::SignalingService::run()
 {
-	receiveAsync();
-
 	while (isRunning())
 	{
-		mIoContext->run_one();
+		receivePackage();
 		waitForEvent(50);
 	}
-}
-
-
-void netlink::SignalingService::receiveAsync()
-{
-	if (!mInitialized.load())
-		return;
-
-	mSocket.async_receive_from(asio::buffer(mRecvBuffer), mSenderEndpoint, [this](const asio::error_code &error, size_t bytesReceived) { handleReceive(error, bytesReceived); });
-}
-
-
-void netlink::SignalingService::handleReceive(const asio::error_code &error, size_t bytesReceived)
-{
-	if (!error && bytesReceived > 0)
-	{
-		try
-		{
-			std::string	 data(mRecvBuffer.data(), bytesReceived);
-			json		 j		= json::parse(data);
-			SignalPacket packet = j.get<SignalPacket>();
-
-			routePacket(packet);
-		}
-		catch (std::exception &e)
-		{
-			NETLINK_LOG_ERROR("Error parsing signal packet: {}", e.what());
-		}
-	}
-	else if (error && error != asio::error::operation_aborted)
-	{
-		NETLINK_LOG_WARNING("Signaling receive error: {}", error.message());
-	}
-
-	// Continue listening if still running
-	if (isRunning())
-		receiveAsync();
 }
 
 
@@ -385,18 +306,38 @@ void netlink::SignalingService::sendPacket(const PeerEndpoint &endpoint, const S
 		return;
 	}
 
-	json			 j	 = packet;
-	std::string		 msg = j.dump();
+	json		j	 = packet;
+	std::string msg	 = j.dump();
 
-	udp::endpoint	 target(asio::ip::make_address_v4(endpoint.IPv4), static_cast<unsigned short>(endpoint.signalingPort));
-	asio::error_code ec;
+	int			sent = mSocket.sendTo(endpoint.IPv4, endpoint.signalingPort, msg.data(), static_cast<int>(msg.size()));
 
-	mSocket.send_to(asio::buffer(msg), target, 0, ec);
-
-	if (ec)
-		NETLINK_LOG_ERROR("Failed to send signal to {}:{} - {}", endpoint.IPv4, endpoint.signalingPort, ec.message());
+	if (sent < 0)
+		NETLINK_LOG_ERROR("Failed to send signal to {}:{}", endpoint.IPv4, endpoint.signalingPort);
 	else
 		NETLINK_LOG_DEBUG("Signal sent to {}:{} (type={})", endpoint.IPv4, endpoint.signalingPort, static_cast<int>(packet.signalType));
+}
+
+
+void netlink::SignalingService::receivePackage()
+{
+	if (!mInitialized.load())
+		return;
+
+	ReceivedPacket packet;
+	if (!mSocket.receive(packet, 50))
+		return; // timeout
+
+	try
+	{
+		json		 j		= json::parse(packet.data.begin(), packet.data.end());
+		SignalPacket signal = j.get<SignalPacket>();
+
+		routePacket(signal);
+	}
+	catch (std::exception &e)
+	{
+		NETLINK_LOG_ERROR("Error parsing signal packet: {}", e.what());
+	}
 }
 
 

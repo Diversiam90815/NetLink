@@ -15,6 +15,7 @@
 
 class WinStreamSocket : public ISocket
 {
+public:
 	WinStreamSocket() = default;
 	~WinStreamSocket() override;
 	WinStreamSocket(const WinStreamSocket &)					 = delete;
@@ -24,6 +25,7 @@ class WinStreamSocket : public ISocket
 
 	bool					  listen(int backlog) override;
 	bool					  accept(int timeoutMS) override;
+	std::unique_ptr<ISocket>  acceptNew(int timeoutMS) override;
 	bool					  connect(const std::string &address, int port, int timeoutMS) override;
 	bool					  isConnected() const override { return mConnected != INVALID_SOCKET; }
 
@@ -37,6 +39,8 @@ class WinStreamSocket : public ISocket
 
 	bool					  isOpen() const override { return mSocket != INVALID_SOCKET || mConnected != INVALID_SOCKET; }
 	int						  getBoundPort() const override { return mBoundPort; }
+	std::string				  getRemoteAddress() const override { return mRemoteAddress; }
+	int						  getRemotePort() const override { return mRemotePort; }
 
 private:
 	void			  applyOptions(SOCKET sock, const NetLink::BindOptions &options);

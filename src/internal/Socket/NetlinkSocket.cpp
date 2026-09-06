@@ -60,6 +60,23 @@ SocketBindResult NetlinkSocket::bind(const std::string &address, int port, const
 }
 
 
+NetlinkSocket NetlinkSocket::takeAcceptedConnection(int timeoutMS)
+{
+	NetlinkSocket result;
+
+	if (!mSocket)
+		return result;
+
+	auto accepted = mSocket->acceptNew(timeoutMS);
+	if (!accepted)
+		return result; // timeout / error
+
+	result.mTransport = NetLink::SocketTransport::TCP;
+	result.mSocket	  = std::move(accepted);
+	return result;
+}
+
+
 bool NetlinkSocket::connect(const std::string &address, int port, int timeoutMS)
 {
 	return mSocket && mSocket->connect(address, port, timeoutMS);
@@ -140,6 +157,12 @@ bool NetlinkSocket::isOpen() const
 int NetlinkSocket::getBoundPort() const
 {
 	return mSocket ? mSocket->getBoundPort() : 0;
+}
+
+
+std::string NetlinkSocket::getRemoteAddress() const
+{
+	return mSocket ? mSocket->getRemoteAddress() : std::string{};
 }
 
 

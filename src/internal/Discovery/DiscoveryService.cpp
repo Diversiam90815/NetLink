@@ -146,7 +146,7 @@ void DiscoveryService::receivePackage()
 
 	try
 	{
-		json			  j		 = json::parse(packet);
+		auto			  j		 = json::parse(packet.data);
 		DiscoveryEndpoint remote = j.get<DiscoveryEndpoint>();
 		addRemoteToList(remote);
 

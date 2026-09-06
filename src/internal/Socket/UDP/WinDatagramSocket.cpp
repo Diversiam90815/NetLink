@@ -167,7 +167,7 @@ void WinDatagramSocket::applyOptions(const NetLink::BindOptions &options)
 		setOpt(SOL_SOCKET, SO_RCVBUF, options.receiveBufferSize, "SO_RCVBUF");
 
 	if (options.sendBufferSize > 0)
-		setsockopt(SOL_SOCKET, SO_SNDBUF, options.sendBufferSize, "SO_SNDBUF");
+		setOpt(SOL_SOCKET, SO_SNDBUF, options.sendBufferSize, "SO_SNDBUF");
 
 	if (options.reuseAddress)
 		setOpt(SOL_SOCKET, SO_REUSEADDR, 1, "SO_REUSEADDR");
