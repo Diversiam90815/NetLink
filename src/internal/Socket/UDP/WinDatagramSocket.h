@@ -7,25 +7,11 @@
 
 #pragma once
 
-#include <WinSock2.h>
-#include <WS2tcpip.h>
-
 #include <atomic>
 #include <mutex>
 #include <string>
 
-#include "ISocket.h"
-
-#pragma comment(lib, "Ws2_32.lib")
-
-
-struct WinsockScope
-{
-	WinsockScope();
-	~WinsockScope();
-	WinsockScope(const WinsockScope &) = delete;
-	WinsockScope &operator=(const WinsockScope &) = delete;
-};
+#include "../Common/WinsockCommon.h"
 
 
 class WinDatagramSocket : public ISocket

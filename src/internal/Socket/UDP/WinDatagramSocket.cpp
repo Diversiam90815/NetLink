@@ -10,36 +10,6 @@
 #include "NetLinkLog.h"
 
 
-namespace
-{
-std::mutex gWinsSocketMutex;
-int		   gWinsSocketRefCount = 0;
-} // namespace
-
-
-WinsockScope::WinsockScope()
-{
-	std::lock_guard<std::mutex> lock(gWinsSocketMutex);
-
-	if (gWinsSocketRefCount++ == 0)
-	{
-		WSADATA	  wsaData{};
-		const int rc = WSAStartup(MAKEWORD(2, 2), &wsaData);
-
-		if (rc != 0)
-			gWinsSocketRefCount = 0;
-	}
-}
-
-WinsockScope::~WinsockScope()
-{
-	std::lock_guard<std::mutex> lock(gWinsSocketMutex);
-
-	if (gWinsSocketRefCount > 0 && --gWinsSocketRefCount == 0)
-		WSACleanup();
-}
-
-
 WinDatagramSocket::~WinDatagramSocket()
 {
 	close();
