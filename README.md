@@ -38,7 +38,7 @@ Key design goals:
 └──────────────────────┬──────────────────────────────┘
                        │  Pimpl
 ┌──────────────────────▼──────────────────────────────┐
-│                  NetLink::Impl                      │
+│        NetLinkCore (wires all services)             │
 │  ┌──────────────┐  ┌───────────────┐  ┌──────────┐  │
 │  │  Discovery   │  │  Connection   │  │Signaling │  │
 │  │  Service     │  │  Service      │  │Service   │  │
@@ -98,13 +98,13 @@ All types live in the `netlink` namespace. Single include:
 
 ```cpp
 netlink::NetLinkCallbacks cb;
-cb.onRemoteDiscovered      = [](const netlink::Endpoint &e)          { /* peer found on LAN */ };
+cb.onRemoteDiscovered      = [](const netlink::Endpoint &e)          { /* compatible peer found and validated */ };
 cb.onConnectionChanged     = [](netlink::ConnectionEvent ev)         { /* state machine update */ };
 cb.onMessageReceived       = [](const netlink::Message &msg)         { /* handle inbound data */ };
 cb.onNetworkAdapterChanged = [](const netlink::NetworkAdapter &a)    { /* adapter hotplug event */ };
 ```
 
-Callbacks are invoked on NetLink's internal worker threads. Marshal onto your own thread (e.g. a game loop) if required.
+Callbacks run one at a time on NetLink's event thread, never while internal locks are held. Calling back into NetLink from a callback (e.g. `respondToConnection()` or `disconnect()`) is safe; destroying the `NetLink` instance inside a callback is not. Marshal onto your own thread (e.g. a game loop) if required.
 
 ### Typical usage
 
@@ -120,7 +120,7 @@ cfg.secret           = "shared-secret";
 
 netlink::NetLinkCallbacks cb;
 cb.onRemoteDiscovered  = [&](const netlink::Endpoint &e) {
-    net.connectTo(e);   // connect to the first peer we find
+    net.connectTo(e);   // connect to the first compatible peer we find
 };
 cb.onConnectionChanged = [](netlink::ConnectionEvent ev) {
     if (ev.state == netlink::ConnectionState::Connected) {
@@ -152,7 +152,7 @@ net.shutdown();
 | Method | Description |
 |--------|-------------|
 | `configure(config, callbacks)` | Register configuration and callbacks — call before `init()` |
-| `init()` | Initialize sockets and enumerate network adapters |
+| `init()` | Enumerate network adapters, select the preferred one if none is active, and bind sockets |
 | `shutdown()` | Tear down all services; safe to call multiple times |
 | `startDiscovery()` | Begin broadcasting and listening for peers |
 | `stopDiscovery()` | Stop discovery without closing an active session |
