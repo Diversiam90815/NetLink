@@ -1,21 +1,24 @@
 /*
   ==============================================================================
 	Module:         DiscoveryService
-	Description:    LAN discovery via UDP broadcast
+	Description:    LAN discovery via UDP broadcast.
+					Announces the local endpoint periodically and reports remotes that announce themselves.
   ==============================================================================
 */
 
 #pragma once
 
-#include <string>
-#include <functional>
-#include <vector>
-#include <array>
 #include <atomic>
+#include <chrono>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <vector>
 
 #include "DiscoveryEndpoint.h"
 #include "ThreadBase.h"
-#include "../Socket/NetlinkSocket.h"
+#include "Socket/IDatagramSocket.h"
 
 
 struct DiscoveryConfig
@@ -24,54 +27,57 @@ struct DiscoveryConfig
 	std::string localIPv4{};
 	int			signalingPort{0};
 	int			discoveryPort{5555};
-	std::string broadCastAddress{"255.255.255.255"};
+	std::string broadcastAddress{"255.255.255.255"};
 };
 
 
 using RemoteFoundCallback = std::function<void(const DiscoveryEndpoint &)>;
 
 
-// Provides LAN discovery via UDP broadcast.
-class DiscoveryService : public ThreadBase
+class DiscoveryService : private ThreadBase
 {
 public:
-	DiscoveryService() = default;
-	~DiscoveryService();
+	explicit DiscoveryService(netlink::net::DatagramSocketFactory socketFactory = {});
+	~DiscoveryService() override;
+	DiscoveryService(const DiscoveryService &)			  = delete;
+	DiscoveryService &operator=(const DiscoveryService &) = delete;
 
-	void				   setOnRemoteFound(RemoteFoundCallback cb) { mOnRemoteFound = std::move(cb); }
+	// Invoked on the discovery thread for every new (or changed) remote
+	void			  setOnRemoteFound(RemoteFoundCallback cb);
 
-	bool				   init(const DiscoveryConfig &config);
-	void				   deinit();
+	// Applies the configuration. Rebinds the socket only if the discovery port changed. Safe while discovering.
+	bool			  init(const DiscoveryConfig &config);
+	void			  deinit();
 
-	const DiscoveryConfig &getConfig() const { return mConfig; }
+	DiscoveryConfig	  getConfig() const;
 
-	void				   startDiscovery();
+	void			  startDiscovery();
+	void			  stopDiscovery();
+	bool			  isDiscovering() const { return isRunning(); }
 
-	DiscoveryEndpoint	   getEndpointFromIP(const std::string &IPv4);
-	void				   addRemoteToList(DiscoveryEndpoint remote);
+	DiscoveryEndpoint getEndpointFromIP(const std::string &IPv4);
+	void			  addRemoteToList(DiscoveryEndpoint remote);
 
 
 private:
-	void								  run() override;
+	void										   run() override;
 
-	void								  sendPackage();
-	void								  receivePackage();
+	void										   sendPackage();
+	void										   receivePackage();
 
-	bool								  isInitialized() const { return mInitialized.load(); }
+	std::shared_ptr<netlink::net::IDatagramSocket> socket() const;
 
+	netlink::net::DatagramSocketFactory			   mSocketFactory;
 
-	DiscoveryConfig						  mConfig;
-	std::atomic<bool>					  mInitialized{false};
+	mutable std::mutex							   mMutex;
+	DiscoveryConfig								   mConfig;
+	std::shared_ptr<netlink::net::IDatagramSocket> mSocket;
+	std::vector<DiscoveryEndpoint>				   mRemoteDevices;
+	RemoteFoundCallback							   mOnRemoteFound;
 
-	NetlinkSocket						  mSocket; // UDP
+	std::atomic<bool>							   mAnnounceRequested{false};
 
-	std::string							  mLocalAddress;
-	std::string							  mTargetAddress;
-	int									  mTargetPort = 0;
-
-	std::vector<DiscoveryEndpoint>		  mRemoteDevices;
-
-	std::chrono::steady_clock::time_point mNextSendTime;
-
-	RemoteFoundCallback					  mOnRemoteFound;
+	// Only touched by the discovery thread
+	std::vector<uint8_t>						   mReceiveBuffer;
+	std::chrono::steady_clock::time_point		   mNextSendTime;
 };
