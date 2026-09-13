@@ -16,7 +16,7 @@ endif()
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
 option(NETLINK_ENABLE_LOGGING "Enable logging via Logger library" OFF)
 
@@ -36,37 +36,49 @@ CPMAddPackage(
   VERSION 3.11.3
 )
 
-file(GLOB_RECURSE NETWORKING_SOURCES src/*.cpp)
-file(GLOB_RECURSE NETWORKING_HEADERS include/*.h)
-file(GLOB_RECURSE NETWORKING_INTERNAL_HEADERS src/*.h)
+file(GLOB_RECURSE NETWORKING_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp)
+file(GLOB_RECURSE NETWORKING_HEADERS ${CMAKE_CURRENT_SOURCE_DIR}/include/*.h)
+file(GLOB_RECURSE NETWORKING_INTERNAL_HEADERS ${CMAKE_CURRENT_SOURCE_DIR}/src/*.h)
 
-# NetworkInformation has one backend per platform
+# NetworkInformation and the socket platform shim have one backend per platform
 list(FILTER NETWORKING_SOURCES EXCLUDE REGEX ".*NetworkInformation(Windows|Linux)\\.cpp$")
+list(FILTER NETWORKING_SOURCES EXCLUDE REGEX ".*SocketPlatform(Windows|Posix)\\.cpp$")
 
 if(WIN32)
-    list(APPEND NETWORKING_SOURCES src/internal/Network/NetworkInformationWindows.cpp)
+    list(APPEND NETWORKING_SOURCES
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/internal/Network/NetworkInformationWindows.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/internal/Socket/Platform/SocketPlatformWindows.cpp
+    )
 elseif(APPLE)
-    list(APPEND NETWORKING_SOURCES src/internal/Network/NetworkInformationMac.mm)
+    list(APPEND NETWORKING_SOURCES
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/internal/Network/NetworkInformationMac.mm
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/internal/Socket/Platform/SocketPlatformPosix.cpp
+    )
 elseif(UNIX)
-    list(APPEND NETWORKING_SOURCES src/internal/Network/NetworkInformationLinux.cpp)
+    list(APPEND NETWORKING_SOURCES
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/internal/Network/NetworkInformationLinux.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/internal/Socket/Platform/SocketPlatformPosix.cpp
+    )
 endif()
 
 add_library(${PROJECT_NAME} STATIC ${NETWORKING_SOURCES} ${NETWORKING_HEADERS} ${NETWORKING_INTERNAL_HEADERS})
+add_library(${PROJECT_NAME}::${PROJECT_NAME} ALIAS ${PROJECT_NAME})
 
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/src PREFIX "Source Files" FILES ${NETWORKING_SOURCES} ${NETWORKING_INTERNAL_HEADERS})
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/include PREFIX "Header Files" FILES ${NETWORKING_HEADERS})
 
-target_include_directories(${PROJECT_NAME} PUBLIC include)
+target_include_directories(${PROJECT_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
-target_include_directories(${PROJECT_NAME} 
-    PRIVATE 
-        src/internal/
-        src/internal/Discovery
-        src/internal/Util
+target_include_directories(${PROJECT_NAME}
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/internal/Discovery
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/internal/Util
 )
 
+# Implementation details only: must not leak into consuming projects
 if(WIN32)
-    target_compile_definitions(${PROJECT_NAME} PUBLIC
+    target_compile_definitions(${PROJECT_NAME} PRIVATE
         _WIN32_WINNT=0x0A00
         WIN32_LEAN_AND_MEAN
     )
@@ -80,7 +92,7 @@ endif()
 target_link_libraries(${PROJECT_NAME} PRIVATE nlohmann_json::nlohmann_json)
 
 if(WIN32)
-    target_link_libraries(${PROJECT_NAME} PUBLIC iphlpapi ws2_32 wlanapi)
+    target_link_libraries(${PROJECT_NAME} PRIVATE iphlpapi ws2_32 wlanapi)
 elseif(APPLE)
     target_link_libraries(${PROJECT_NAME} PRIVATE
         "-framework CoreWLAN"
