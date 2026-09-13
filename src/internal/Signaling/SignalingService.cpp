@@ -161,7 +161,8 @@ void netlink::SignalingService::sendReadyFlag(const std::string &computerName)
 	if (!peer.isValid())
 		return;
 
-	auto packet = makeEnvelope(SignalType::ReadyFlag);
+	auto packet	   = makeEnvelope(SignalType::ReadyFlag);
+	packet.payload = PayloadReadyFlag{true}; // the receiver requires the payload
 
 	sendPacket(peer, packet);
 }
