@@ -22,7 +22,9 @@ Key design goals:
 - **LAN Discovery**: UDP broadcast lets peers find each other without manual IP entry
 - **Role Negotiation**: automatic host/client role assignment during the connection handshake
 - **Peer Validation**: configurable shared secret and version checking before a connection is accepted
-- **Async TCP Sessions**: full-duplex message passing built on standalone ASIO
+- **TCP Sessions**: full-duplex, length-framed message passing on a dependency-free socket layer (Winsock / POSIX)
+- **Pluggable Transports**: the data transport is selected via `NetLinkConfig::transport`; every send carries a `DeliveryMode` so reliable-UDP transports can be added without API changes
+- **Connection Loss Detection**: a dropped TCP connection is reported as `ConnectionState::Disconnected`
 - **Typed Messages**: opaque `Message` envelope with a `uint32_t` type tag and binary payload
 - **Network Adapter Management**: enumerates adapters with priority hints; supports live adapter switching
 - **Callback Model**: four event callbacks covering discovery, connection state, messages, and adapter changes
@@ -42,9 +44,14 @@ Key design goals:
 │  │  Service     │  │  Service      │  │Service   │  │
 │  └──────┬───────┘  └──────┬────────┘  └─────┬────┘  │
 │         │                 │                 │       │
+│         │         IServer / IClient         │       │
+│         │          ┌──────▼──────┐          │       │
+│         │          │TCP Transport│          │       │
+│         │          └──────┬──────┘          │       │
 │  ┌──────▼─────────────────▼─────────────────▼────┐  │
-│  │              TCP Transport Layer              │  │
-│  │      TCPClient / TCPServer / TCPSession       │  │
+│  │ IDatagramSocket (Discovery, Signaling)        │  │
+│  │ UdpSocket · TcpListener · TcpStream           │  │
+│  │ platform shim: Winsock / POSIX                │  │
 │  └───────────────────────────────────────────────┘  │
 │  ┌──────────────────┐  ┌─────────────────────────┐  │
 │  │ PeerValidation   │  │  NetworkInformation     │  │
@@ -62,7 +69,8 @@ Key design goals:
 | `SignalingService` | UDP control messages for handshake and disconnect coordination |
 | `PeerValidationService` | Validates shared secret before a connection is accepted |
 | `RemoteCommunication` | Dedicated async send/receive threads; dispatches typed `Message` objects |
-| `NetworkInformation` | Windows adapter enumeration via `iphlpapi`; fires adapter-change events |
+| `NetworkInformation` | Adapter enumeration (Windows / Linux / macOS backends); fires adapter-change events |
+| Socket layer | `UdpSocket`, `TcpListener`, `TcpStream` with `std::expected` error handling; OS specifics isolated in `Socket/Platform` |
 | `TimeoutService` | Configurable timeout and retry management across all async operations |
 
 ## Public API
@@ -81,18 +89,22 @@ All types live in the `netlink` namespace. Single include:
 | `Message` | `type` (`uint32_t`) + `data` (`vector<uint8_t>`) : opaque message envelope |
 | `NetworkAdapter` | Adapter metadata: name, network, IPv4, ID, `AdapterPriority` |
 | `ConnectionState` | `None` · `Hosting` · `Searching` · `PendingInbound` · `Connected` · `Disconnected` · `Error` |
-| `NetLinkConfig` | `localDisplayName`, `discoveryPort` (default 5555), `broadcastAddress`, `secret` |
+| `NetLinkConfig` | `localDisplayName`, `discoveryPort` (default 5555), `broadcastAddress`, `secret`, `transport` |
+| `DeliveryMode` | `ReliableOrdered` (default) · `UnreliableSequenced` — TCP delivers both reliably |
+| `TransportKind` | `Tcp` |
 | `NetLinkCallbacks` | Four `std::function` callbacks (see below) |
 
 ### Callbacks
 
 ```cpp
 netlink::NetLinkCallbacks cb;
-cb.onRemoteDiscovered      = [](const netlink::Endpoint &e)         { /* peer found on LAN */ };
+cb.onRemoteDiscovered      = [](const netlink::Endpoint &e)          { /* peer found on LAN */ };
 cb.onConnectionChanged     = [](netlink::ConnectionEvent ev)         { /* state machine update */ };
 cb.onMessageReceived       = [](const netlink::Message &msg)         { /* handle inbound data */ };
 cb.onNetworkAdapterChanged = [](const netlink::NetworkAdapter &a)    { /* adapter hotplug event */ };
 ```
+
+Callbacks are invoked on NetLink's internal worker threads. Marshal onto your own thread (e.g. a game loop) if required.
 
 ### Typical usage
 
@@ -149,8 +161,8 @@ net.shutdown();
 | `respondToConnection(accepted)` | (Host) accept or reject a pending inbound connection |
 | `disconnect()` | Close the active TCP session |
 | `getConnectionState()` | Query the current `ConnectionState` |
-| `send(message)` | Send a `Message` to the connected peer |
-| `send(type, payload)` | Convenience overload — constructs a `Message` inline |
+| `send(message, mode)` | Send a `Message` to the connected peer (`mode` defaults to `ReliableOrdered`) |
+| `send(type, payload, mode)` | Convenience overload — constructs a `Message` inline |
 | `getAvailableAdapters()` | List all network adapters with their priority hints |
 | `setActiveAdapter(id)` | Switch the active network adapter by ID |
 
@@ -165,7 +177,7 @@ CPMAddPackage(
     VERSION 0.1.0
 )
 
-target_link_libraries(YourTarget PRIVATE NetLink)
+target_link_libraries(YourTarget PRIVATE NetLink::NetLink)
 ```
 
 NetLink's test suite is excluded from consumer builds automatically. To opt back in:
@@ -178,15 +190,14 @@ set(NETLINK_BUILD_TESTS ON CACHE BOOL "" FORCE)
 
 - C++23 compiler
 - CMake 4.0+
-- Windows 10+ (`_WIN32_WINNT=0x0A00`)
+- Windows 10+, Linux (libnl-3 for WiFi information) or macOS
 
 ## Dependencies
 
-Fetched automatically at configure time via [CPM](https://github.com/cpm-cmake/CPM.cmake) — no manual installation required.
+Fetched automatically at configure time via [CPM](https://github.com/cpm-cmake/CPM.cmake).
 
 | Library | Version | Role |
 |---------|---------|------|
-| [ASIO](https://github.com/chriskohlhoff/asio) | 1.30.2 | Standalone async I/O |
 | [nlohmann/json](https://github.com/nlohmann/json) | 3.11.3 | Discovery packet serialization |
 | [GoogleTest](https://github.com/google/googletest) | 1.15.2 | Unit testing (standalone builds only) |
 
@@ -206,14 +217,15 @@ ctest --test-dir build
 
 | Pattern | Where applied |
 |---------|---------------|
-| **Pimpl** | `NetLink` exposes zero implementation headers — `struct Impl` is defined only in `src/NetLinkImpl.h` |
-| **Factory / Strategy** | `ITransportFactory` → `TCPTransportFactory` decouples transport creation from connection logic |
+| **Pimpl** | `NetLink` exposes zero implementation headers — `struct Impl` is defined only in `src/NetLink.cpp` |
+| **Factory / Strategy** | `ITransportFactory` → `TCPTransportFactory` decouples transport creation from connection logic; a reliable-UDP transport plugs in the same way |
+| **Seams for testing** | `IDatagramSocket` lets Discovery/Signaling run on an in-memory network with configurable loss (`tests/Fakes`) |
 | **Observer / Callbacks** | `NetLinkCallbacks` wires application code to async events without coupling to internals |
 | **Active Object** | `ThreadBase` utility backs dedicated send and receive threads in `RemoteCommunication` |
 
 ## Platform
 
-Windows 10+ only. Network adapter enumeration and socket initialization rely on `iphlpapi`, WinSock2, and related Windows APIs. Cross-platform support is not a current goal.
+Windows, Linux and macOS. Platform specific code is confined to `src/internal/Network/NetworkInformation*` and `src/internal/Socket/Platform/SocketPlatform*`; CMake selects the matching backend.
 
 ## License
 
