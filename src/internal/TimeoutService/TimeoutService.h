@@ -7,12 +7,13 @@
 
 #pragma once
 
+#include <chrono>
+#include <condition_variable>
 #include <functional>
 #include <map>
-#include <future>
-#include <chrono>
 #include <mutex>
-#include <atomic>
+#include <optional>
+#include <string>
 #include <thread>
 
 
@@ -32,6 +33,8 @@ struct TimeoutKey
 		return identifier < other.identifier;
 	}
 
+	bool		operator==(const TimeoutKey &other) const = default;
+
 	std::string toString() const { return category + ": " + identifier; }
 };
 
@@ -44,26 +47,19 @@ using TimeoutCallback = std::function<void(const TimeoutKey &key)>;
 
 
 /**
- * @brief	Internal tracking of an active timeout
+ * @brief	Runs any number of timeouts on one worker thread.
  */
-struct ActiveTimeout
-{
-	TimeoutKey							  key;
-	std::chrono::steady_clock::time_point deadline;
-	std::atomic<bool>					  cancelled{false};
-	std::future<void>					  future;
-};
-
-
-
 class TimeoutService
 {
 public:
 	TimeoutService() = default;
-	~TimeoutService() { cancelAll(); }
+	~TimeoutService();
+
+	TimeoutService(const TimeoutService &)			  = delete;
+	TimeoutService &operator=(const TimeoutService &) = delete;
 
 	/**
-	 * @brief	Start a new timeout
+	 * @brief	Start a new timeout, replacing an active one with the same key
 	 * @param	key Unique identifier for this timeout
 	 * @param	timeoutMs Timeout duration in milliseconds
 	 * @param	callback Function to call when timeout expires
@@ -72,21 +68,18 @@ public:
 
 	/**
 	 * @brief	Cancel a specific timeout
-	 * @param	key The timeout to cancel
 	 * @return	true if timeout was found and cancelled
 	 */
 	bool   cancelTimeout(const TimeoutKey &key);
 
 	/**
 	 * @brief	Cancel all timeouts matching a category
-	 * @param	category The category to cancel
 	 * @return	Number of timeouts cancelled
 	 */
 	int	   cancelCategory(const std::string &category);
 
 	/**
 	 * @brief	Cancel all timeouts for a specific remote
-	 * @param	identifier The identifier (e.g., computer name) to cancel
 	 * @return	Number of timeouts cancelled
 	 */
 	int	   cancelByIdentifier(const std::string &identifier);
@@ -97,7 +90,7 @@ public:
 	void   cancelAll();
 
 	/**
-	 * @brief	Check if a specific timeout is active
+	 * @brief	Check if a specific timeout is active (pending, not yet fired)
 	 */
 	bool   isActive(const TimeoutKey &key) const;
 
@@ -107,8 +100,23 @@ public:
 	size_t activeCount() const;
 
 private:
-	void												 cleanupCompleted();
+	using Clock = std::chrono::steady_clock;
 
-	mutable std::mutex									 mMutex;
-	std::map<TimeoutKey, std::shared_ptr<ActiveTimeout>> mActiveTimeouts;
+	struct Entry
+	{
+		Clock::time_point deadline;
+		TimeoutCallback	  callback;
+	};
+
+	void												run();
+	int													cancelIf(const std::function<bool(const TimeoutKey &)> &matches, std::unique_lock<std::mutex> &lock);
+
+	mutable std::mutex									mMutex;
+	std::condition_variable								mWakeUp;	  // new timeout / stop
+	std::condition_variable								mCallbackDone; // a callback finished
+	std::map<TimeoutKey, Entry>							mActiveTimeouts;
+	std::optional<TimeoutKey>							mRunningKey;  // key whose callback is executing right now
+
+	std::thread											mWorker;
+	bool												mStopping{false};
 };
