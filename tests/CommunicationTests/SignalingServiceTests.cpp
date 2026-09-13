@@ -122,6 +122,61 @@ TEST_F(SignalingServiceTest, PayloadsSurviveTheRoundTrip)
 }
 
 
+TEST_F(SignalingServiceTest, EverySendMethod_ProducesAPacketTheReceiverCanParse)
+{
+	std::atomic<int> readyFlags{0};
+	std::atomic<int> disconnects{0};
+	std::atomic<int> handshakes{0};
+	std::atomic<int> versions{0};
+
+	SignalingConnectionCallbacks connection;
+	connection.onConnectRequested		= [this](const std::string &) { ++connectRequests; };
+	connection.onConnectRequestAnswered = [this](const std::string &, bool) { ++answers; };
+	connection.onDisconnectReceived		= [&](const std::string &) { ++disconnects; };
+	connection.onReadyFlagReceived		= [&](const std::string &) { ++readyFlags; };
+	connection.onDataPortReceived		= [this](const std::string &, int port) { lastDataPort = port; };
+
+	SignalingValidationCallbacks validation;
+	validation.onValidationRequestReceived	 = [this](const std::string &, RemoteRequest request) { lastRequest = static_cast<int>(request); };
+	validation.onSecretResponseReceived		 = [this](const std::string &, const std::string &secret)
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		lastSecret = secret;
+	};
+	validation.onVersionResponseReceived	 = [&](const std::string &, const std::string &) { ++versions; };
+	validation.onValidationHandshakeReceived = [&](const std::string &) { ++handshakes; };
+
+	// Callbacks must be set before start(): use a fresh receiver
+	SignalingService receiver{network->factory("10.0.0.3")};
+	ASSERT_TRUE(receiver.init("pc-c"));
+	receiver.setLocalIPv4("10.0.0.3");
+	receiver.setConnectionCallbacks(connection);
+	receiver.setValidationCallbacks(validation);
+	receiver.start();
+	pcA.registerPeer("pc-c", "10.0.0.3", receiver.getBoundPort());
+
+	pcA.sendConnectRequest("pc-c");
+	pcA.sendConnectAnswer("pc-c", true);
+	pcA.sendDisconnect("pc-c");
+	pcA.sendReadyFlag("pc-c");
+	pcA.sendDataPort("pc-c", 1234);
+	pcA.sendValidationRequest("pc-c", RemoteRequest::Secret);
+	pcA.sendSecretResponse("pc-c", "s");
+	pcA.sendVersionResponse("pc-c", "1.0");
+	pcA.sendValidationHandshake("pc-c");
+
+	EXPECT_TRUE(waitUntilTrue(
+		[&]
+		{
+			return connectRequests.load() == 1 && answers.load() == 1 && disconnects.load() == 1 && readyFlags.load() == 1 && lastDataPort.load() == 1234 &&
+				   lastRequest.load() == static_cast<int>(RemoteRequest::Secret) && versions.load() == 1 && handshakes.load() == 1;
+		}))
+		<< "Each signal type must round-trip through serialization and routing";
+
+	receiver.deinit();
+}
+
+
 TEST_F(SignalingServiceTest, ValidationRequest_IsRoutedToValidationCallbacks)
 {
 	pcA.sendValidationRequest("pc-b", RemoteRequest::Version);
