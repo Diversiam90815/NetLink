@@ -11,12 +11,12 @@ namespace CommunicationTests
 {
 
 
-class MockSession : public ISession
+class MockSession : public netlink::ISession
 {
 public:
 	MOCK_METHOD(bool, isConnected, (), (const, override));
-	MOCK_METHOD(bool, sendMessage, (netlink::InternalMessage &), (override));
-	MOCK_METHOD(void, startReadAsync, (MessageReceivedCallback), (override));
+	MOCK_METHOD(bool, sendMessage, (const netlink::InternalMessage &, netlink::DeliveryMode), (override));
+	MOCK_METHOD(void, startReadAsync, (MessageReceivedCallback, DisconnectedCallback), (override));
 	MOCK_METHOD(void, stopReadAsync, (), (override));
 	MOCK_METHOD(int, getBoundPort, (), (const, override));
 	MOCK_METHOD(std::string, getRemoteAddress, (), (const, override));

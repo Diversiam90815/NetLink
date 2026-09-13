@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include <gmock/gmock.h>
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <mutex>
@@ -14,35 +14,48 @@
 
 using namespace netlink;
 using namespace std::chrono_literals;
-using ::testing::_;
-using ::testing::Return;
 
 
 namespace ConnectionTests
 {
 
-class MockSession : public ISession
+class FakeSession : public ISession
 {
 public:
-	MOCK_METHOD(bool, isConnected, (), (const, override));
-	MOCK_METHOD(bool, sendMessage, (netlink::InternalMessage &), (override));
-	MOCK_METHOD(void, startReadAsync, (MessageReceivedCallback), (override));
-	MOCK_METHOD(void, stopReadAsync, (), (override));
-	MOCK_METHOD(int, getBoundPort, (), (const, override));
+	explicit FakeSession(std::string remote) : remoteAddress(std::move(remote)) {}
+
+	bool			  isConnected() const override { return !closed.load(); }
+	bool			  sendMessage(const InternalMessage &, DeliveryMode) override { return isConnected(); }
+	void			  startReadAsync(MessageReceivedCallback, DisconnectedCallback) override {}
+	void			  stopReadAsync() override {}
+	int				  getBoundPort() const override { return 40000; }
+	std::string		  getRemoteAddress() const override { return remoteAddress; }
+	int				  getRemotePort() const override { return 50000; }
+	void			  close() override { closed.store(true); }
+
+	std::string		  remoteAddress;
+	std::atomic<bool> closed{false};
 };
 
 
 class FakeServer : public IServer
 {
 public:
-	void		   startAccept() override { started = true; }
-	int			   getBoundPort() const override { return boundPort; }
 	void		   setSessionHandler(SessionHandler handler) override { sessionHandler = std::move(handler); }
-	void		   respondToConnectionRequest(bool accepted) override { lastAccepted = accepted; }
+	bool		   start(const std::string &localAddress) override
+	{
+		startedOn = localAddress;
+		started	  = true;
+		return startSucceeds;
+	}
+	void		   stop() override { stopped = true; }
+	int			   getBoundPort() const override { return boundPort; }
 
+	bool		   startSucceeds{true};
 	bool		   started{false};
+	bool		   stopped{false};
+	std::string	   startedOn;
 	int			   boundPort{12345};
-	bool		   lastAccepted{false};
 	SessionHandler sessionHandler;
 };
 
@@ -72,7 +85,8 @@ class FakeTransportFactory : public ITransportFactory
 public:
 	std::unique_ptr<IServer> createServer() override
 	{
-		auto server	  = std::make_unique<FakeServer>();
+		auto server			  = std::make_unique<FakeServer>();
+		server->startSucceeds = !failServerStart;
 		lastServer	  = server.get();
 		serverCreated = true;
 		return server;
@@ -86,6 +100,7 @@ public:
 		return client;
 	}
 
+	bool		failServerStart{false};
 	bool		serverCreated{false};
 	bool		clientCreated{false};
 	FakeServer *lastServer{nullptr};
@@ -387,6 +402,150 @@ TEST_F(ConnectionServiceTest, StatusCallback_FiresOnInitiate)
 		<< "The Initiated status update must be delivered when initiateConnection() begins";
 	EXPECT_NE(std::find(types.begin(), types.end(), ConnectionStatusUpdate::Type::InvitationSent), types.end())
 		<< "The InvitationSent status update must be delivered after successfully sending the invitation";
+}
+
+// ---------------------------------------------------------------------------
+// Transport establishment
+// ---------------------------------------------------------------------------
+
+class ConnectionServiceAcceptorTest : public ConnectionServiceTest
+{
+protected:
+	void SetUp() override
+	{
+		ConnectionServiceTest::SetUp();
+
+		ConnectionServiceCallbacks cb;
+		cb.onStatusUpdate = [this](const ConnectionStatusUpdate &update)
+		{
+			std::lock_guard<std::mutex> lock(updatesMutex);
+			updates.push_back(update.type);
+		};
+		service->setCallbacks(cb);
+	}
+
+	// Local 10.0.0.1 is higher than the remote 10.0.0.0 -> local side becomes the Acceptor
+	void acceptInvitationAsAcceptor()
+	{
+		service->onPeerValidated(makeReadyResult("pc-b", "10.0.0.0"));
+		service->onReceivedInvitation("pc-b");
+		ASSERT_TRUE(service->acceptIncomingConnection("pc-b"));
+		ASSERT_NE(factory.lastServer, nullptr) << "The acceptor role must create a server";
+	}
+
+	void establish()
+	{
+		acceptInvitationAsAcceptor();
+		factory.lastServer->sessionHandler(std::make_shared<FakeSession>("10.0.0.0"));
+		ASSERT_TRUE(waitUntil([&] { return service->isConnected(); }));
+	}
+
+	bool received(ConnectionStatusUpdate::Type type)
+	{
+		std::lock_guard<std::mutex> lock(updatesMutex);
+		return std::find(updates.begin(), updates.end(), type) != updates.end();
+	}
+
+	std::mutex								  updatesMutex;
+	std::vector<ConnectionStatusUpdate::Type> updates;
+};
+
+
+TEST_F(ConnectionServiceAcceptorTest, Acceptor_StartsServerOnLocalAddress)
+{
+	acceptInvitationAsAcceptor();
+
+	EXPECT_TRUE(factory.lastServer->started) << "The acceptor must actually start listening, otherwise it announces port 0";
+	EXPECT_EQ(factory.lastServer->startedOn, "10.0.0.1") << "The server must listen on the selected adapter address";
+}
+
+
+TEST_F(ConnectionServiceAcceptorTest, Acceptor_FailsWhenServerCannotListen)
+{
+	factory.failServerStart = true;
+
+	service->onPeerValidated(makeReadyResult("pc-b", "10.0.0.0"));
+	service->onReceivedInvitation("pc-b");
+
+	EXPECT_FALSE(service->acceptIncomingConnection("pc-b")) << "A server that cannot listen must fail the connection attempt";
+	EXPECT_EQ(service->getConnectionState(), ConnectionStateInternal::Idle);
+}
+
+
+TEST_F(ConnectionServiceAcceptorTest, Acceptor_SessionFromExpectedPeer_EstablishesConnection)
+{
+	acceptInvitationAsAcceptor();
+
+	auto session = std::make_shared<FakeSession>("10.0.0.0");
+	factory.lastServer->sessionHandler(session);
+
+	EXPECT_TRUE(waitUntil([&] { return service->isConnected(); })) << "A session from the negotiated peer must establish the connection";
+	EXPECT_TRUE(waitUntil([&] { return received(ConnectionStatusUpdate::Type::Established); }));
+	EXPECT_TRUE(factory.lastServer->stopped) << "Once connected, the server must stop accepting further connections";
+	EXPECT_FALSE(session->closed.load());
+}
+
+
+TEST_F(ConnectionServiceAcceptorTest, Acceptor_SessionFromUnexpectedAddress_IsRejected)
+{
+	acceptInvitationAsAcceptor();
+
+	auto intruder = std::make_shared<FakeSession>("10.0.0.99");
+	factory.lastServer->sessionHandler(intruder);
+
+	EXPECT_TRUE(waitUntil([&] { return intruder->closed.load(); })) << "A connection from any other host must be closed";
+	EXPECT_FALSE(service->isConnected());
+}
+
+
+TEST_F(ConnectionServiceAcceptorTest, TransportDisconnected_ClosesConnection)
+{
+	establish();
+
+	service->onTransportDisconnected("connection reset");
+
+	EXPECT_TRUE(waitUntil([&] { return !service->isConnected(); })) << "A lost transport must tear down the connection";
+	EXPECT_TRUE(waitUntil([&] { return received(ConnectionStatusUpdate::Type::Closed); })) << "A lost transport must be reported as Closed";
+	EXPECT_EQ(service->getConnectionState(), ConnectionStateInternal::Idle);
+}
+
+
+TEST_F(ConnectionServiceAcceptorTest, TransportDisconnected_WithoutConnection_IsIgnored)
+{
+	service->onTransportDisconnected("stale notification");
+
+	std::this_thread::sleep_for(50ms);
+	EXPECT_FALSE(received(ConnectionStatusUpdate::Type::Closed));
+}
+
+
+TEST_F(ConnectionServiceAcceptorTest, CloseConnection_WhenConnected_ReportsClosed)
+{
+	establish();
+
+	EXPECT_TRUE(service->closeConnection("pc-b"));
+
+	EXPECT_FALSE(service->isConnected());
+	EXPECT_TRUE(received(ConnectionStatusUpdate::Type::Closing)) << "An established connection must go through the closing path (sends Disconnect to the peer)";
+	EXPECT_TRUE(received(ConnectionStatusUpdate::Type::Closed));
+}
+
+
+TEST_F(ConnectionServiceTest, Connector_ConnectsOnceRemoteIsReady)
+{
+	// Local 10.0.0.1 is lower than the remote 10.0.0.2 -> local side becomes the Connector
+	service->onPeerValidated(makeReadyResult("pc-b", "10.0.0.2", 7000));
+	service->onReceivedInvitation("pc-b");
+	ASSERT_TRUE(service->acceptIncomingConnection("pc-b"));
+	ASSERT_NE(factory.lastClient, nullptr) << "The connector role must create a client";
+
+	service->onReceivedConnectionReadyFlag("pc-b");
+
+	EXPECT_TRUE(factory.lastClient->connectCalled);
+	EXPECT_EQ(factory.lastClient->connectedHost, "10.0.0.2");
+
+	factory.lastClient->connectHandler(std::make_shared<FakeSession>("10.0.0.2"));
+	EXPECT_TRUE(waitUntil([&] { return service->isConnected(); }));
 }
 
 } // namespace ConnectionTests

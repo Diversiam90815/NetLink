@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "Discovery/DiscoveryService.h"
+#include "FakeDatagramNetwork.h"
 
 using namespace std::chrono_literals;
 
@@ -35,7 +36,7 @@ static DiscoveryConfig makeConfig(const std::string &name = "pc-a", const std::s
 	cfg.localIPv4		 = ip;
 	cfg.discoveryPort	 = discoveryPort;
 	cfg.signalingPort	 = sigPort;
-	cfg.broadCastAddress = "127.0.0.1"; // loopback avoids real broadcast during tests
+	cfg.broadcastAddress = "127.0.0.1"; // loopback avoids real broadcast during tests
 	return cfg;
 }
 
@@ -300,6 +301,133 @@ TEST(DiscoveryService, TwoServices_DiscoverEachOtherOverLoopback)
 	svcB.deinit();
 
 	SUCCEED() << "DiscoveryService instances must be able to start/broadcast/receive over real sockets without crashing";
+}
+
+
+// ---------------------------------------------------------------------------
+// Deterministic discovery over the in-memory network
+// ---------------------------------------------------------------------------
+
+class FakeNetworkDiscoveryTest : public ::testing::Test
+{
+protected:
+	static DiscoveryConfig makeLanConfig(const std::string &name, const std::string &ip, int signalingPort)
+	{
+		DiscoveryConfig cfg;
+		cfg.displayName		 = name;
+		cfg.localIPv4		 = ip;
+		cfg.signalingPort	 = signalingPort;
+		cfg.discoveryPort	 = 5555;
+		cfg.broadcastAddress = FakeNet::BroadcastAddress;
+		return cfg;
+	}
+
+	struct Found
+	{
+		std::mutex					   mutex;
+		std::vector<DiscoveryEndpoint> endpoints;
+
+		void						   add(const DiscoveryEndpoint &ep)
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			endpoints.push_back(ep);
+		}
+
+		size_t count()
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			return endpoints.size();
+		}
+
+		std::vector<DiscoveryEndpoint> snapshot()
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			return endpoints;
+		}
+	};
+
+	std::shared_ptr<FakeNet::FakeDatagramNetwork> network = FakeNet::FakeDatagramNetwork::create();
+	Found										  foundByA;
+	Found										  foundByB;
+	DiscoveryService							  svcA{network->factory("10.0.0.1")};
+	DiscoveryService							  svcB{network->factory("10.0.0.2")};
+};
+
+
+TEST_F(FakeNetworkDiscoveryTest, TwoHosts_DiscoverEachOther)
+{
+	svcA.setOnRemoteFound([this](const DiscoveryEndpoint &ep) { foundByA.add(ep); });
+	svcB.setOnRemoteFound([this](const DiscoveryEndpoint &ep) { foundByB.add(ep); });
+
+	ASSERT_TRUE(svcA.init(makeLanConfig("pc-a", "10.0.0.1", 6001)));
+	ASSERT_TRUE(svcB.init(makeLanConfig("pc-b", "10.0.0.2", 6002)));
+
+	svcA.startDiscovery();
+	svcB.startDiscovery();
+
+	ASSERT_TRUE(waitUntil([this] { return foundByA.count() >= 1 && foundByB.count() >= 1; }, 3s)) << "Both hosts must find each other via broadcast";
+
+	const auto seenByA = foundByA.snapshot();
+	EXPECT_EQ(seenByA[0].displayName, "pc-b");
+	EXPECT_EQ(seenByA[0].IPAddress, "10.0.0.2");
+	EXPECT_EQ(seenByA[0].port, 6002) << "The announced port is the signaling port";
+}
+
+
+TEST_F(FakeNetworkDiscoveryTest, OwnAnnouncement_IsIgnored_AndRepeatsDoNotRetrigger)
+{
+	svcA.setOnRemoteFound([this](const DiscoveryEndpoint &ep) { foundByA.add(ep); });
+	svcB.setOnRemoteFound([this](const DiscoveryEndpoint &ep) { foundByB.add(ep); });
+
+	ASSERT_TRUE(svcA.init(makeLanConfig("pc-a", "10.0.0.1", 6001)));
+	ASSERT_TRUE(svcB.init(makeLanConfig("pc-b", "10.0.0.2", 6002)));
+
+	svcA.startDiscovery();
+	svcB.startDiscovery();
+
+	// Longer than one announce interval, so every host announced at least twice
+	std::this_thread::sleep_for(2500ms);
+
+	for (const auto &ep : foundByA.snapshot())
+		EXPECT_NE(ep.IPAddress, "10.0.0.1") << "A host must never discover itself";
+
+	EXPECT_EQ(foundByA.count(), 1u) << "Periodic re-announcements must not trigger the callback again";
+	EXPECT_EQ(foundByB.count(), 1u);
+}
+
+
+TEST_F(FakeNetworkDiscoveryTest, ChangedSignalingPort_IsReannouncedAndReported)
+{
+	svcA.setOnRemoteFound([this](const DiscoveryEndpoint &ep) { foundByA.add(ep); });
+
+	ASSERT_TRUE(svcA.init(makeLanConfig("pc-a", "10.0.0.1", 6001)));
+	ASSERT_TRUE(svcB.init(makeLanConfig("pc-b", "10.0.0.2", 6002)));
+	svcA.startDiscovery();
+	svcB.startDiscovery();
+
+	ASSERT_TRUE(waitUntil([this] { return foundByA.count() == 1; }, 3s));
+
+	// pc-b rebinds its signaling socket (e.g. adapter change): no socket rebind, but an immediate re-announcement
+	ASSERT_TRUE(svcB.init(makeLanConfig("pc-b", "10.0.0.2", 7002)));
+
+	ASSERT_TRUE(waitUntil([this] { return foundByA.count() == 2; }, 3s)) << "An updated remote must be reported again";
+	EXPECT_EQ(foundByA.snapshot()[1].port, 7002);
+	EXPECT_EQ(svcA.getEndpointFromIP("10.0.0.2").port, 7002) << "The stored endpoint must be updated, not duplicated";
+}
+
+
+TEST_F(FakeNetworkDiscoveryTest, StopAndRestartDiscovery)
+{
+	ASSERT_TRUE(svcA.init(makeLanConfig("pc-a", "10.0.0.1", 6001)));
+
+	svcA.startDiscovery();
+	EXPECT_TRUE(svcA.isDiscovering());
+
+	svcA.stopDiscovery();
+	EXPECT_FALSE(svcA.isDiscovering());
+
+	EXPECT_NO_THROW(svcA.startDiscovery()) << "Discovery must be restartable after stopDiscovery()";
+	EXPECT_TRUE(svcA.isDiscovering());
 }
 
 } // namespace DiscoveryTests
