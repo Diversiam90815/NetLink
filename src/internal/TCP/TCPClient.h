@@ -1,36 +1,46 @@
 /*
   ==============================================================================
 	Module:         TCPClient
-	Description:    Client implementation used for the multiplayer mode
+	Description:    Connects to a remote TCP server and provides a TCPSession
   ==============================================================================
 */
 
 #pragma once
 
+#include <atomic>
 #include <memory>
+#include <mutex>
+#include <thread>
 
 #include "Transport/TransportInterfaces.h"
-#include "TCPSession.h"
 
 
-// Implements a TCP client responsible for connecting to a remote host and establishing a TCPSession
-class TCPClient : public IClient
+namespace netlink
+{
+
+class TCPClient final : public IClient
 {
 public:
 	TCPClient() = default;
 	~TCPClient() override;
+	TCPClient(const TCPClient &)			= delete;
+	TCPClient &operator=(const TCPClient &) = delete;
 
-	// Initiate asynchronous connection to host:port.
-	void connect(const std::string &host, unsigned short port) override;
+	void	   setConnectHandler(ConnectHandler handler) override;
+	void	   setConnectTimeoutHandler(ConnectTimeoutHandler handler) override;
 
-	void setConnectHandler(ConnectHandler handler) override;
-	void setConnectTimeoutHandler(ConnectTimeoutHandler handler) override;
+	void	   connect(const std::string &host, unsigned short port) override;
 
 private:
-	ConnectHandler		  mConnectHandler;
-	ConnectTimeoutHandler mConnectTimeoutHandler;
+	// Cancels a pending attempt; returns once its handlers can no longer fire
+	void							   cancel();
 
-	const int			  mTimeoutInSeconds = 10;
+	std::mutex						   mMutex;
+	ConnectHandler					   mConnectHandler;
+	ConnectTimeoutHandler			   mConnectTimeoutHandler;
 
-	std::thread			  mConnectThread;
+	std::thread						   mThread;
+	std::shared_ptr<std::atomic<bool>> mCancelled;
 };
+
+} // namespace netlink

@@ -1,71 +1,57 @@
 /*
   ==============================================================================
 	Module:         TCPSession
-	Description:    Managing the socket and session used for the multiplayer mode
+	Description:    Message based session on top of a connected TCP stream
   ==============================================================================
 */
 
 #pragma once
 
-#include <vector>
+#include <atomic>
+#include <memory>
+#include <thread>
 
-#include "../Util/ThreadBase.h"
 #include "Transport/TransportInterfaces.h"
-#include "../Socket/NetlinkSocket.h"
-#include "Messaging/MessageFramer.h"
+#include "Socket/TcpStream.h"
 
 
-// Concrete TCP session implementing message-based async read/write abstraction.
-class TCPSession : public ISession, public std::enable_shared_from_this<TCPSession>
+namespace netlink
+{
+
+class TCPSession final : public ISession
 {
 public:
-	explicit TCPSession(NetlinkSocket socket);
-	~TCPSession();
+	explicit TCPSession(net::TcpStream stream);
+	~TCPSession() override;
+	TCPSession(const TCPSession &)			  = delete;
+	TCPSession &operator=(const TCPSession &) = delete;
 
-	bool		isConnected() const override { return mSocket.isOpen() && mSocket.isConnected(); }
+	bool		isConnected() const override;
 
-	bool		sendMessage(netlink::InternalMessage &message) override;
+	bool		sendMessage(const InternalMessage &message, DeliveryMode mode) override;
 
-	void		startReadAsync(MessageReceivedCallback callback) override;
+	void		startReadAsync(MessageReceivedCallback onMessage, DisconnectedCallback onDisconnected) override;
 	void		stopReadAsync() override;
 
-	int			getBoundPort() const override { return mSocket.getBoundPort(); }
-	std::string getRemoteAddress() const override { return mSocket.getRemoteAddress(); }
-	int			getRemotePort() const override { return mSocket.getRemotePort(); }
-	void		close() override
-	{
-		mSocket.close();
-		stopReadAsync();
-	}
+	int			getBoundPort() const override;
+	std::string getRemoteAddress() const override;
+	int			getRemotePort() const override;
+
+	void		close() override;
 
 private:
-	class ReadThread : public ThreadBase
-	{
-	public:
-		explicit ReadThread(TCPSession *owner) : mOwner(owner) {}
+	// Everything the read thread touches
+	struct State;
 
-	protected:
-		void run() override
-		{
-			while (isRunning())
-			{
-				if (mOwner)
-					mOwner->pumpReceive();
-				waitForEvent(20);
-			}
-		}
+	static void			   readLoop(const std::shared_ptr<State>			 &state,
+									const std::shared_ptr<std::atomic<bool>> &stopFlag,
+									const MessageReceivedCallback			 &onMessage,
+									const DisconnectedCallback				 &onDisconnected);
 
-	private:
-		TCPSession *mOwner = nullptr;
-	};
+	// Requests the read loop to stop and hands out its thread for joining
+	std::thread			   requestReadStop();
 
-	// blocking receive w/ short timeout, frames messages, invokes mCallback
-	void						pumpReceive();
-
-	NetlinkSocket				mSocket;
-	MessageReceivedCallback		mCallback;
-	std::unique_ptr<ReadThread> mReadThread;
-
-	std::mutex					mSendMutex;
-	std::vector<uint8_t>		mRecvAccumulator; // holds partial frames across calls
+	std::shared_ptr<State> mState;
 };
+
+} // namespace netlink

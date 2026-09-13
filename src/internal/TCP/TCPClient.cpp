@@ -1,57 +1,91 @@
 /*
   ==============================================================================
 	Module:         TCPClient
-	Description:    Client implementation used for the multiplayer mode
+	Description:    Connects to a remote TCP server and provides a TCPSession
   ==============================================================================
 */
 
 #include "TCPClient.h"
+
+#include "NetLinkConstants.h"
 #include "NetLinkLog.h"
-#include "../Socket/NetlinkSocket.h"
+#include "Socket/TcpStream.h"
+#include "TCPSession.h"
+#include "Util/ThreadUtils.h"
 
 
+namespace netlink
+{
 
 TCPClient::~TCPClient()
 {
-	if (mConnectThread.joinable())
-		mConnectThread.join();
-}
-
-
-void TCPClient::connect(const std::string &host, unsigned short port)
-{
-	if (mConnectThread.joinable())
-		mConnectThread.join();
-
-	mConnectThread = std::thread(
-		[this, host, port]()
-		{
-			auto sock = NetlinkSocket::createTCP();
-			sock.bind("", 0, {}); // ephemeral local port
-
-			bool ok = sock.connect(host, port, mTimeoutInSeconds * 1000);
-
-			if (ok)
-			{
-				auto session = std::make_shared<TCPSession>(std::move(sock));
-				if (mConnectHandler)
-					mConnectHandler(session);
-			}
-			else if (mConnectTimeoutHandler)
-			{
-				mConnectTimeoutHandler();
-			}
-		});
+	cancel();
 }
 
 
 void TCPClient::setConnectHandler(ConnectHandler handler)
 {
-	mConnectHandler = handler;
+	std::lock_guard<std::mutex> lock(mMutex);
+	mConnectHandler = std::move(handler);
 }
 
 
 void TCPClient::setConnectTimeoutHandler(ConnectTimeoutHandler handler)
 {
-	mConnectTimeoutHandler = handler;
+	std::lock_guard<std::mutex> lock(mMutex);
+	mConnectTimeoutHandler = std::move(handler);
 }
+
+
+void TCPClient::connect(const std::string &host, unsigned short port)
+{
+	cancel();
+
+	std::lock_guard<std::mutex> lock(mMutex);
+
+	auto						cancelled = std::make_shared<std::atomic<bool>>(false);
+	mCancelled							  = cancelled;
+
+	// The thread owns copies of everything it uses, so it never touches this object
+	mThread								  = std::thread(
+		[cancelled, remote = net::SocketAddress{host, port}, onConnected = mConnectHandler, onFailed = mConnectTimeoutHandler]()
+		{
+			auto stream = net::TcpStream::connect(remote, internal::TcpConnectTimeout, [&cancelled]() { return cancelled->load(); });
+
+			if (cancelled->load())
+				return;
+
+			if (!stream)
+			{
+				NETLINK_LOG_ERROR("TCPClient: connecting to {} failed: {}", remote.toString(), net::toString(stream.error()));
+
+				if (onFailed)
+					onFailed();
+				return;
+			}
+
+			NETLINK_LOG_INFO("TCPClient: connected to {}", remote.toString());
+
+			if (onConnected)
+				onConnected(std::make_shared<TCPSession>(std::move(*stream)));
+		});
+}
+
+
+void TCPClient::cancel()
+{
+	std::thread thread;
+
+	{
+		std::lock_guard<std::mutex> lock(mMutex);
+
+		if (mCancelled)
+			mCancelled->store(true);
+
+		thread = std::move(mThread);
+	}
+
+	joinOrDetach(thread);
+}
+
+} // namespace netlink

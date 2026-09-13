@@ -1,45 +1,48 @@
 /*
   ==============================================================================
 	Module:         TCPServer
-	Description:    Server implementation for TCP Connections
+	Description:    Accepts inbound TCP connections and wraps them in TCPSessions
   ==============================================================================
 */
 
 #pragma once
 
+#include <atomic>
 #include <memory>
+#include <mutex>
+#include <thread>
 
-#include "../Util/ThreadBase.h"
-#include "../Socket/NetlinkSocket.h"
 #include "Transport/TransportInterfaces.h"
-#include "TCPSession.h"
 
 
-// Implements a TCP server that listens for and accepts incoming connections, TCPSession instances for each accepted socket.
-class TCPServer : public IServer, private ThreadBase
+namespace netlink
+{
+
+class TCPServer final : public IServer
 {
 public:
 	TCPServer() = default;
 	~TCPServer() override;
+	TCPServer(const TCPServer &)			= delete;
+	TCPServer &operator=(const TCPServer &) = delete;
 
-	bool bindAndListen(const std::string &address, int port, int backlog = 8);
+	void	   setSessionHandler(SessionHandler handler) override;
 
-	void startAccept() override;
-	void stopAccept();
+	bool	   start(const std::string &localAddress) override;
+	void	   stop() override;
 
-	int	 getBoundPort() const override;
-
-	void setSessionHandler(SessionHandler handler) override;
-
-	void respondToConnectionRequest(bool accepted) override;
+	int		   getBoundPort() const override { return mBoundPort.load(); }
 
 private:
-	void						run() override;
+	struct AcceptState;
 
+	static void					 acceptLoop(const std::shared_ptr<AcceptState> &state);
 
-	NetlinkSocket				mAcceptorSocket; // TCP, listening
-	int							mBoundPort{0};
-
-	std::shared_ptr<TCPSession> mPendingSession;
-	SessionHandler				mSessionHandler;
+	std::mutex					 mMutex;
+	std::shared_ptr<AcceptState> mState;
+	std::thread					 mThread;
+	SessionHandler				 mSessionHandler;
+	std::atomic<int>			 mBoundPort{0};
 };
+
+} // namespace netlink

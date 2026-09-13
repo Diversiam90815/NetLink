@@ -24,4 +24,8 @@ public:
 	virtual std::unique_ptr<IClient> createClient() = 0;
 };
 
+
+// Creates the factory for the transport selected in NetLinkConfig
+std::unique_ptr<ITransportFactory> createTransportFactory(TransportKind kind);
+
 } // namespace netlink

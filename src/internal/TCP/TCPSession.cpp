@@ -1,80 +1,198 @@
 /*
   ==============================================================================
 	Module:         TCPSession
-	Description:    Managing the socket and session used for the multiplayer mode
+	Description:    Message based session on top of a connected TCP stream
   ==============================================================================
 */
 
 #include "TCPSession.h"
-#include "NetLinkLog.h"
+
+#include <atomic>
+#include <mutex>
+#include <thread>
+
+#include "Messaging/MessageFramer.h"
 #include "NetLinkConstants.h"
+#include "NetLinkLog.h"
+#include "Util/ThreadUtils.h"
 
 
-TCPSession::TCPSession(NetlinkSocket socket) : mSocket(std::move(socket)) {}
+namespace netlink
+{
+
+struct TCPSession::State
+{
+	explicit State(net::TcpStream s) : stream(std::move(s)) {}
+
+	net::TcpStream					   stream;
+	std::atomic<bool>				   connected{true};
+
+	std::mutex						   sendMutex;
+
+	std::mutex						   readMutex; // guards readThread / readStopFlag
+	std::thread						   readThread;
+	std::shared_ptr<std::atomic<bool>> readStopFlag;
+};
+
+
+TCPSession::TCPSession(net::TcpStream stream) : mState(std::make_shared<State>(std::move(stream))) {}
 
 
 TCPSession::~TCPSession()
 {
-	stopReadAsync();
-	mSocket.close();
+	close();
 }
 
 
-bool TCPSession::sendMessage(netlink::InternalMessage &message)
+bool TCPSession::isConnected() const
+{
+	return mState->connected.load();
+}
+
+
+bool TCPSession::sendMessage(const InternalMessage &message, DeliveryMode /*mode: TCP is always reliable & ordered*/)
 {
 	if (!isConnected())
 		return false;
 
-	auto						frame = netlink::MessageFramer::serialize(message);
-
-	std::lock_guard<std::mutex> lock(mSendMutex);
-
-	size_t						totalSent = 0;
-	while (totalSent < frame.size())
+	if (message.data.size() > internal::MaxMessagePayload)
 	{
-		int sent = mSocket.sendTo("", 0, frame.data() + totalSent, static_cast<int>(frame.size() - totalSent));
+		NETLINK_LOG_ERROR("Message of type {} exceeds the maximum payload ({} > {} bytes)", message.type, message.data.size(), internal::MaxMessagePayload);
+		return false;
+	}
 
-		if (sent <= 0)
-		{
-			NETLINK_LOG_ERROR("TCPSession::sendMessage failed, sent={}", sent);
-			return false;
-		}
+	const auto					frame = MessageFramer::serialize(message);
 
-		totalSent += static_cast<size_t>(sent);
+	std::lock_guard<std::mutex> lock(mState->sendMutex);
+
+	if (auto sent = mState->stream.sendAll(frame, internal::TcpSendTimeout); !sent)
+	{
+		NETLINK_LOG_ERROR("TCPSession: sending failed ({}), dropping connection", net::toString(sent.error()));
+
+		// The stream is unusable now, shutting it down lets the read loop report the disconnect.
+		mState->connected.store(false);
+		mState->stream.shutdown();
+		return false;
 	}
 
 	return true;
 }
 
 
-void TCPSession::startReadAsync(MessageReceivedCallback callback)
+void TCPSession::startReadAsync(MessageReceivedCallback onMessage, DisconnectedCallback onDisconnected)
 {
-	mCallback	= std::move(callback);
-	mReadThread = std::make_unique<ReadThread>(this);
-	mReadThread->start();
+	stopReadAsync();
+
+	std::lock_guard<std::mutex> lock(mState->readMutex);
+
+	auto						stopFlag = std::make_shared<std::atomic<bool>>(false);
+	mState->readStopFlag				 = stopFlag;
+	mState->readThread					 = std::thread([state = mState, stopFlag, onMessage = std::move(onMessage), onDisconnected = std::move(onDisconnected)]()
+													   { readLoop(state, stopFlag, onMessage, onDisconnected); });
 }
 
 
 void TCPSession::stopReadAsync()
 {
-	if (mReadThread)
+	std::thread thread = requestReadStop();
+	joinOrDetach(thread);
+}
+
+
+std::thread TCPSession::requestReadStop()
+{
+	std::lock_guard<std::mutex> lock(mState->readMutex);
+
+	if (mState->readStopFlag)
+		mState->readStopFlag->store(true);
+
+	return std::move(mState->readThread);
+}
+
+
+int TCPSession::getBoundPort() const
+{
+	return mState->stream.localAddress().port;
+}
+
+
+std::string TCPSession::getRemoteAddress() const
+{
+	return mState->stream.remoteAddress().ip;
+}
+
+
+int TCPSession::getRemotePort() const
+{
+	return mState->stream.remoteAddress().port;
+}
+
+
+void TCPSession::close()
+{
+	// Stop flag first, so the read loop does not report the local shutdown as a lost connection
+	std::thread thread = requestReadStop();
+
+	mState->connected.store(false);
+	mState->stream.shutdown();
+
+	joinOrDetach(thread);
+}
+
+
+void TCPSession::readLoop(const std::shared_ptr<State>			   &state,
+						  const std::shared_ptr<std::atomic<bool>> &stopFlag,
+						  const MessageReceivedCallback			   &onMessage,
+						  const DisconnectedCallback			   &onDisconnected)
+{
+	FrameDecoder		 decoder;
+	std::vector<uint8_t> buffer(internal::PackageBufferSize);
+
+	auto				 reportDisconnect = [&](const std::string &reason)
 	{
-		mReadThread->stop();
-		mReadThread.reset();
+		state->connected.store(false);
+		state->stream.shutdown();
+
+		// A local close()/stopReadAsync() is not a lost connection
+		if (stopFlag->load())
+			return;
+
+		NETLINK_LOG_WARNING("TCPSession: connection to {} lost: {}", state->stream.remoteAddress().toString(), reason);
+
+		if (onDisconnected)
+			onDisconnected(reason);
+	};
+
+	while (!stopFlag->load())
+	{
+		auto received = state->stream.receiveSome(buffer, internal::SocketPollInterval);
+
+		if (!received)
+		{
+			if (received.error() == net::SocketError::Timeout)
+				continue;
+
+			reportDisconnect(std::string(net::toString(received.error())));
+			return;
+		}
+
+		decoder.feed(std::span<const uint8_t>(buffer.data(), *received));
+
+		while (auto message = decoder.next())
+		{
+			if (stopFlag->load())
+				return;
+
+			if (onMessage)
+				onMessage(std::move(*message));
+		}
+
+		if (decoder.hasError())
+		{
+			reportDisconnect("protocol error: invalid frame length");
+			return;
+		}
 	}
 }
 
-
-void TCPSession::pumpReceive()
-{
-	ReceivedPacket packet;
-	if (!mSocket.receive(packet, 20))
-		return;
-
-	netlink::InternalMessage message;
-
-	// @TODO
-
-	if (mCallback)
-		mCallback(message);
-}
+} // namespace netlink
