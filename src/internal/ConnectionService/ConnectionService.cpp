@@ -68,8 +68,9 @@ void netlink::ConnectionService::onDataPortReceived(const std::string &computerN
 netlink::ConnectionService::~ConnectionService()
 {
 	{
-		// Tear down transports first
+		// Tear down timeouts and transports first: their threads post into the task queue
 		std::lock_guard<std::mutex> lock(mConnectingMutex);
+		disarmAllTimeouts();
 		mCurrentRequest.reset();
 	}
 
@@ -147,7 +148,7 @@ bool netlink::ConnectionService::initiateConnection(const std::string &computerN
 	mCurrentRequest->state = ConnectionStateInternal::InvitationSent;
 
 	// Start timeout waiting for remote to respond to our invitation
-	mTimeoutService.startTimeout({ConnectionTimeouts::Invitation, computerName}, mConfig.invitationTimeoutMs, [this](const TimeoutKey &key) { onTimeout(key); });
+	armTimeout({ConnectionTimeouts::Invitation, computerName}, mConfig.invitationTimeoutMs);
 
 	NETLINK_LOG_INFO("Connection invitation sent to {}", computerName);
 	return true;
@@ -179,7 +180,7 @@ bool netlink::ConnectionService::acceptIncomingConnection(const std::string &com
 	NETLINK_LOG_INFO("Accepting invitation from {}", computerName);
 
 	// Start connection timeout
-	mTimeoutService.startTimeout({ConnectionTimeouts::Connection, computerName}, mConfig.connectionTimeoutMs, [this](const TimeoutKey &key) { onTimeout(key); });
+	armTimeout({ConnectionTimeouts::Connection, computerName}, mConfig.connectionTimeoutMs);
 
 	// send acceptance
 	notifyStatus(ConnectionStatusUpdate::Type::Accepted, "Invitation from " + computerName + " accepted");
@@ -251,9 +252,9 @@ bool netlink::ConnectionService::closeConnection(const std::string &computerName
 
 	// cancel all timeouts for this connection
 	if (!remote.empty())
-		mTimeoutService.cancelByIdentifier(remote);
+		disarmTimeouts([&remote](const TimeoutKey &key) { return key.identifier == remote; });
 	else
-		mTimeoutService.cancelAll();
+		disarmAllTimeouts();
 
 	// only proceed if we have an actual connection in progress or established
 	if (!isConnected() && !isConnecting())
@@ -415,7 +416,7 @@ void netlink::ConnectionService::onReceivedInvitation(const std::string &compute
 	// Ask the app (exactly once) and start a timeout in case it never responds
 	notifyStatus(ConnectionStatusUpdate::Type::InvitationReceived, "Invitation from " + computerName);
 
-	mTimeoutService.startTimeout({ConnectionTimeouts::Invitation, computerName}, mConfig.invitationTimeoutMs, [this](const TimeoutKey &key) { onTimeout(key); });
+	armTimeout({ConnectionTimeouts::Invitation, computerName}, mConfig.invitationTimeoutMs);
 }
 
 
@@ -437,7 +438,7 @@ void netlink::ConnectionService::onReceivedAnswerToInvite(const std::string &com
 	}
 
 	// cancel invitation timeout
-	mTimeoutService.cancelTimeout({ConnectionTimeouts::Invitation, computerName});
+	disarmTimeouts([&computerName](const TimeoutKey &key) { return key == TimeoutKey{ConnectionTimeouts::Invitation, computerName}; });
 
 	if (connectionAccepted)
 	{
@@ -449,7 +450,7 @@ void netlink::ConnectionService::onReceivedAnswerToInvite(const std::string &com
 		notifyStatus(ConnectionStatusUpdate::Type::Accepted, "Connection accepted by " + computerName);
 
 		// start connection timeout
-		mTimeoutService.startTimeout({ConnectionTimeouts::Connection, computerName}, mConfig.connectionTimeoutMs, [this](const TimeoutKey &key) { onTimeout(key); });
+		armTimeout({ConnectionTimeouts::Connection, computerName}, mConfig.connectionTimeoutMs);
 
 		// start role negotiation
 		if (!determineLocalSessionRole())
@@ -481,7 +482,7 @@ void netlink::ConnectionService::onReceivedConnectionReadyFlag(const std::string
 
 	NETLINK_LOG_INFO("Received ready flag from {}", computerName);
 
-	mTimeoutService.cancelTimeout({ConnectionTimeouts::ReadyFlag, computerName});
+	disarmTimeouts([&computerName](const TimeoutKey &key) { return key == TimeoutKey{ConnectionTimeouts::ReadyFlag, computerName}; });
 	mReadySync.setRemoteReady();
 
 	// If we are the Connector, the Acceptor's data port arrived before its ready flag
@@ -515,7 +516,7 @@ void netlink::ConnectionService::clearCurrentConnection()
 	mConnected.store(false);
 	mConnecting.store(false);
 	mRetryPolicy.reset();
-	mTimeoutService.cancelAll();
+	disarmAllTimeouts();
 	mReadySync.reset();
 }
 
@@ -609,8 +610,7 @@ bool netlink::ConnectionService::determineLocalSessionRole()
 
 		sendConnectionReadyFlag(mCurrentRequest->remote.displayName, true);
 
-		mTimeoutService.startTimeout({ConnectionTimeouts::ReadyFlag, mCurrentRequest->remote.displayName}, mConfig.readyFlagTimeoutMs,
-									 [this](const TimeoutKey &key) { onTimeout(key); });
+		armTimeout({ConnectionTimeouts::ReadyFlag, mCurrentRequest->remote.displayName}, mConfig.readyFlagTimeoutMs);
 	}
 	else if (role == SessionRole::Connector)
 	{
@@ -645,8 +645,7 @@ bool netlink::ConnectionService::determineLocalSessionRole()
 		else
 		{
 			// Wait for ReadyFlag from Acceptor (handled in onReceivedConnectionReadyFlag)
-			mTimeoutService.startTimeout({ConnectionTimeouts::ReadyFlag, mCurrentRequest->remote.displayName}, mConfig.readyFlagTimeoutMs,
-										 [this](const TimeoutKey &key) { onTimeout(key); });
+			armTimeout({ConnectionTimeouts::ReadyFlag, mCurrentRequest->remote.displayName}, mConfig.readyFlagTimeoutMs);
 		}
 	}
 	else
@@ -693,7 +692,7 @@ void netlink::ConnectionService::onTransportEstablished(const ISession::pointer 
 	mConnected.store(true);
 	mConnecting.store(false);
 
-	mTimeoutService.cancelAll();
+	disarmAllTimeouts();
 
 	ConnectionStatusUpdate update;
 	update.type	   = ConnectionStatusUpdate::Type::Established;
@@ -728,9 +727,60 @@ void netlink::ConnectionService::setTransportFactory(ITransportFactory &transpor
 }
 
 
+void netlink::ConnectionService::armTimeout(const TimeoutKey &key, int timeoutMs)
+{
+	// Caller must hold mConnectingMutex
+	const uint64_t generation = ++mTimeoutGeneration;
+	mArmedTimeouts[key]		  = generation;
+
+	// The timeout thread only posts: handling needs mConnectingMutex, and cancelling happens while holding it
+	mTimeoutService.startTimeout(key, timeoutMs,
+								 [this, generation](const TimeoutKey &expired)
+								 {
+									 mTaskQueue.post(
+										 [this, expired, generation]()
+										 {
+											 std::lock_guard<std::mutex> lock(mConnectingMutex);
+
+											 // Ignore a timeout that was cancelled or restarted while this task was queued
+											 auto it = mArmedTimeouts.find(expired);
+											 if (it == mArmedTimeouts.end() || it->second != generation)
+												 return;
+
+											 mArmedTimeouts.erase(it);
+											 onTimeout(expired);
+										 });
+								 });
+}
+
+
+void netlink::ConnectionService::disarmTimeouts(const std::function<bool(const TimeoutKey &)> &matches)
+{
+	// Caller must hold mConnectingMutex
+	for (auto it = mArmedTimeouts.begin(); it != mArmedTimeouts.end();)
+	{
+		if (matches(it->first))
+		{
+			mTimeoutService.cancelTimeout(it->first);
+			it = mArmedTimeouts.erase(it);
+		}
+		else
+			++it;
+	}
+}
+
+
+void netlink::ConnectionService::disarmAllTimeouts()
+{
+	// Caller must hold mConnectingMutex
+	mArmedTimeouts.clear();
+	mTimeoutService.cancelAll();
+}
+
+
 void netlink::ConnectionService::onTimeout(const TimeoutKey &key)
 {
-	std::lock_guard<std::mutex> lock(mConnectingMutex);
+	// Caller must hold mConnectingMutex
 
 	if (key.category == ConnectionTimeouts::Connection)
 	{

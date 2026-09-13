@@ -9,6 +9,8 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
+#include <map>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -140,7 +142,10 @@ private:
 	// Define role
 	bool							 determineLocalSessionRole();
 
-	// Timeout expiry handler
+	// Timeouts (caller must hold mConnectingMutex). Expiry is handled on the task queue.
+	void							 armTimeout(const TimeoutKey &key, int timeoutMs);
+	void							 disarmTimeouts(const std::function<bool(const TimeoutKey &)> &matches);
+	void							 disarmAllTimeouts();
 	void							 onTimeout(const TimeoutKey &key);
 
 	// Runs on the task queue once the transport produced a session
@@ -160,6 +165,8 @@ private:
 	ConnectionRetryPolicy			 mRetryPolicy;
 	ReadySyncTracker				 mReadySync;
 	TimeoutService					 mTimeoutService;
+	std::map<TimeoutKey, uint64_t>	 mArmedTimeouts; // generation per armed timeout, guarded by mConnectingMutex
+	uint64_t						 mTimeoutGeneration{0};
 
 	// State
 	std::atomic<bool>				 mConnected{false};
