@@ -16,18 +16,6 @@
 	#define NETLINK_LOG_WARNING(...) LOG_WARNING(__VA_ARGS__)
 	#define NETLINK_LOG_ERROR(...)	 LOG_ERROR(__VA_ARGS__)
 
-#elif defined(NETLINK_DEBUG_STDERR)
-#include <format>
-#include <cstdio>
-#include <thread>
-	#define NETLINK_LOG_DEBUG(...)	 std::fprintf(stderr, "%s
-", std::format(__VA_ARGS__).c_str())
-	#define NETLINK_LOG_INFO(...)	 std::fprintf(stderr, "%s
-", std::format(__VA_ARGS__).c_str())
-	#define NETLINK_LOG_WARNING(...) std::fprintf(stderr, "W %s
-", std::format(__VA_ARGS__).c_str())
-	#define NETLINK_LOG_ERROR(...)	 std::fprintf(stderr, "E %s
-", std::format(__VA_ARGS__).c_str())
 #else
 
 	#define NETLINK_LOG_DEBUG(...)	 ((void)0)
