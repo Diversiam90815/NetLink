@@ -9,7 +9,7 @@
 #include "NetLinkLog.h"
 
 
-bool RemoteCommunication::init(std::shared_ptr<ISession> session)
+bool RemoteCommunication::init(std::shared_ptr<netlink::ISession> session)
 {
 	if (mIsInitialized.load())
 	{
@@ -36,8 +36,8 @@ bool RemoteCommunication::init(std::shared_ptr<ISession> session)
 	if (mReceiveThread)
 		mReceiveThread->stop();
 
-	mSendThread.reset(new SendThread(this));
-	mReceiveThread.reset(new ReceiveThread(this));
+	mSendThread	   = std::make_shared<SendThread>(this);
+	mReceiveThread = std::make_shared<ReceiveThread>(this);
 
 	mIsInitialized.store(true);
 	return true;
@@ -46,31 +46,35 @@ bool RemoteCommunication::init(std::shared_ptr<ISession> session)
 
 void RemoteCommunication::deinit()
 {
+	// Stop inbound delivery first, the read callback wakes the receive thread
+	if (mSession)
+		mSession->stopReadAsync();
+
 	if (mSendThread)
 		mSendThread->stop();
 
 	if (mReceiveThread)
 		mReceiveThread->stop();
 
-	// Try to send any remaining critical messages (like disconnect)
+	// Try to send any remaining critical messages
 	if (mSession && mSession->isConnected())
 	{
 		// Send remaining outgoing messages with a timeout
 		auto timeout = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
-		while (!mOutgoingMessages.empty() && std::chrono::steady_clock::now() < timeout)
+		while (std::chrono::steady_clock::now() < timeout)
 		{
+			{
+				std::lock_guard<std::mutex> lock(mOutgoingListMutex);
+				if (mOutgoingMessages.empty())
+					break;
+			}
+
 			if (!sendMessages())
 				break;
-			std::this_thread::sleep_for(std::chrono::milliseconds(10));
 		}
 	}
 
-	if (mSession)
-	{
-		mSession->stopReadAsync();
-		mSession.reset();
-		mSession = nullptr;
-	}
+	mSession.reset();
 
 	clearPendingMessages();
 	mIsInitialized.store(false);
@@ -82,12 +86,19 @@ void RemoteCommunication::start()
 	if (!isInitialized())
 		return;
 
-	// Start async read
 	mSession->startReadAsync(
 		[this](netlink::InternalMessage message)
 		{
-			std::lock_guard<std::mutex> lock(mIncomingListMutex);
-			mIncomingMessages.push_back(message);
+			{
+				std::lock_guard<std::mutex> lock(mIncomingListMutex);
+				mIncomingMessages.push_back(std::move(message));
+			}
+			mReceiveThread->triggerEvent();
+		},
+		[this](const std::string &reason)
+		{
+			if (mDisconnectedCallback)
+				mDisconnectedCallback(reason);
 		});
 
 	mSendThread->start();
@@ -105,33 +116,16 @@ void RemoteCommunication::stop()
 }
 
 
-bool RemoteCommunication::read(uint32_t &type, std::vector<uint8_t> &dest)
-{
-	std::lock_guard<std::mutex> lock(mIncomingListMutex);
-
-	if (mIncomingMessages.empty())
-		return false;
-
-	auto &front = mIncomingMessages.front();
-	type		= front.type;
-	dest		= std::move(front.data);
-	mIncomingMessages.erase(mIncomingMessages.begin());
-	return true;
-}
-
-
-void RemoteCommunication::write(uint32_t type, std::vector<uint8_t> data)
+void RemoteCommunication::write(uint32_t type, std::vector<uint8_t> data, netlink::DeliveryMode mode)
 {
 	if (!isInitialized())
 		return;
 
-	std::lock_guard<std::mutex> lock(mOutgoingListMutex);
+	{
+		std::lock_guard<std::mutex> lock(mOutgoingListMutex);
+		mOutgoingMessages.push_back({netlink::InternalMessage{type, std::move(data)}, mode});
+	}
 
-	netlink::InternalMessage	message;
-	message.type = type;
-	message.data = std::move(data);
-
-	mOutgoingMessages.push_back(message);
 	mSendThread->triggerEvent();
 }
 
@@ -178,20 +172,19 @@ bool RemoteCommunication::receiveMessages()
 
 bool RemoteCommunication::sendMessages()
 {
-	if (!isInitialized())
+	if (!isInitialized() || !mSession)
 		return false;
 
 	// Swap under lock to minimize lock duration
-	std::vector<netlink::InternalMessage> toSend;
+	std::vector<netlink::OutgoingMessage> toSend;
 	{
 		std::lock_guard<std::mutex> lock(mOutgoingListMutex);
 		toSend.swap(mOutgoingMessages);
 	}
 
-
-    for (auto &message : toSend)
+	for (const auto &outgoing : toSend)
 	{
-		if (!mSession->sendMessage(message))
+		if (!mSession->sendMessage(outgoing.message, outgoing.mode))
 			return false;
 	}
 
