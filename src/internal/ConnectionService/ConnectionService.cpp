@@ -10,8 +10,7 @@
 #include "NetLinkLog.h"
 
 
-netlink::ConnectionService::ConnectionService(SignalingService &signaling, ITransportFactory &transportFactory)
-	: mSignaling(signaling), mTransportFactory(transportFactory)
+netlink::ConnectionService::ConnectionService(SignalingService &signaling, ITransportFactory &transportFactory) : mSignaling(signaling), mTransportFactory(&transportFactory)
 {
 	mTaskQueue.start();
 
@@ -24,6 +23,12 @@ netlink::ConnectionService::ConnectionService(SignalingService &signaling, ITran
 		mTaskQueue.post(
 			[this, computerName]()
 			{
+				std::lock_guard<std::mutex> lock(mConnectingMutex);
+
+				// Only the peer we are dealing with may tear down the connection
+				if (!mCurrentRequest.has_value() || mCurrentRequest->remote.displayName != computerName)
+					return;
+
 				NETLINK_LOG_INFO("Remote {} disconnected", computerName);
 
 				clearCurrentConnection();
@@ -57,6 +62,12 @@ netlink::ConnectionService::ConnectionService(SignalingService &signaling, ITran
 
 netlink::ConnectionService::~ConnectionService()
 {
+	{
+		// Tear down transports first
+		std::lock_guard<std::mutex> lock(mConnectingMutex);
+		mCurrentRequest.reset();
+	}
+
 	mTaskQueue.stop();
 }
 
@@ -240,7 +251,7 @@ bool netlink::ConnectionService::closeConnection(const std::string &computerName
 		mTimeoutService.cancelAll();
 
 	// only proceed if we have an actual connection in progress or established
-	if (!isConnected() || !isConnecting())
+	if (!isConnected() && !isConnecting())
 	{
 		NETLINK_LOG_DEBUG("Connection already idle, clearing state");
 		clearCurrentConnection();
@@ -253,7 +264,7 @@ bool netlink::ConnectionService::closeConnection(const std::string &computerName
 
 	notifyStatus(ConnectionStatusUpdate::Type::Closing, "Closing connection");
 
-	sendDisconnectMessage(computerName);
+	sendDisconnectMessage(remote);
 
 	notifyStatus(ConnectionStatusUpdate::Type::Closed, "Connection closed");
 	clearCurrentConnection();
@@ -572,34 +583,16 @@ bool netlink::ConnectionService::determineLocalSessionRole()
 
 	if (role == SessionRole::Acceptor)
 	{
-		auto server = mTransportFactory.createServer();
+		auto server = mTransportFactory->createServer();
 
-		server->setSessionHandler(
-			[this](ISession::pointer session)
-			{
-				NETLINK_LOG_INFO("Transport: incoming session accepted!");
+		// Transport callbacks run on transport threads
+		server->setSessionHandler([this](ISession::pointer session) { mTaskQueue.post([this, session]() { onTransportEstablished(session); }); });
 
-				std::lock_guard<std::mutex> lock(mConnectingMutex);
-
-				if (!mCurrentRequest.has_value())
-					return;
-
-				mCurrentRequest->session = session;
-				mCurrentRequest->state	 = ConnectionStateInternal::Connected;
-				mReadySync.setLocalReady();
-				mConnected.store(true);
-				mConnecting.store(false);
-
-				mTimeoutService.cancelAll();
-
-				ConnectionStatusUpdate update;
-				update.type	   = ConnectionStatusUpdate::Type::Established;
-				update.session = session;
-				update.success = true;
-				notifyStatus(std::move(update));
-			});
-
-		server->startAccept();
+		if (!server->start(mLocalIP))
+		{
+			NETLINK_LOG_ERROR("Acceptor: failed to listen on {}", mLocalIP);
+			return false;
+		}
 
 		int boundPort = server->getBoundPort();
 		NETLINK_LOG_INFO("Acceptor: Listening on port {}", boundPort);
@@ -616,32 +609,9 @@ bool netlink::ConnectionService::determineLocalSessionRole()
 	}
 	else if (role == SessionRole::Connector)
 	{
-		auto client = mTransportFactory.createClient();
+		auto client = mTransportFactory->createClient();
 
-		client->setConnectHandler(
-			[this](ISession::pointer session)
-			{
-				NETLINK_LOG_INFO("Transport: outbound connection established!");
-
-				std::lock_guard<std::mutex> lock(mConnectingMutex);
-
-				if (!mCurrentRequest.has_value())
-					return;
-
-				mCurrentRequest->session = session;
-				mCurrentRequest->state	 = ConnectionStateInternal::Connected;
-				mReadySync.setLocalReady();
-				mConnected.store(true);
-				mConnecting.store(false);
-
-				mTimeoutService.cancelAll();
-
-				ConnectionStatusUpdate update;
-				update.type	   = ConnectionStatusUpdate::Type::Established;
-				update.session = session;
-				update.success = true;
-				notifyStatus(std::move(update));
-			});
+		client->setConnectHandler([this](ISession::pointer session) { mTaskQueue.post([this, session]() { onTransportEstablished(session); }); });
 
 		client->setConnectTimeoutHandler(
 			[this]()
@@ -681,6 +651,75 @@ bool netlink::ConnectionService::determineLocalSessionRole()
 	}
 
 	return true;
+}
+
+
+void netlink::ConnectionService::onTransportEstablished(const ISession::pointer &session)
+{
+	std::lock_guard<std::mutex> lock(mConnectingMutex);
+
+	if (!session)
+		return;
+
+	if (!mCurrentRequest.has_value() || mConnected.load())
+	{
+		NETLINK_LOG_WARNING("Transport: dropping session from {}, no connection expected", session->getRemoteAddress());
+		session->close();
+		return;
+	}
+
+	// Anybody on the network can connect to the listening port: only accept the peer we negotiated with
+	if (session->getRemoteAddress() != mCurrentRequest->remote.IPAddress)
+	{
+		NETLINK_LOG_WARNING("Transport: rejecting session from {}, expected {}", session->getRemoteAddress(), mCurrentRequest->remote.IPAddress);
+		session->close();
+		return;
+	}
+
+	NETLINK_LOG_INFO("Transport: session with {} established", session->getRemoteAddress());
+
+	// One peer per connection: stop accepting further inbound connections
+	if (mCurrentRequest->server)
+		mCurrentRequest->server->stop();
+
+	mCurrentRequest->session = session;
+	mCurrentRequest->state	 = ConnectionStateInternal::Connected;
+	mReadySync.setLocalReady();
+	mConnected.store(true);
+	mConnecting.store(false);
+
+	mTimeoutService.cancelAll();
+
+	ConnectionStatusUpdate update;
+	update.type	   = ConnectionStatusUpdate::Type::Established;
+	update.session = session;
+	update.success = true;
+	notifyStatus(std::move(update));
+}
+
+
+void netlink::ConnectionService::onTransportDisconnected(const std::string &reason)
+{
+	mTaskQueue.post(
+		[this, reason]()
+		{
+			std::lock_guard<std::mutex> lock(mConnectingMutex);
+
+			if (!mConnected.load())
+				return;
+
+			NETLINK_LOG_WARNING("Transport: connection lost: {}", reason);
+
+			clearCurrentConnection();
+			notifyStatus(ConnectionStatusUpdate::Type::Closed, "Connection lost: " + reason, false);
+		});
+}
+
+
+void netlink::ConnectionService::setTransportFactory(ITransportFactory &transportFactory)
+{
+	std::lock_guard<std::mutex> lock(mConnectingMutex);
+	mTransportFactory = &transportFactory;
 }
 
 

@@ -88,6 +88,7 @@ public:
 	void							 setCallbacks(ConnectionServiceCallbacks cb) { mCallbacks = std::move(cb); }
 	void							 setConfig(const ConnectionConfig &config);
 	void							 setLocalIP(const std::string &ip) { mLocalIP = ip; }
+	void							 setTransportFactory(ITransportFactory &transportFactory);
 
 	// Connection management
 	bool							 initiateConnection(const std::string &computerName);
@@ -117,6 +118,9 @@ public:
 	// Peer validated
 	void							 onPeerValidated(const ValidationResult &peerValidation);
 
+	// The established data transport was lost (remote closed, reset, protocol error)
+	void							 onTransportDisconnected(const std::string &reason);
+
 private:
 	// State management
 	void							 clearCurrentConnection();
@@ -132,9 +136,12 @@ private:
 	// Timeout expiry handler
 	void							 onTimeout(const TimeoutKey &key);
 
+	// Runs on the task queue once the transport produced a session
+	void							 onTransportEstablished(const ISession::pointer &session);
+
 	// Dependencies
 	SignalingService				&mSignaling;
-	ITransportFactory				&mTransportFactory;
+	ITransportFactory				*mTransportFactory;
 
 	// Configuration and callbacks
 	ConnectionConfig				 mConfig;
