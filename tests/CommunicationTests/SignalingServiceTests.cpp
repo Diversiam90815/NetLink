@@ -45,7 +45,7 @@ protected:
 		pcA.registerPeer("pc-b", "10.0.0.2", pcB.getBoundPort());
 		pcB.registerPeer("pc-a", "10.0.0.1", pcA.getBoundPort());
 
-		SignalingCallbacks callbacks;
+		SignalingConnectionCallbacks callbacks;
 		callbacks.onConnectRequested = [this](const std::string &name)
 		{
 			std::lock_guard<std::mutex> lock(mutex);
@@ -58,12 +58,16 @@ protected:
 			++answers;
 		};
 		callbacks.onDataPortReceived = [this](const std::string &, int port) { lastDataPort = port; };
-		callbacks.onSecretResponseReceived = [this](const std::string &, const std::string &secret)
+		pcB.setConnectionCallbacks(callbacks);
+
+		SignalingValidationCallbacks validation;
+		validation.onSecretResponseReceived = [this](const std::string &, const std::string &secret)
 		{
 			std::lock_guard<std::mutex> lock(mutex);
 			lastSecret = secret;
 		};
-		pcB.setCallbacks(callbacks);
+		validation.onValidationRequestReceived = [this](const std::string &, RemoteRequest request) { lastRequest = static_cast<int>(request); };
+		pcB.setValidationCallbacks(validation);
 
 		pcA.start();
 		pcB.start();
@@ -84,6 +88,7 @@ protected:
 	std::atomic<int>							  answers{0};
 	std::atomic<bool>							  lastAnswer{false};
 	std::atomic<int>							  lastDataPort{0};
+	std::atomic<int>							  lastRequest{0};
 
 	SignalingService							  pcA{network->factory("10.0.0.1")};
 	SignalingService							  pcB{network->factory("10.0.0.2")};
@@ -114,6 +119,14 @@ TEST_F(SignalingServiceTest, PayloadsSurviveTheRoundTrip)
 			std::lock_guard<std::mutex> lock(mutex);
 			return lastSecret == "top-secret";
 		}));
+}
+
+
+TEST_F(SignalingServiceTest, ValidationRequest_IsRoutedToValidationCallbacks)
+{
+	pcA.sendValidationRequest("pc-b", RemoteRequest::Version);
+
+	EXPECT_TRUE(waitUntilTrue([this] { return lastRequest.load() == static_cast<int>(RemoteRequest::Version); }));
 }
 
 

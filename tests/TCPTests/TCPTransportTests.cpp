@@ -68,7 +68,7 @@ protected:
 				clientSession = std::move(session);
 			});
 
-		client.connect("127.0.0.1", static_cast<unsigned short>(server.getBoundPort()));
+		client.connect("", "127.0.0.1", static_cast<unsigned short>(server.getBoundPort()));
 
 		ASSERT_TRUE(waitUntil([this] { return bothConnected(); })) << "Client and server must both produce a session";
 	}
@@ -189,7 +189,7 @@ TEST(TCPClient, ConnectTimeoutHandler_FiresOnRefusedConnection)
 	client.setConnectTimeoutHandler([&] { failed.store(true); });
 	client.setConnectHandler([&](ISession::pointer) { connected.store(true); });
 
-	client.connect("127.0.0.1", static_cast<unsigned short>(closedPort));
+	client.connect("", "127.0.0.1", static_cast<unsigned short>(closedPort));
 
 	EXPECT_TRUE(waitUntil([&] { return failed.load(); }, 8s)) << "A refused connection must invoke the timeout/failure handler";
 	EXPECT_FALSE(connected.load());
@@ -206,7 +206,7 @@ TEST(TCPClient, Destructor_CancelsPendingConnectPromptly)
 		TCPClient client;
 		client.setConnectHandler([=](ISession::pointer) { lateCallback->store(destroyed->load()); });
 		client.setConnectTimeoutHandler([=] { lateCallback->store(destroyed->load()); });
-		client.connect("10.255.255.1", 9); // blackholed: normally stays pending until the timeout
+		client.connect("", "10.255.255.1", 9); // blackholed: normally stays pending until the timeout
 
 		std::this_thread::sleep_for(100ms);
 	}
@@ -362,7 +362,7 @@ TEST(TCPServer, StopFromInsideSessionHandler_IsSafe)
 
 	TCPClient client;
 	client.setConnectHandler([](ISession::pointer) {});
-	client.connect("127.0.0.1", static_cast<unsigned short>(server.getBoundPort()));
+	client.connect("", "127.0.0.1", static_cast<unsigned short>(server.getBoundPort()));
 
 	EXPECT_TRUE(waitUntil([&] { return stopped.load(); }));
 }

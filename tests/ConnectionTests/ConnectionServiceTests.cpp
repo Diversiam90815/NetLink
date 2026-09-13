@@ -63,8 +63,9 @@ public:
 class FakeClient : public IClient
 {
 public:
-	void connect(const std::string &host, unsigned short port) override
+	void connect(const std::string &localAddress, const std::string &host, unsigned short port) override
 	{
+		connectedFrom = localAddress;
 		connectedHost = host;
 		connectedPort = port;
 		connectCalled = true;
@@ -73,6 +74,7 @@ public:
 	void				  setConnectTimeoutHandler(ConnectTimeoutHandler handler) override { timeoutHandler = std::move(handler); }
 
 	bool				  connectCalled{false};
+	std::string			  connectedFrom;
 	std::string			  connectedHost;
 	unsigned short		  connectedPort{0};
 	ConnectHandler		  connectHandler;
@@ -539,10 +541,13 @@ TEST_F(ConnectionServiceTest, Connector_ConnectsOnceRemoteIsReady)
 	ASSERT_TRUE(service->acceptIncomingConnection("pc-b"));
 	ASSERT_NE(factory.lastClient, nullptr) << "The connector role must create a client";
 
+	service->onDataPortReceived("pc-b", 45678);
 	service->onReceivedConnectionReadyFlag("pc-b");
 
 	EXPECT_TRUE(factory.lastClient->connectCalled);
 	EXPECT_EQ(factory.lastClient->connectedHost, "10.0.0.2");
+	EXPECT_EQ(factory.lastClient->connectedPort, 45678) << "The connector must use the announced data port, not the signaling port";
+	EXPECT_EQ(factory.lastClient->connectedFrom, "10.0.0.1") << "The connection must originate from the selected adapter address";
 
 	factory.lastClient->connectHandler(std::make_shared<FakeSession>("10.0.0.2"));
 	EXPECT_TRUE(waitUntil([&] { return service->isConnected(); }));
