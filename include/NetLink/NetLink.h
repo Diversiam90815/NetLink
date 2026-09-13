@@ -95,7 +95,7 @@ struct ConnectionEvent
 
 struct NetLinkCallbacks
 {
-	// A remote endpoint was discovered
+	// A compatible remote was discovered and validated (matching secret): connectTo() can be called
 	std::function<void(const Endpoint &remote)>		   onRemoteDiscovered;
 
 	// Connected state changed (connected, disconnected, error, etc.)
@@ -104,7 +104,7 @@ struct NetLinkCallbacks
 	// An inbound message was received from the remote peer
 	std::function<void(const Message &message)>		   onMessageReceived;
 
-	// A network adapter change was detected
+	// The active network adapter changed (selected automatically in init() or via setActiveAdapter())
 	std::function<void(const NetworkAdapter &adapter)> onNetworkAdapterChanged;
 };
 
@@ -136,13 +136,14 @@ public:
 	NetLink					   &operator=(NetLink &&) noexcept;
 
 	// Register all callbacks. Call before init()
-	// Callbacks are invoked from internal worker threads
+	// Callbacks run one at a time on NetLink's event thread, never while internal locks are held:
+	// calling back into NetLink from a callback is safe (except destroying the NetLink instance).
 	void						configure(const NetLinkConfig &config, const NetLinkCallbacks &callbacks);
 
-	// Initialize networking (socket, adapter enumeration,..)
+	// Initialize networking (adapter enumeration, sockets). Selects the preferred adapter if none is active yet.
 	bool						init();
 
-	// Tear down everything. Safe to call multiple times
+	// Tear down everything (notifies a connected remote first). Safe to call multiple times
 	void						shutdown();
 
 
@@ -154,7 +155,7 @@ public:
 	// Stop active discovery
 	void						stopDiscovery();
 
-	// Currently validated remotes (snapshot)
+	// Currently validated, compatible remotes (snapshot)
 	std::vector<Endpoint>		getPotentialEndpoints();
 
 
