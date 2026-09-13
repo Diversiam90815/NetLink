@@ -42,6 +42,10 @@ set(TCP_Tests
     ${Test_Directory}/TCPTests/TCPTransportTests.cpp
 )
 
+set(Integration_Tests
+    ${Test_Directory}/IntegrationTests/NetLinkCoreTests.cpp
+)
+
 set(Test_Fakes
     ${Test_Directory}/Fakes/FakeDatagramNetwork.h
     ${Test_Directory}/Fakes/LossyDatagramSocket.h
@@ -66,6 +70,7 @@ set(All_Tests
     ${Validation_Tests}
     ${Socket_Tests}
     ${TCP_Tests}
+    ${Integration_Tests}
 )
 
 
