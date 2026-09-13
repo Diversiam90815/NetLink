@@ -7,10 +7,12 @@
 
 #include "NetLink/NetLink.h"
 
+#include <atomic>
+
 #include "Discovery/DiscoveryService.h"
 #include "Signaling/SignalingService.h"
 #include "Transport/TransportInterfaces.h"
-#include "TCP/TCPTransportFactory.h"
+#include "Transport/TransportFactory.h"
 #include "Messaging/RemoteCommunication.h"
 #include "ConnectionService/ConnectionService.h"
 #include "PeerValidation/PeerValidationService.h"
@@ -19,23 +21,35 @@
 
 struct netlink::NetLink::Impl
 {
-	NetLinkConfig				   config;
-	NetLinkCallbacks			   callbacks;
+	NetLinkConfig					   config;
+	NetLinkCallbacks				   callbacks;
 
-	DiscoveryService			   discovery{};
-	SignalingService			   signaling{};
-	netlink::NetworkInformation	   network;
-	netlink::TCPTransportFactory   transportFactory;
-	netlink::PeerValidationService validation;
-	netlink::ConnectionService	   connectionService{signaling, transportFactory};
-	RemoteCommunication			   communication;
+	DiscoveryService				   discovery{};
+	SignalingService				   signaling{};
+	netlink::NetworkInformation		   network;
+	TransportKind					   transportKind{TransportKind::Tcp};
+	std::unique_ptr<ITransportFactory> transportFactory{createTransportFactory(transportKind)};
+	netlink::PeerValidationService	   validation;
+	netlink::ConnectionService		   connectionService{signaling, *transportFactory};
+	RemoteCommunication				   communication;
 
-	ConnectionState				   connectionState{ConnectionState::None};
+	std::atomic<ConnectionState>	   connectionState{ConnectionState::None};
+
+	void							   updateDiscoveryConfig(const std::string &localIPv4)
+	{
+		DiscoveryConfig disConf	 = discovery.getConfig();
+		disConf.localIPv4		 = localIPv4;
+		disConf.displayName		 = config.localDisplayName;
+		disConf.discoveryPort	 = config.discoveryPort;
+		disConf.broadcastAddress = config.broadcastAddress;
+		disConf.signalingPort	 = signaling.getBoundPort();
+		discovery.init(disConf);
+	}
 };
 
 
 // ---------------------------------------------------------------------------
-// Helpers — map internal <-> public types
+// Helpers: map internal <-> public types
 // ---------------------------------------------------------------------------
 
 static netlink::AdapterPriority mapPriority(netlink::AdapterPriorityInternal internal)
@@ -73,55 +87,78 @@ netlink::NetLink::~NetLink()
 }
 
 
-netlink::NetLink::NetLink(NetLink &&) noexcept {}
-
-
-netlink::NetLink &netlink::NetLink::operator=(NetLink &&) noexcept = default;
-
-
-void			  netlink::NetLink::configure(const NetLinkConfig &config, const NetLinkCallbacks &callbacks)
+netlink::NetLink &netlink::NetLink::operator=(NetLink &&other) noexcept
 {
-	pImpl->config	 = config;
-	pImpl->callbacks = callbacks;
+	if (this != &other)
+	{
+		shutdown();
+		pImpl = std::move(other.pImpl);
+	}
+	return *this;
+}
+
+
+void netlink::NetLink::configure(const NetLinkConfig &config, const NetLinkCallbacks &callbacks)
+{
+	Impl *impl		= pImpl.get();
+
+	impl->config	= config;
+	impl->callbacks = callbacks;
+
+	if (config.transport != impl->transportKind)
+	{
+		impl->transportKind	   = config.transport;
+		impl->transportFactory = createTransportFactory(config.transport);
+		impl->connectionService.setTransportFactory(*impl->transportFactory);
+	}
+
+	impl->communication.setMessageCallback(
+		[impl](uint32_t type, std::vector<uint8_t> &data)
+		{
+			if (impl->callbacks.onMessageReceived)
+				impl->callbacks.onMessageReceived(Message{type, std::move(data)});
+		});
+
+	impl->communication.setDisconnectedCallback([impl](const std::string &reason) { impl->connectionService.onTransportDisconnected(reason); });
 
 	netlink::ConnectionServiceCallbacks svcCB;
 
-	svcCB.onStatusUpdate = [this](const ConnectionStatusUpdate &update)
+	svcCB.onStatusUpdate = [impl](const ConnectionStatusUpdate &update)
 	{
 		switch (update.type)
 		{
 		case ConnectionStatusUpdate::Type::Established:
 			// Wire the live session into the messaging layer and tell the app.
-			pImpl->communication.init(update.session);
-			pImpl->communication.start();
-			pImpl->connectionState = ConnectionState::Connected;
-			if (pImpl->callbacks.onConnectionChanged)
-				pImpl->callbacks.onConnectionChanged({ConnectionState::Connected, "", {}});
+			impl->communication.init(update.session);
+			impl->communication.start();
+			impl->connectionState = ConnectionState::Connected;
+			if (impl->callbacks.onConnectionChanged)
+				impl->callbacks.onConnectionChanged({ConnectionState::Connected, "", {}});
 			break;
 
 		case ConnectionStatusUpdate::Type::InvitationReceived:
 			// Remote wants to connect — surface to app so it can call respondToConnection().
-			pImpl->connectionState = ConnectionState::PendingInbound;
-			if (pImpl->callbacks.onConnectionChanged)
+			impl->connectionState = ConnectionState::PendingInbound;
+			if (impl->callbacks.onConnectionChanged)
 			{
 				const auto &ep = update.endpoint;
-				pImpl->callbacks.onConnectionChanged({ConnectionState::PendingInbound, "", {ep.IPAddress, ep.port, ep.displayName}});
+				impl->callbacks.onConnectionChanged({ConnectionState::PendingInbound, "", {ep.IPAddress, ep.port, ep.displayName}});
 			}
 			break;
 
 		case ConnectionStatusUpdate::Type::Failed:
 		case ConnectionStatusUpdate::Type::Declined:
-			pImpl->connectionState = ConnectionState::Error;
-			if (pImpl->callbacks.onConnectionChanged)
-				pImpl->callbacks.onConnectionChanged({ConnectionState::Error, update.message, {}});
+			impl->connectionState = ConnectionState::Error;
+			if (impl->callbacks.onConnectionChanged)
+				impl->callbacks.onConnectionChanged({ConnectionState::Error, update.message, {}});
 			break;
 
 		case ConnectionStatusUpdate::Type::Closed:
-			// Covers both local-initiated and remote-initiated disconnects.
-			pImpl->communication.deinit();
-			pImpl->connectionState = ConnectionState::Disconnected;
-			if (pImpl->callbacks.onConnectionChanged)
-				pImpl->callbacks.onConnectionChanged({ConnectionState::Disconnected, update.message, {}});
+			// Covers local disconnects, remote disconnects and lost transports.
+			impl->communication.deinit();
+			impl->connectionState = ConnectionState::Disconnected;
+			if (impl->callbacks.onConnectionChanged)
+				impl->callbacks.onConnectionChanged({ConnectionState::Disconnected, update.message, {}});
 			break;
 
 		case ConnectionStatusUpdate::Type::Initiated:
@@ -134,69 +171,67 @@ void			  netlink::NetLink::configure(const NetLinkConfig &config, const NetLinkC
 		}
 	};
 
-	pImpl->connectionService.setCallbacks(std::move(svcCB));
+	impl->connectionService.setCallbacks(std::move(svcCB));
 
 	// Set callback for when a remote peer was found
-	pImpl->discovery.setOnRemoteFound(
-		[this](const DiscoveryEndpoint &ep)
+	impl->discovery.setOnRemoteFound(
+		[impl](const DiscoveryEndpoint &ep)
 		{
-			pImpl->signaling.registerPeer(ep.displayName, ep.IPAddress, ep.port);
-			pImpl->validation.onPeerDiscovered(ep);
+			impl->signaling.registerPeer(ep.displayName, ep.IPAddress, ep.port);
+			impl->validation.onPeerDiscovered(ep);
+
+			if (impl->callbacks.onRemoteDiscovered)
+				impl->callbacks.onRemoteDiscovered({ep.IPAddress, ep.port, ep.displayName});
 		});
 }
 
 
 bool netlink::NetLink::init()
 {
-	// Initialize services and setup internal callbacks
+	Impl					   *impl = pImpl.get();
 
 	// Wire PeerValidationSendCallbacks
 	PeerValidationSendCallbacks sendCb;
-	sendCb.sendRequest		   = [this](const std::string &name, RemoteRequest req) { pImpl->signaling.sendValidationRequest(name, req); };
-	sendCb.sendSecretResponse  = [this](const std::string &name, const std::string &v) { pImpl->signaling.sendSecretResponse(name, v); };
-	sendCb.sendVersionResponse = [this](const std::string &name, const std::string &v) { pImpl->signaling.sendVersionResponse(name, v); };
-	sendCb.sendHandshake	   = [this](const std::string &name) { pImpl->signaling.sendValidationHandshake(name); };
-	pImpl->validation.setSendCallbacks(std::move(sendCb));
-	pImpl->validation.setLocalSecret(pImpl->config.secret);
+	sendCb.sendRequest		   = [impl](const std::string &name, RemoteRequest req) { impl->signaling.sendValidationRequest(name, req); };
+	sendCb.sendSecretResponse  = [impl](const std::string &name, const std::string &v) { impl->signaling.sendSecretResponse(name, v); };
+	sendCb.sendVersionResponse = [impl](const std::string &name, const std::string &v) { impl->signaling.sendVersionResponse(name, v); };
+	sendCb.sendHandshake	   = [impl](const std::string &name) { impl->signaling.sendValidationHandshake(name); };
+	impl->validation.setSendCallbacks(std::move(sendCb));
+	impl->validation.setLocalSecret(impl->config.secret);
 
-	// Network adapter changed callback
-	pImpl->network.setOnAdapterChanged(
-		[this](const std::string &newIPv4)
+	// Network adapter changed: rebind signaling (announces the new port via onSocketBound) and move discovery to the new address
+	impl->network.setOnAdapterChanged(
+		[impl](const std::string &newIPv4)
 		{
-			pImpl->signaling.setLocalIPv4(newIPv4);
-			pImpl->connectionService.setLocalIP(newIPv4);
-
-			DiscoveryConfig disConf;
-			disConf.localIPv4		 = newIPv4;
-			disConf.displayName		 = pImpl->config.localDisplayName;
-			disConf.discoveryPort	 = pImpl->config.discoveryPort;
-			disConf.broadCastAddress = pImpl->config.broadcastAddress;
-			pImpl->discovery.init(disConf);
+			impl->connectionService.setLocalIP(newIPv4);
+			impl->signaling.setLocalIPv4(newIPv4);
+			impl->updateDiscoveryConfig(newIPv4);
 		});
 
-	// When signaling socket binds (on init or adapter change), update discovery with the new port
-	pImpl->signaling.setOnSocketBound(
-		[this](int boundPort)
+	// When the signaling socket binds, announce the new port through discovery
+	impl->signaling.setOnSocketBound(
+		[impl](int boundPort)
 		{
-			DiscoveryConfig cfg = pImpl->discovery.getConfig(); // see note below
+			DiscoveryConfig cfg = impl->discovery.getConfig();
 			cfg.signalingPort	= boundPort;
-			pImpl->discovery.init(cfg);							// no rebind — only signalingPort changed
+			impl->discovery.init(cfg); // no rebind — only the announced port changed
 		});
 
-	if (!pImpl->network.init())
+	if (!impl->network.init())
 		return false;
 
-	pImpl->network.processAdapter();
+	impl->network.processAdapter();
 
-	if (!pImpl->signaling.init(pImpl->config.localDisplayName))
+	if (!impl->signaling.init(impl->config.localDisplayName))
 		return false;
 
 	// Apply the current adapter immediately if one is already set
-	const auto &adapter = pImpl->network.getCurrentNetworkAdapter();
+	const auto &adapter = impl->network.getCurrentNetworkAdapter();
 	if (adapter.isValid())
 	{
-		pImpl->signaling.setLocalIPv4(adapter.IPv4);
-		pImpl->connectionService.setLocalIP(adapter.IPv4);
+		impl->connectionService.setLocalIP(adapter.IPv4);
+		impl->signaling.setLocalIPv4(adapter.IPv4);
+		impl->updateDiscoveryConfig(adapter.IPv4);
 	}
 
 	return true;
@@ -205,6 +240,9 @@ bool netlink::NetLink::init()
 
 void netlink::NetLink::shutdown()
 {
+	if (!pImpl)
+		return;
+
 	pImpl->communication.deinit();
 	pImpl->signaling.deinit();
 	pImpl->discovery.deinit();
@@ -214,7 +252,15 @@ void netlink::NetLink::shutdown()
 
 bool netlink::NetLink::startDiscovery()
 {
-	pImpl->discovery.startDiscovery();
+	try
+	{
+		pImpl->discovery.startDiscovery();
+	}
+	catch (const std::exception &)
+	{
+		return false; // not initialized / no adapter selected
+	}
+
 	pImpl->signaling.start();
 	pImpl->connectionState = ConnectionState::Searching;
 	return true;
@@ -223,7 +269,7 @@ bool netlink::NetLink::startDiscovery()
 
 void netlink::NetLink::stopDiscovery()
 {
-	pImpl->discovery.deinit();
+	pImpl->discovery.stopDiscovery();
 }
 
 
@@ -267,30 +313,30 @@ void netlink::NetLink::respondToConnection(bool accepted)
 void netlink::NetLink::disconnect()
 {
 	auto remoteOpt = pImpl->connectionService.getCurrentRemote();
+
 	if (remoteOpt.has_value())
 		pImpl->connectionService.closeConnection(remoteOpt->displayName);
-	// communication.deinit() and state update are handled by onStatusUpdate(Closed)
 }
 
 
 netlink::ConnectionState netlink::NetLink::getConnectionState() const
 {
-	return pImpl->connectionState;
+	return pImpl->connectionState.load();
 }
 
 
-bool netlink::NetLink::send(const Message &message)
+bool netlink::NetLink::send(const Message &message, DeliveryMode mode)
 {
-	return send(message.type, message.data);
+	return send(message.type, message.data, mode);
 }
 
 
-bool netlink::NetLink::send(uint32_t type, const std::vector<uint8_t> &payload)
+bool netlink::NetLink::send(uint32_t type, const std::vector<uint8_t> &payload, DeliveryMode mode)
 {
-	if (pImpl->connectionState != ConnectionState::Connected)
+	if (pImpl->connectionState.load() != ConnectionState::Connected)
 		return false;
 
-	pImpl->communication.write(type, payload);
+	pImpl->communication.write(type, payload, mode);
 	return true;
 }
 
@@ -311,7 +357,6 @@ std::vector<netlink::NetworkAdapter> netlink::NetLink::getAvailableAdapters()
 
 bool netlink::NetLink::setActiveAdapter(const int &adapterID)
 {
-	// setCurrentNetworkAdapter fires onAdapterChanged internally
 	return pImpl->network.setCurrentNetworkAdapter(adapterID);
 }
 

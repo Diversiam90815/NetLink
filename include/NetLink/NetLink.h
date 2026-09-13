@@ -57,6 +57,21 @@ struct Message
 	std::vector<uint8_t> data{};
 };
 
+
+// Delivery guarantee requested for a message.
+enum class DeliveryMode : uint8_t
+{
+	ReliableOrdered,	 // Delivered exactly once, in send order
+	UnreliableSequenced, // May be dropped; stale messages are discarded
+};
+
+
+// Transport used for the data connection once two peers agreed to connect.
+enum class TransportKind : uint8_t
+{
+	Tcp,
+};
+
 enum class ConnectionState
 {
 	None,
@@ -98,10 +113,11 @@ struct NetLinkCallbacks
 
 struct NetLinkConfig
 {
-	std::string	   localDisplayName{};
-	int			   discoveryPort{5555};
-	std::string	   broadcastAddress{"255.255.255.255"};
-	std::string	   secret{"NetLink"};
+	std::string	  localDisplayName{};
+	int			  discoveryPort{5555};
+	std::string	  broadcastAddress{"255.255.255.255"};
+	std::string	  secret{"NetLink"};
+	TransportKind transport{TransportKind::Tcp};
 };
 
 
@@ -116,10 +132,11 @@ public:
 	// Non-copyable, movable
 	NetLink(const NetLink &)			= delete;
 	NetLink &operator=(const NetLink &) = delete;
-	NetLink(NetLink &&) noexcept;
+	NetLink(NetLink &&) noexcept		= default;
 	NetLink					   &operator=(NetLink &&) noexcept;
 
 	// Register all callbacks. Call before init()
+	// Callbacks are invoked from internal worker threads
 	void						configure(const NetLinkConfig &config, const NetLinkCallbacks &callbacks);
 
 	// Initialize networking (socket, adapter enumeration,..)
@@ -159,10 +176,10 @@ public:
 	// -- Messaging -----------------------------------
 
 	// Send a message to the connected peer
-	bool						send(const Message &message);
+	bool						send(const Message &message, DeliveryMode mode = DeliveryMode::ReliableOrdered);
 
 	// Send a typed message with raw bytes
-	bool						send(uint32_t type, const std::vector<uint8_t> &payload);
+	bool						send(uint32_t type, const std::vector<uint8_t> &payload, DeliveryMode mode = DeliveryMode::ReliableOrdered);
 
 
 	// -- Network adapters -------------------------------
