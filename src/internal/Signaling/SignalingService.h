@@ -7,15 +7,18 @@
 
 #pragma once
 
-#include <functional>
-#include <string>
 #include <atomic>
-#include <array>
+#include <functional>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <vector>
 
 #include "SignalPacket.h"
 #include "ThreadBase.h"
 #include "PeerValidation/PeerValidationService.h"
-#include "../Socket/NetlinkSocket.h"
+#include "Socket/IDatagramSocket.h"
 
 
 namespace netlink
@@ -48,17 +51,25 @@ struct PeerEndpoint
 };
 
 
-class SignalingService : public ThreadBase
+class SignalingService : private ThreadBase
 {
 public:
-	SignalingService() = default;
-	~SignalingService();
+	explicit SignalingService(net::DatagramSocketFactory socketFactory = {});
+	~SignalingService() override;
+	SignalingService(const SignalingService &)			  = delete;
+	SignalingService &operator=(const SignalingService &) = delete;
 
-	bool init(const std::string &localComputerName);
-	void deinit();
-	void setLocalIPv4(const std::string &localIPv4);
+	bool			  init(const std::string &localComputerName);
+	void			  deinit();
 
-	int	 getBoundPort() const { return mBoundPort; }
+	// Binds the signaling socket to the adapter address
+	void			  setLocalIPv4(const std::string &localIPv4);
+
+	// Receive loop
+	using ThreadBase::start;
+	using ThreadBase::stop;
+
+	int	 getBoundPort() const { return mBoundPort.load(); }
 
 	void setCallbacks(SignalingCallbacks cb) { mCallbacks = std::move(cb); }
 	void setOnSocketBound(SocketBoundCallback cb) { mOnSocketBound = std::move(cb); }
@@ -80,28 +91,34 @@ public:
 	void sendValidationHandshake(const std::string &computerName);
 
 private:
-	PeerEndpoint						resolvePeer(const std::string &computerName) const;
+	PeerEndpoint						  resolvePeer(const std::string &computerName) const;
 
-	void								run() override;
-	void								sendPacket(const PeerEndpoint &endpoint, const SignalPacket &packet);
-	void								receivePackage();
-	void								routePacket(const SignalPacket &packet);
+	void								  run() override;
+	void								  sendPacket(const PeerEndpoint &endpoint, const SignalPacket &packet);
+	void								  receivePackage();
+	void								  routePacket(const SignalPacket &packet);
 
-	SignalPacket						makeEnvelope(SignalType type) const;
+	SignalPacket						  makeEnvelope(SignalType type) const;
+
+	std::shared_ptr<net::IDatagramSocket> socket() const;
 
 
-	NetlinkSocket						mSocket; // UDP
+	net::DatagramSocketFactory			  mSocketFactory;
 
-	std::string							mLocalComputerName;
-	std::string							mLocalIPv4;
-	int									mBoundPort{0};
+	mutable std::mutex					  mSocketMutex;
+	std::shared_ptr<net::IDatagramSocket> mSocket;
+	std::string							  mLocalComputerName;
+	std::string							  mLocalIPv4;
+	std::atomic<int>					  mBoundPort{0};
 
-	std::atomic<bool>					mInitialized{false};
-	SignalingCallbacks					mCallbacks;
-	SocketBoundCallback					mOnSocketBound;
+	std::vector<uint8_t>				  mReceiveBuffer; // signaling thread only
 
-	std::map<std::string, PeerEndpoint> mPeerRegistry; // key = displayName
-	mutable std::mutex					mPeerRegistryMutex;
+	std::atomic<bool>					  mInitialized{false};
+	SignalingCallbacks					  mCallbacks;
+	SocketBoundCallback					  mOnSocketBound;
+
+	std::map<std::string, PeerEndpoint>	  mPeerRegistry; // key = displayName
+	mutable std::mutex					  mPeerRegistryMutex;
 };
 
 } // namespace netlink

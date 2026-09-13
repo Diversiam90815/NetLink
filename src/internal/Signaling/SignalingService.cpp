@@ -6,9 +6,20 @@
 */
 
 #include "SignalingService.h"
+
+#include <span>
+
+#include "NetLinkConstants.h"
 #include "NetLinkLog.h"
+#include "Socket/UdpSocket.h"
 
 using json = nlohmann::json;
+
+
+netlink::SignalingService::SignalingService(net::DatagramSocketFactory socketFactory)
+	: mSocketFactory(socketFactory ? std::move(socketFactory) : net::UdpSocket::factory()), mReceiveBuffer(internal::PackageBufferSize)
+{
+}
 
 
 netlink::SignalingService::~SignalingService()
@@ -22,10 +33,12 @@ bool netlink::SignalingService::init(const std::string &localComputerName)
 	if (localComputerName.empty())
 		return false;
 
-	mLocalComputerName = localComputerName;
-	mSocket			   = NetlinkSocket::createUDP();
+	{
+		std::lock_guard<std::mutex> lock(mSocketMutex);
+		mLocalComputerName = localComputerName;
+	}
 
-	// Socket opened, binding deferred until setLocalIPv4() is called
+	// Binding deferred until setLocalIPv4() is called
 	mInitialized.store(true);
 	return true;
 }
@@ -33,9 +46,18 @@ bool netlink::SignalingService::init(const std::string &localComputerName)
 
 void netlink::SignalingService::deinit()
 {
-	stop();
-	mSocket.close();
-	mBoundPort = 0;
+	ThreadBase::stop(); // qualified: also called from the destructor
+
+	{
+		std::lock_guard<std::mutex> lock(mSocketMutex);
+
+		if (mSocket)
+			mSocket->shutdown();
+
+		mSocket.reset();
+	}
+
+	mBoundPort.store(0);
 	mInitialized.store(false);
 }
 
@@ -45,28 +67,38 @@ void netlink::SignalingService::setLocalIPv4(const std::string &localIPv4)
 	if (localIPv4.empty())
 		return;
 
-	// Rebind if already bound to a previous address
-	if (mBoundPort != 0)
-		mSocket = NetlinkSocket::createUDP();
+	auto socket = mSocketFactory({localIPv4, 0}, {});
 
-	mLocalIPv4 = localIPv4;
-
-	NetLink::BindOptions options;
-	options.reuseAddress = true;
-
-	auto result			 = mSocket.bind(localIPv4, 0, options);
-
-	if (!result.succeeded())
+	if (!socket)
 	{
-		NETLINK_LOG_ERROR("Failed to bind signaling socket to {}: {}", localIPv4, result.getStatusString());
+		NETLINK_LOG_ERROR("Failed to bind signaling socket to {}: {}", localIPv4, net::toString(socket.error()));
 		return;
 	}
 
-	mBoundPort = mSocket.getBoundPort();
-	NETLINK_LOG_INFO("SignalingService bound to {}:{}", localIPv4, mBoundPort);
+	const int							  boundPort = (*socket)->localAddress().port;
+	std::shared_ptr<net::IDatagramSocket> previous;
+
+	{
+		std::lock_guard<std::mutex> lock(mSocketMutex);
+		previous   = std::exchange(mSocket, std::shared_ptr<net::IDatagramSocket>(std::move(*socket)));
+		mLocalIPv4 = localIPv4;
+	}
+
+	if (previous)
+		previous->shutdown();
+
+	mBoundPort.store(boundPort);
+	NETLINK_LOG_INFO("SignalingService bound to {}:{}", localIPv4, boundPort);
 
 	if (mOnSocketBound)
-		mOnSocketBound(mBoundPort);
+		mOnSocketBound(boundPort);
+}
+
+
+std::shared_ptr<netlink::net::IDatagramSocket> netlink::SignalingService::socket() const
+{
+	std::lock_guard<std::mutex> lock(mSocketMutex);
+	return mSocket;
 }
 
 
@@ -217,11 +249,8 @@ netlink::PeerEndpoint netlink::SignalingService::resolvePeer(const std::string &
 
 void netlink::SignalingService::run()
 {
-	while (isRunning())
-	{
+	while (ThreadBase::isRunning())
 		receivePackage();
-		waitForEvent(50);
-	}
 }
 
 
@@ -306,37 +335,56 @@ void netlink::SignalingService::sendPacket(const PeerEndpoint &endpoint, const S
 		return;
 	}
 
-	json		j	 = packet;
-	std::string msg	 = j.dump();
+	auto socket = this->socket();
 
-	int			sent = mSocket.sendTo(endpoint.IPv4, endpoint.signalingPort, msg.data(), static_cast<int>(msg.size()));
+	if (!socket)
+	{
+		NETLINK_LOG_ERROR("SignalingService not bound -> cannot send.");
+		return;
+	}
 
-	if (sent < 0)
-		NETLINK_LOG_ERROR("Failed to send signal to {}:{}", endpoint.IPv4, endpoint.signalingPort);
+	const std::string msg	 = json(packet).dump();
+	const auto		  target = net::SocketAddress{endpoint.IPv4, static_cast<uint16_t>(endpoint.signalingPort)};
+
+	if (auto sent = socket->sendTo(target, std::span(reinterpret_cast<const uint8_t *>(msg.data()), msg.size())); !sent)
+		NETLINK_LOG_ERROR("Failed to send signal to {}: {}", target.toString(), net::toString(sent.error()));
 	else
-		NETLINK_LOG_DEBUG("Signal sent to {}:{} (type={})", endpoint.IPv4, endpoint.signalingPort, static_cast<int>(packet.signalType));
+		NETLINK_LOG_DEBUG("Signal sent to {} (type={})", target.toString(), static_cast<int>(packet.signalType));
 }
 
 
 void netlink::SignalingService::receivePackage()
 {
-	if (!mInitialized.load())
-		return;
+	auto socket = mInitialized.load() ? this->socket() : nullptr;
 
-	ReceivedPacket packet;
-	if (!mSocket.receive(packet, 50))
-		return; // timeout
+	if (!socket)
+	{
+		waitForEvent(static_cast<unsigned long>(internal::SocketPollInterval.count()));
+		return;
+	}
+
+	auto datagram = socket->receiveFrom(mReceiveBuffer, internal::SocketPollInterval);
+
+	if (!datagram)
+	{
+		// Timeouts are the normal idle case; anything else is retried on the next cycle
+		if (datagram.error() != net::SocketError::Timeout)
+			waitForEvent(static_cast<unsigned long>(internal::SocketPollInterval.count()));
+
+		return;
+	}
 
 	try
 	{
-		json		 j		= json::parse(packet.data.begin(), packet.data.end());
+		const auto	 begin	= mReceiveBuffer.data();
+		json		 j		= json::parse(begin, begin + datagram->size);
 		SignalPacket signal = j.get<SignalPacket>();
 
 		routePacket(signal);
 	}
-	catch (std::exception &e)
+	catch (const std::exception &e)
 	{
-		NETLINK_LOG_ERROR("Error parsing signal packet: {}", e.what());
+		NETLINK_LOG_ERROR("Error parsing signal packet from {}: {}", datagram->from.toString(), e.what());
 	}
 }
 
@@ -345,9 +393,13 @@ netlink::SignalPacket netlink::SignalingService::makeEnvelope(SignalType type) c
 {
 	SignalPacket packet{};
 
-	packet.senderName = mLocalComputerName;
-	packet.senderIP	  = mLocalIPv4;
-	packet.senderPort = mBoundPort;
+	{
+		std::lock_guard<std::mutex> lock(mSocketMutex);
+		packet.senderName = mLocalComputerName;
+		packet.senderIP	  = mLocalIPv4;
+	}
+
+	packet.senderPort = mBoundPort.load();
 	packet.signalType = type;
 
 	return packet;
