@@ -80,8 +80,8 @@ public:
 	virtual void setConnectHandler(ConnectHandler handler)				 = 0;
 	virtual void setConnectTimeoutHandler(ConnectTimeoutHandler handler) = 0;
 
-	// Connects asynchronously. A previous pending attempt is cancelled.
-	virtual void connect(const std::string &host, unsigned short port)	 = 0;
+	// Connects asynchronously from localAddress (the selected adapter; empty = OS choice). A previous pending attempt is cancelled.
+	virtual void connect(const std::string &localAddress, const std::string &host, unsigned short port) = 0;
 };
 
 } // namespace netlink

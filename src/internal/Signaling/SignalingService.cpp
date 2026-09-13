@@ -262,64 +262,70 @@ void netlink::SignalingService::routePacket(const SignalPacket &packet)
 	{
 	case SignalType::ConnectRequest:
 	{
-		if (mCallbacks.onConnectRequested)
-			mCallbacks.onConnectRequested(sender);
+		if (mConnectionCallbacks.onConnectRequested)
+			mConnectionCallbacks.onConnectRequested(sender);
 		break;
 	}
 
 	case SignalType::ConnectAnswer:
 	{
 		const auto &pl = std::get<PayloadConnectAnswer>(packet.payload);
-		if (mCallbacks.onConnectRequestAnswered)
-			mCallbacks.onConnectRequestAnswered(sender, pl.accepted);
+		if (mConnectionCallbacks.onConnectRequestAnswered)
+			mConnectionCallbacks.onConnectRequestAnswered(sender, pl.accepted);
 		break;
 	}
 
 	case SignalType::Disconnect:
-		if (mCallbacks.onDisconnectReceived)
-			mCallbacks.onDisconnectReceived(sender);
+		if (mConnectionCallbacks.onDisconnectReceived)
+			mConnectionCallbacks.onDisconnectReceived(sender);
 		break;
 
 	case SignalType::ReadyFlag:
-		if (mCallbacks.onReadyFlagReceived)
-			mCallbacks.onReadyFlagReceived(sender);
+		if (mConnectionCallbacks.onReadyFlagReceived)
+			mConnectionCallbacks.onReadyFlagReceived(sender);
 		break;
 
 	case SignalType::DataPort:
 	{
 		const auto &pl = std::get<PayloadDataPort>(packet.payload);
-		if (mCallbacks.onDataPortReceived)
-			mCallbacks.onDataPortReceived(sender, pl.dataPort);
+		if (mConnectionCallbacks.onDataPortReceived)
+			mConnectionCallbacks.onDataPortReceived(sender, pl.dataPort);
 		break;
 	}
 
 	case SignalType::ValidationRequest:
 	{
 		const auto &pl = std::get<PayloadValidationRequest>(packet.payload);
-		if (mCallbacks.onValidationRequestReceived)
-			mCallbacks.onValidationRequestReceived(sender, pl.request);
+		if (pl.request != static_cast<uint8_t>(RemoteRequest::Secret) && pl.request != static_cast<uint8_t>(RemoteRequest::Version))
+		{
+			NETLINK_LOG_WARNING("Ignoring unknown validation request {} from {}", static_cast<int>(pl.request), sender);
+			break;
+		}
+
+		if (mValidationCallbacks.onValidationRequestReceived)
+			mValidationCallbacks.onValidationRequestReceived(sender, static_cast<RemoteRequest>(pl.request));
 		break;
 	}
 
 	case SignalType::SecretResponse:
 	{
 		const auto &pl = std::get<PayloadSecretResponse>(packet.payload);
-		if (mCallbacks.onSecretResponseReceived)
-			mCallbacks.onSecretResponseReceived(sender, pl.secret);
+		if (mValidationCallbacks.onSecretResponseReceived)
+			mValidationCallbacks.onSecretResponseReceived(sender, pl.secret);
 		break;
 	}
 
 	case SignalType::VersionResponse:
 	{
 		const auto &pl = std::get<PayloadVersionResponse>(packet.payload);
-		if (mCallbacks.onVersionResponseReceived)
-			mCallbacks.onVersionResponseReceived(sender, pl.version);
+		if (mValidationCallbacks.onVersionResponseReceived)
+			mValidationCallbacks.onVersionResponseReceived(sender, pl.version);
 		break;
 	}
 
 	case SignalType::ValidationHandshake:
-		if (mCallbacks.onValidationHandshakeReceived)
-			mCallbacks.onValidationHandshakeReceived(sender);
+		if (mValidationCallbacks.onValidationHandshakeReceived)
+			mValidationCallbacks.onValidationHandshakeReceived(sender);
 		break;
 
 	default: NETLINK_LOG_WARNING("Unknown signal type received: {}", static_cast<int>(packet.signalType)); break;

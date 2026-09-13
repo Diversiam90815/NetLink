@@ -24,16 +24,21 @@
 namespace netlink
 {
 
-struct SignalingCallbacks
+// Connection lifecycle signals (consumed by ConnectionService)
+struct SignalingConnectionCallbacks
 {
-	std::function<void(const std::string &computerName)>							 onConnectRequested;
-	std::function<void(const std::string &computerName, bool accepted)>				 onConnectRequestAnswered;
-	std::function<void(const std::string &computerName)>							 onDisconnectReceived;
-	std::function<void(const std::string &computerName)>							 onReadyFlagReceived;
-	std::function<void(const std::string &computerName, int dataPort)>				 onDataPortReceived;
+	std::function<void(const std::string &computerName)>				onConnectRequested;
+	std::function<void(const std::string &computerName, bool accepted)> onConnectRequestAnswered;
+	std::function<void(const std::string &computerName)>				onDisconnectReceived;
+	std::function<void(const std::string &computerName)>				onReadyFlagReceived;
+	std::function<void(const std::string &computerName, int dataPort)>	onDataPortReceived;
+};
 
-	// Validation
-	std::function<void(const std::string &computerName, uint8_t request)>			 onValidationRequestReceived;
+
+// Peer validation signals (consumed by PeerValidationService)
+struct SignalingValidationCallbacks
+{
+	std::function<void(const std::string &computerName, RemoteRequest request)>		 onValidationRequestReceived;
 	std::function<void(const std::string &computerName, const std::string &secret)>	 onSecretResponseReceived;
 	std::function<void(const std::string &computerName, const std::string &version)> onVersionResponseReceived;
 	std::function<void(const std::string &computerName)>							 onValidationHandshakeReceived;
@@ -71,7 +76,9 @@ public:
 
 	int	 getBoundPort() const { return mBoundPort.load(); }
 
-	void setCallbacks(SignalingCallbacks cb) { mCallbacks = std::move(cb); }
+	// Set before start(). Invoked on the signaling thread.
+	void setConnectionCallbacks(SignalingConnectionCallbacks cb) { mConnectionCallbacks = std::move(cb); }
+	void setValidationCallbacks(SignalingValidationCallbacks cb) { mValidationCallbacks = std::move(cb); }
 	void setOnSocketBound(SocketBoundCallback cb) { mOnSocketBound = std::move(cb); }
 
 	// Peer registry
@@ -114,7 +121,8 @@ private:
 	std::vector<uint8_t>				  mReceiveBuffer; // signaling thread only
 
 	std::atomic<bool>					  mInitialized{false};
-	SignalingCallbacks					  mCallbacks;
+	SignalingConnectionCallbacks					  mConnectionCallbacks;
+	SignalingValidationCallbacks					  mValidationCallbacks;
 	SocketBoundCallback					  mOnSocketBound;
 
 	std::map<std::string, PeerEndpoint>	  mPeerRegistry; // key = displayName

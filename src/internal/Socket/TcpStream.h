@@ -28,7 +28,8 @@ public:
 	using CancelPredicate = std::function<bool()>;
 
 	// Connects with a timeout. isCancelled is polled periodically so a pending connect can be aborted quickly.
-	static Result<TcpStream> connect(const SocketAddress &remote, std::chrono::milliseconds timeout, const CancelPredicate &isCancelled = {});
+	// A non-empty localAddress.ip binds the outgoing connection to that interface first.
+	static Result<TcpStream> connect(const SocketAddress &remote, std::chrono::milliseconds timeout, const CancelPredicate &isCancelled = {}, const SocketAddress &localAddress = {});
 
 	TcpStream(TcpStream &&) noexcept					  = default;
 	TcpStream			&operator=(TcpStream &&) noexcept = default;

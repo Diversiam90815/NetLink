@@ -37,7 +37,7 @@ void TCPClient::setConnectTimeoutHandler(ConnectTimeoutHandler handler)
 }
 
 
-void TCPClient::connect(const std::string &host, unsigned short port)
+void TCPClient::connect(const std::string &localAddress, const std::string &host, unsigned short port)
 {
 	cancel();
 
@@ -48,9 +48,9 @@ void TCPClient::connect(const std::string &host, unsigned short port)
 
 	// The thread owns copies of everything it uses, so it never touches this object
 	mThread								  = std::thread(
-		[cancelled, remote = net::SocketAddress{host, port}, onConnected = mConnectHandler, onFailed = mConnectTimeoutHandler]()
+		[cancelled, local = net::SocketAddress{localAddress, 0}, remote = net::SocketAddress{host, port}, onConnected = mConnectHandler, onFailed = mConnectTimeoutHandler]()
 		{
-			auto stream = net::TcpStream::connect(remote, internal::TcpConnectTimeout, [&cancelled]() { return cancelled->load(); });
+			auto stream = net::TcpStream::connect(remote, internal::TcpConnectTimeout, [&cancelled]() { return cancelled->load(); }, local);
 
 			if (cancelled->load())
 				return;

@@ -69,6 +69,8 @@ struct ConnectionRequest
 	std::chrono::steady_clock::time_point requestTime;
 	std::chrono::steady_clock::time_point lastActivityTime;
 
+	int									  dataPort{0}; // TCP port announced by the acceptor (remote.port is the signaling port)
+
 	bool								  localReadyFlag{false};
 	bool								  remoteReadyFlag{false};
 
@@ -87,7 +89,7 @@ public:
 	// Configuration
 	void							 setCallbacks(ConnectionServiceCallbacks cb) { mCallbacks = std::move(cb); }
 	void							 setConfig(const ConnectionConfig &config);
-	void							 setLocalIP(const std::string &ip) { mLocalIP = ip; }
+	void							 setLocalIP(const std::string &ip);
 	void							 setTransportFactory(ITransportFactory &transportFactory);
 
 	// Connection management
@@ -109,6 +111,11 @@ public:
 	bool							 sendDisconnectMessage(const std::string &computerName);
 	bool							 answerInvitation(const std::string &computerName, const bool connectionAccepted, const std::string &reason = "");
 	bool							 sendConnectionReadyFlag(const std::string &computerName, const bool flag);
+
+	// Signals from the remote (thread-safe, wired to SignalingService by the owner)
+	void							 onDisconnectReceived(const std::string &computerName);
+	void							 onReadyFlagReceived(const std::string &computerName);
+	void							 onDataPortReceived(const std::string &computerName, int dataPort);
 
 	// Receiving helper
 	void							 onReceivedInvitation(const std::string &computerName);

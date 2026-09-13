@@ -27,7 +27,7 @@ TcpStream::TcpStream(SocketHandle handle, SocketAddress localAddress, SocketAddr
 }
 
 
-Result<TcpStream> TcpStream::connect(const SocketAddress &remote, std::chrono::milliseconds timeout, const CancelPredicate &isCancelled)
+Result<TcpStream> TcpStream::connect(const SocketAddress &remote, std::chrono::milliseconds timeout, const CancelPredicate &isCancelled, const SocketAddress &localAddress)
 {
 	using Clock = std::chrono::steady_clock;
 
@@ -37,7 +37,13 @@ Result<TcpStream> TcpStream::connect(const SocketAddress &remote, std::chrono::m
 
 	SocketHandle handle(*native);
 
-	auto		 started = platform::startConnect(handle.get(), remote);
+	if (!localAddress.ip.empty())
+	{
+		if (auto bound = platform::bindTo(handle.get(), localAddress); !bound)
+			return std::unexpected(bound.error());
+	}
+
+	auto started = platform::startConnect(handle.get(), remote);
 
 	if (!started && started.error() != SocketError::WouldBlock)
 		return std::unexpected(started.error());

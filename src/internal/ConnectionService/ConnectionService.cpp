@@ -13,50 +13,55 @@
 netlink::ConnectionService::ConnectionService(SignalingService &signaling, ITransportFactory &transportFactory) : mSignaling(signaling), mTransportFactory(&transportFactory)
 {
 	mTaskQueue.start();
+}
 
-	SignalingCallbacks cb;
-	cb.onConnectRequested		= [this](const std::string &computerName) { onReceivedInvitation(computerName); };
-	cb.onConnectRequestAnswered = [this](const std::string &computerName, bool accepted) { onReceivedAnswerToInvite(computerName, accepted, ""); };
 
-	cb.onDisconnectReceived		= [this](const std::string &computerName)
-	{
-		mTaskQueue.post(
-			[this, computerName]()
-			{
-				std::lock_guard<std::mutex> lock(mConnectingMutex);
+void netlink::ConnectionService::setLocalIP(const std::string &ip)
+{
+	std::lock_guard<std::mutex> lock(mConnectingMutex);
+	mLocalIP = ip;
+}
 
-				// Only the peer we are dealing with may tear down the connection
-				if (!mCurrentRequest.has_value() || mCurrentRequest->remote.displayName != computerName)
-					return;
 
-				NETLINK_LOG_INFO("Remote {} disconnected", computerName);
+void netlink::ConnectionService::onDisconnectReceived(const std::string &computerName)
+{
+	mTaskQueue.post(
+		[this, computerName]()
+		{
+			std::lock_guard<std::mutex> lock(mConnectingMutex);
 
-				clearCurrentConnection();
-				notifyStatus(ConnectionStatusUpdate::Type::Closed, computerName + " disconnected");
-			});
-	};
+			// Only the peer we are dealing with may tear down the connection
+			if (!mCurrentRequest.has_value() || mCurrentRequest->remote.displayName != computerName)
+				return;
 
-	cb.onReadyFlagReceived = [this](const std::string &computerName)
-	{
-		mTaskQueue.post(
-			[this, computerName]()
-			{
-				std::lock_guard<std::mutex> lock(mConnectingMutex);
-				onReceivedConnectionReadyFlag(computerName);
-			});
-	};
+			NETLINK_LOG_INFO("Remote {} disconnected", computerName);
 
-	cb.onDataPortReceived = [this](const std::string &computerName, int dataPort)
-	{
-		std::lock_guard<std::mutex> lock(mConnectingMutex);
-		if (!mCurrentRequest.has_value())
-			return;
+			notifyStatus(ConnectionStatusUpdate::Type::Closed, computerName + " disconnected");
+			clearCurrentConnection();
+		});
+}
 
-		NETLINK_LOG_INFO("Received data port {} from {}", dataPort, computerName);
-		mCurrentRequest->remote.port = dataPort;
-	};
 
-	mSignaling.setCallbacks(std::move(cb));
+void netlink::ConnectionService::onReadyFlagReceived(const std::string &computerName)
+{
+	mTaskQueue.post(
+		[this, computerName]()
+		{
+			std::lock_guard<std::mutex> lock(mConnectingMutex);
+			onReceivedConnectionReadyFlag(computerName);
+		});
+}
+
+
+void netlink::ConnectionService::onDataPortReceived(const std::string &computerName, int dataPort)
+{
+	std::lock_guard<std::mutex> lock(mConnectingMutex);
+
+	if (!mCurrentRequest.has_value() || mCurrentRequest->remote.displayName != computerName)
+		return;
+
+	NETLINK_LOG_INFO("Received data port {} from {}", dataPort, computerName);
+	mCurrentRequest->dataPort = dataPort;
 }
 
 
@@ -400,8 +405,6 @@ void netlink::ConnectionService::onReceivedInvitation(const std::string &compute
 	mCurrentRequest			 = std::move(request);
 	mConnecting.store(true);
 
-	notifyStatus(ConnectionStatusUpdate::Type::InvitationReceived, "Invitation from " + computerName);
-
 	if (mConfig.autoAcceptConnection)
 	{
 		NETLINK_LOG_INFO("Auto-accepting connection from {}", computerName);
@@ -409,15 +412,8 @@ void netlink::ConnectionService::onReceivedInvitation(const std::string &compute
 		return;
 	}
 
-	// Notify with the remote endpoint so the app can show who is connecting.
-	// Start a timeout in case the app never responds.
-	{
-		ConnectionStatusUpdate update;
-		update.type		= ConnectionStatusUpdate::Type::InvitationReceived;
-		update.endpoint = mCurrentRequest->remote;
-		update.success	= true;
-		notifyStatus(std::move(update));
-	}
+	// Ask the app (exactly once) and start a timeout in case it never responds
+	notifyStatus(ConnectionStatusUpdate::Type::InvitationReceived, "Invitation from " + computerName);
 
 	mTimeoutService.startTimeout({ConnectionTimeouts::Invitation, computerName}, mConfig.invitationTimeoutMs, [this](const TimeoutKey &key) { onTimeout(key); });
 }
@@ -488,13 +484,18 @@ void netlink::ConnectionService::onReceivedConnectionReadyFlag(const std::string
 	mTimeoutService.cancelTimeout({ConnectionTimeouts::ReadyFlag, computerName});
 	mReadySync.setRemoteReady();
 
-	// If we are the Connector, we now know the Acceptor's bound port from the packet
-	// (port was updated in the callback lambda before this call)
+	// If we are the Connector, the Acceptor's data port arrived before its ready flag
 	if (mCurrentRequest->localRole == SessionRole::Connector && mCurrentRequest->client)
 	{
-		NETLINK_LOG_INFO("Connector: connecting to {}:{}", mCurrentRequest->remote.IPAddress, mCurrentRequest->remote.port);
+		if (mCurrentRequest->dataPort == 0)
+		{
+			NETLINK_LOG_ERROR("Connector: ready flag from {} without data port", computerName);
+			return;
+		}
+
+		NETLINK_LOG_INFO("Connector: connecting to {}:{}", mCurrentRequest->remote.IPAddress, mCurrentRequest->dataPort);
 		mCurrentRequest->state = ConnectionStateInternal::Connected;
-		mCurrentRequest->client->connect(mCurrentRequest->remote.IPAddress, static_cast<unsigned short>(mCurrentRequest->remote.port));
+		mCurrentRequest->client->connect(mLocalIP, mCurrentRequest->remote.IPAddress, static_cast<unsigned short>(mCurrentRequest->dataPort));
 	}
 }
 
@@ -557,6 +558,10 @@ void netlink::ConnectionService::notifyStatus(ConnectionStatusUpdate::Type type,
 void netlink::ConnectionService::notifyStatus(ConnectionStatusUpdate update)
 {
 	update.timestamp = std::chrono::steady_clock::now();
+
+	// Every update names the peer it is about (callers notify before clearing the current request)
+	if (update.endpoint.isEmpty() && mCurrentRequest.has_value())
+		update.endpoint = mCurrentRequest->remote;
 
 	if (update.success)
 		NETLINK_LOG_INFO("Connection [{}]: {}", update.getTypeString(), update.message);
@@ -631,11 +636,11 @@ bool netlink::ConnectionService::determineLocalSessionRole()
 		sendConnectionReadyFlag(mCurrentRequest->remote.displayName, true);
 
 		// If the acceptor's dataport + readyflag already arrived before we got here, connect now
-		if (mReadySync.isRemoteReady() && mCurrentRequest->remote.port != 0)
+		if (mReadySync.isRemoteReady() && mCurrentRequest->dataPort != 0)
 		{
-			NETLINK_LOG_INFO("Connector: remote already ready, connecting immediately to {}:{}", mCurrentRequest->remote.IPAddress, mCurrentRequest->remote.port);
+			NETLINK_LOG_INFO("Connector: remote already ready, connecting immediately to {}:{}", mCurrentRequest->remote.IPAddress, mCurrentRequest->dataPort);
 			mCurrentRequest->state = ConnectionStateInternal::Connected;
-			mCurrentRequest->client->connect(mCurrentRequest->remote.IPAddress, static_cast<unsigned short>(mCurrentRequest->remote.port));
+			mCurrentRequest->client->connect(mLocalIP, mCurrentRequest->remote.IPAddress, static_cast<unsigned short>(mCurrentRequest->dataPort));
 		}
 		else
 		{
@@ -710,8 +715,8 @@ void netlink::ConnectionService::onTransportDisconnected(const std::string &reas
 
 			NETLINK_LOG_WARNING("Transport: connection lost: {}", reason);
 
-			clearCurrentConnection();
 			notifyStatus(ConnectionStatusUpdate::Type::Closed, "Connection lost: " + reason, false);
+			clearCurrentConnection();
 		});
 }
 
@@ -743,6 +748,9 @@ void netlink::ConnectionService::onTimeout(const TimeoutKey &key)
 	{
 		NETLINK_LOG_WARNING("Ready flag timed out for {}", key.identifier);
 		if (!retryConnection())
+		{
+			notifyStatus(ConnectionStatusUpdate::Type::Failed, "Remote " + key.identifier + " did not get ready", false);
 			clearCurrentConnection();
+		}
 	}
 }
