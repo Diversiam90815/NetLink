@@ -8,7 +8,9 @@
 */
 
 #include "NetLinkCore.h"
+
 #include "NetLinkLog.h"
+#include "NetLinkVersion.h"
 
 
 netlink::NetLinkCore::NetLinkCore(NetLinkCoreDependencies dependencies)
@@ -138,19 +140,38 @@ void netlink::NetLinkCore::configure(const NetLinkConfig &config, const NetLinkC
 
 	// A configured secret must match on both sides; an empty secret disables the check
 	PeerValidationConfig validationConfig;
-	validationConfig.enableSecretCheck = !config.secret.empty();
+	validationConfig.enableSecretCheck	= !config.secret.empty();
+	validationConfig.enableVersionCheck = true;
 	mValidation.setConfig(validationConfig);
 	mValidation.setLocalSecret(config.secret);
+
+	const std::string version = config.applicationVersion.empty() ? std::string{internal::Version} : config.applicationVersion;
+	mValidation.setLocalVersion(version);
+
+	{
+		std::lock_guard<std::mutex> lock(mConfigMutex);
+		mLocalVersion = version;
+	}
 }
 
 
 bool netlink::NetLinkCore::init()
 {
-	if (!mSignaling.init(mConfig.localDisplayName))
+	std::string displayName;
+	std::string version;
+	{
+		std::lock_guard<std::mutex> lock(mConfigMutex);
+		displayName = mConfig.localDisplayName;
+		version		= mLocalVersion;
+	}
+
+	if (!mSignaling.init(displayName))
 	{
 		NETLINK_LOG_ERROR("NetLink init failed: a local display name is required");
 		return false;
 	}
+
+	NETLINK_LOG_INFO("NetLink {} starting as '{}', advertising protocol version {}", internal::Version, displayName, version.empty() ? std::string{internal::Version} : version);
 
 	mInitialized.store(true);
 	applyLocalAddress();
@@ -316,7 +337,12 @@ bool netlink::NetLinkCore::send(uint32_t type, const std::vector<uint8_t> &paylo
 
 void netlink::NetLinkCore::postEvent(Event event)
 {
-	mEvents.post([this, event = std::move(event)]() { event(mCallbacks); });
+	mEvents.post(
+		[this, event = std::move(event)]()
+		{
+			if (auto callbacks = mCallbacks.load())
+				event(*callbacks);
+		});
 }
 
 
@@ -349,10 +375,17 @@ void netlink::NetLinkCore::onConnectionStatus(const ConnectionStatusUpdate &upda
 	switch (update.type)
 	{
 	case ConnectionStatusUpdate::Type::Established:
-		mCommunication.init(update.session);
+		if (!mCommunication.init(update.session))
+		{
+			NETLINK_LOG_ERROR("Messaging could not be initialised for the session with {}", update.endpoint.displayName);
+			mState.store(ConnectionState::Error);
+			emitConnectionChanged(ConnectionState::Error, "Failed to initialise messaging", update.endpoint);
+			break;
+		}
+
 		mState.store(ConnectionState::Connected);
 		emitConnectionChanged(ConnectionState::Connected, update.message, update.endpoint);
-		mCommunication.start(); // after the Connected event, so no message is delivered before it
+		mCommunication.start();
 		break;
 
 	case ConnectionStatusUpdate::Type::InvitationReceived:

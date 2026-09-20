@@ -9,6 +9,7 @@
 
 #include <map>
 #include <mutex>
+#include <string_view>
 
 #include "ICompatibilityCheck.h"
 
@@ -33,6 +34,9 @@ public:
 
 	void						 setLocalVersion(std::string version);
 	std::string					 remoteVersion(const std::string &computerName) const;
+
+	// Two peers are compatible when major and minor match
+	static bool					 isCompatible(std::string_view first, std::string_view second);
 
 private:
 	std::string						   mLocalVersion;
