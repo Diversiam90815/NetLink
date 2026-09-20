@@ -1,7 +1,7 @@
 # Documentation on 
 # https://clang.llvm.org/docs/ClangFormatStyleOptions.html
 
-Standard: c++17
+Standard: Latest
 Language: Cpp
 BasedOnStyle: Microsoft
 
