@@ -9,7 +9,6 @@
 
 #include <algorithm>
 #include <span>
-#include <stdexcept>
 
 #include "NetLinkConstants.h"
 #include "NetLinkLog.h"
@@ -19,8 +18,14 @@ using json = nlohmann::json;
 
 namespace
 {
-constexpr auto AnnounceInterval = std::chrono::seconds(2);
+netlink::net::IPv4Address broadcastTarget(const DiscoveryConfig &config)
+{
+	if (config.broadcastAddress.isBroadcast() && config.subnetMask.isNetmask() && !config.localIPv4.isUnspecified())
+		return netlink::net::subnetBroadcast(config.localIPv4, config.subnetMask);
+
+	return config.broadcastAddress;
 }
+} // namespace
 
 
 DiscoveryService::DiscoveryService(netlink::net::DatagramSocketFactory socketFactory)
@@ -39,6 +44,13 @@ void DiscoveryService::setOnRemoteFound(RemoteFoundCallback cb)
 {
 	std::lock_guard<std::mutex> lock(mMutex);
 	mOnRemoteFound = std::move(cb);
+}
+
+
+void DiscoveryService::setOnRemoteLost(RemoteLostCallback cb)
+{
+	std::lock_guard<std::mutex> lock(mMutex);
+	mOnRemoteLost = std::move(cb);
 }
 
 
@@ -107,12 +119,16 @@ DiscoveryConfig DiscoveryService::getConfig() const
 }
 
 
-void DiscoveryService::startDiscovery()
+bool DiscoveryService::startDiscovery()
 {
 	if (!socket())
-		throw std::runtime_error("Discovery Service has not been initialized but was called to start!");
+	{
+		NETLINK_LOG_ERROR("Discovery cannot start: the service has not been initialised");
+		return false;
+	}
 
 	ThreadBase::start();
+	return true;
 }
 
 
@@ -126,8 +142,8 @@ DiscoveryEndpoint DiscoveryService::getEndpointFromIP(const netlink::net::IPv4Ad
 {
 	std::lock_guard<std::mutex> lock(mMutex);
 
-	auto						it = std::ranges::find_if(mRemoteDevices, [&](const DiscoveryEndpoint &endpoint) { return endpoint.IPAddress == IPv4; });
-	return it != mRemoteDevices.end() ? *it : DiscoveryEndpoint{};
+	auto						it = std::ranges::find_if(mRemoteDevices, [&](const KnownPeer &peer) { return peer.endpoint.IPAddress == IPv4; });
+	return it != mRemoteDevices.end() ? it->endpoint : DiscoveryEndpoint{};
 }
 
 
@@ -144,26 +160,29 @@ void DiscoveryService::addRemoteToList(DiscoveryEndpoint remote)
 		if (mConfig.localIPv4 == remote.IPAddress)
 			return;
 
-		auto it = std::ranges::find_if(mRemoteDevices, [&](const DiscoveryEndpoint &endpoint) { return endpoint.IPAddress == remote.IPAddress; });
+		const auto now = std::chrono::steady_clock::now();
+
+		auto	   it  = std::ranges::find_if(mRemoteDevices, [&](const KnownPeer &peer) { return peer.endpoint.IPAddress == remote.IPAddress; });
 
 		if (it != mRemoteDevices.end())
 		{
-			if (*it == remote && it->displayName == remote.displayName)
-				return;	  // periodic re-announcement
+			it->lastSeen = now;
 
-			NETLINK_LOG_INFO("Remote updated: IP={}, Port={}, Name={}", remote.IPAddress, remote.port, remote.displayName);
-			*it = remote; // e.g. the remote rebound its signaling socket
+			if (it->endpoint == remote && it->endpoint.displayName == remote.displayName)
+				return;			   // periodic re-announcement
+
+			NETLINK_LOG_INFO("Remote updated: IP={}, Port={}, Name={}", remote.IPAddress.toString(), remote.port, remote.displayName);
+			it->endpoint = remote; // e.g. the remote rebound its signaling socket
 		}
 		else
 		{
-			NETLINK_LOG_INFO("Found remote: IP={}, Port={}, Name={}", remote.IPAddress, remote.port, remote.displayName);
-			mRemoteDevices.push_back(remote);
+			NETLINK_LOG_INFO("Found remote: IP={}, Port={}, Name={}", remote.IPAddress.toString(), remote.port, remote.displayName);
+			mRemoteDevices.push_back({remote, now});
 		}
 
 		callback = mOnRemoteFound;
 	}
 
-	// Outside the lock: the callback may call back into this service
 	if (callback)
 		callback(remote);
 }
@@ -185,29 +204,63 @@ void DiscoveryService::run()
 		if (mAnnounceRequested.exchange(false) || std::chrono::steady_clock::now() >= mNextSendTime)
 		{
 			sendPackage();
-			mNextSendTime = std::chrono::steady_clock::now() + AnnounceInterval;
+			mNextSendTime = std::chrono::steady_clock::now() + std::chrono::milliseconds(mConfig.announceIntervalMS);
 		}
 
+		expireStalePeers();
 		receivePackage();
+	}
+}
+
+
+void DiscoveryService::expireStalePeers()
+{
+	std::vector<DiscoveryEndpoint> lost;
+	RemoteLostCallback			   callback;
+
+	{
+		std::lock_guard<std::mutex> lock(mMutex);
+
+		const auto					deadline = std::chrono::steady_clock::now() - std::chrono::milliseconds(mConfig.peerTimeoutMs);
+
+		for (auto it = mRemoteDevices.begin(); it != mRemoteDevices.end();)
+		{
+			if (it->lastSeen < deadline)
+			{
+				NETLINK_LOG_INFO("Remote {} stopped announcing, dropping it", it->endpoint.displayName);
+				lost.push_back(it->endpoint);
+				it = mRemoteDevices.erase(it);
+			}
+			else
+				++it;
+		}
+
+		callback = mOnRemoteLost;
+	}
+
+	// Outside the lock: the callback may call back into this service
+	if (callback)
+	{
+		for (const auto &endpoint : lost)
+			callback(endpoint);
 	}
 }
 
 
 void DiscoveryService::sendPackage()
 {
-	auto			socket = this->socket();
-	DiscoveryConfig config = getConfig();
+	auto socket = this->socket();
 
 	if (!socket)
 		return;
 
 	DiscoveryEndpoint local{};
-	local.IPAddress			  = config.localIPv4;
-	local.displayName		  = config.displayName;
-	local.port				  = config.signalingPort;
+	local.IPAddress			  = mConfig.localIPv4;
+	local.displayName		  = mConfig.displayName;
+	local.port				  = mConfig.signalingPort;
 
 	const std::string message = json(local).dump();
-	const auto		  target  = netlink::net::SocketAddress{config.broadcastAddress, static_cast<uint16_t>(config.discoveryPort)};
+	const auto		  target  = netlink::net::SocketAddress{broadcastTarget(mConfig), static_cast<uint16_t>(mConfig.discoveryPort)};
 
 	if (auto sent = socket->sendTo(target, std::span(reinterpret_cast<const uint8_t *>(message.data()), message.size())); !sent)
 		NETLINK_LOG_WARNING("DiscoveryService: announcing to {} failed: {}", target.toString(), netlink::net::toString(sent.error()));
@@ -232,6 +285,15 @@ void DiscoveryService::receivePackage()
 			waitForEvent(static_cast<unsigned long>(netlink::internal::SocketPollInterval.count()));
 
 		return;
+	}
+
+	if (mConfig.subnetMask.isNetmask() && !mConfig.localIPv4.isUnspecified())
+	{
+		if (!netlink::net::sameSubnet(mConfig.localIPv4, datagram->from.ip, mConfig.subnetMask))
+		{
+			NETLINK_LOG_DEBUG("Ignoring announcement from {}: outside the selected subnet", datagram->from.toString());
+			return;
+		}
 	}
 
 	try

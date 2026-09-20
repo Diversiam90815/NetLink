@@ -46,13 +46,34 @@ void netlink::NetLinkCore::wireServices()
 			mValidation.onPeerDiscovered(endpoint);
 		});
 
+	// Discovery -> forget a peer that left the network
+	mDiscovery.setOnRemoteLost(
+		[this](const DiscoveryEndpoint &endpoint)
+		{
+			// The peer of an active session may legitimately stop announcing; dropping
+			// its signaling registration here would break that connection
+			if (auto current = mConnectionService.getCurrentRemote(); current.has_value() && current->displayName == endpoint.displayName)
+				return;
+
+			mSignaling.unregisterPeer(endpoint.displayName);
+			mValidation.clearValidatedPeer(endpoint.displayName);
+
+			postEvent(
+				[peer = toPublicEndpoint(endpoint)](const NetLinkCallbacks &callbacks)
+				{
+					if (callbacks.onRemoteLost)
+						callbacks.onRemoteLost(peer);
+				});
+		});
+
 	// Signaling -> connection lifecycle
 	SignalingConnectionCallbacks connectionSignals;
 	connectionSignals.onConnectRequested	   = [this](const std::string &name) { mConnectionService.onReceivedInvitation(name); };
-	connectionSignals.onConnectRequestAnswered = [this](const std::string &name, bool accepted) { mConnectionService.onReceivedAnswerToInvite(name, accepted, ""); };
-	connectionSignals.onDisconnectReceived	   = [this](const std::string &name) { mConnectionService.onDisconnectReceived(name); };
-	connectionSignals.onReadyFlagReceived	   = [this](const std::string &name) { mConnectionService.onReadyFlagReceived(name); };
-	connectionSignals.onDataPortReceived	   = [this](const std::string &name, int port) { mConnectionService.onDataPortReceived(name, port); };
+	connectionSignals.onConnectRequestAnswered = [this](const std::string &name, bool accepted, const std::string &reason)
+	{ mConnectionService.onReceivedAnswerToInvite(name, accepted, reason); };
+	connectionSignals.onDisconnectReceived = [this](const std::string &name) { mConnectionService.onDisconnectReceived(name); };
+	connectionSignals.onReadyFlagReceived  = [this](const std::string &name) { mConnectionService.onReadyFlagReceived(name); };
+	connectionSignals.onDataPortReceived   = [this](const std::string &name, int port) { mConnectionService.onDataPortReceived(name, port); };
 	mSignaling.setConnectionCallbacks(std::move(connectionSignals));
 
 	// Signaling -> peer validation
@@ -101,8 +122,12 @@ void netlink::NetLinkCore::wireServices()
 
 void netlink::NetLinkCore::configure(const NetLinkConfig &config, const NetLinkCallbacks &callbacks)
 {
-	mConfig	   = config;
-	mCallbacks = callbacks;
+	{
+		std::lock_guard<std::mutex> lock(mConfigMutex);
+		mConfig = config;
+	}
+
+	mCallbacks.store(std::make_shared<const NetLinkCallbacks>(callbacks));
 
 	if (config.transport != mTransportKind)
 	{
@@ -149,7 +174,7 @@ void netlink::NetLinkCore::shutdown()
 }
 
 
-void netlink::NetLinkCore::setLocalAddress(const std::string &ipv4)
+void netlink::NetLinkCore::setLocalAddress(const std::string &ipv4, const std::string &subnetMask)
 {
 	// Boundary between the OS-facing string addresses and the validated type used internally
 	const auto parsed = net::IPv4Address::parse(ipv4);
@@ -160,9 +185,13 @@ void netlink::NetLinkCore::setLocalAddress(const std::string &ipv4)
 		return;
 	}
 
+	// An unusable mask simply disables subnet scoping rather than failing the switch
+	const auto mask = net::IPv4Address::parse(subnetMask);
+
 	{
-		std::lock_guard<std::mutex> lock(mAddressMutex);
+		std::lock_guard<std::mutex> lock(mConfigMutex);
 		mLocalAddress = *parsed;
+		mSubnetMask	  = mask.value_or(net::IPv4Address{});
 	}
 
 	if (mInitialized.load())
@@ -174,7 +203,7 @@ void netlink::NetLinkCore::applyLocalAddress()
 {
 	net::IPv4Address address;
 	{
-		std::lock_guard<std::mutex> lock(mAddressMutex);
+		std::lock_guard<std::mutex> lock(mConfigMutex);
 		address = mLocalAddress;
 	}
 
@@ -192,15 +221,16 @@ void netlink::NetLinkCore::updateDiscoveryConfig()
 	DiscoveryConfig discoveryConfig;
 
 	{
-		std::lock_guard<std::mutex> lock(mAddressMutex);
-		discoveryConfig.localIPv4 = mLocalAddress;
+		std::lock_guard<std::mutex> lock(mConfigMutex);
+		discoveryConfig.localIPv4		 = mLocalAddress;
+		discoveryConfig.subnetMask		 = mSubnetMask;
+		discoveryConfig.displayName		 = mConfig.localDisplayName;
+		discoveryConfig.discoveryPort	 = mConfig.discoveryPort;
+		// A malformed configured broadcast address falls back to the global one
+		discoveryConfig.broadcastAddress = net::IPv4Address::parse(mConfig.broadcastAddress).value_or(net::IPv4Address::broadcast());
 	}
 
-	discoveryConfig.displayName		 = mConfig.localDisplayName;
-	discoveryConfig.discoveryPort	 = mConfig.discoveryPort;
-	// A malformed configured broadcast address falls back to the global one
-	discoveryConfig.broadcastAddress = net::IPv4Address::parse(mConfig.broadcastAddress).value_or(net::IPv4Address::broadcast());
-	discoveryConfig.signalingPort	 = mSignaling.getBoundPort();
+	discoveryConfig.signalingPort = mSignaling.getBoundPort();
 
 	if (!mDiscovery.init(discoveryConfig))
 		NETLINK_LOG_ERROR("Discovery could not be configured for {}", discoveryConfig.localIPv4.toString());
@@ -213,13 +243,9 @@ void netlink::NetLinkCore::updateDiscoveryConfig()
 
 bool netlink::NetLinkCore::startDiscovery()
 {
-	try
+	if (!mDiscovery.startDiscovery())
 	{
-		mDiscovery.startDiscovery();
-	}
-	catch (const std::exception &e)
-	{
-		NETLINK_LOG_ERROR("Cannot start discovery (no local address selected?): {}", e.what());
+		NETLINK_LOG_ERROR("Cannot start discovery: no local address selected?");
 		return false;
 	}
 

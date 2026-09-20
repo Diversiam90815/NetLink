@@ -55,7 +55,7 @@ public:
 	void				  shutdown();
 
 	// Local interface address all networking runs on (the selected network adapter)
-	void				  setLocalAddress(const std::string &ipv4);
+	void				  setLocalAddress(const std::string &ipv4, const std::string &subnetMask = {});
 
 	bool				  startDiscovery();
 	void				  stopDiscovery();
@@ -70,42 +70,42 @@ public:
 
 	bool				  send(uint32_t type, const std::vector<uint8_t> &payload, DeliveryMode mode);
 
-	// Queues a public callback invocation onto the event thread. Callbacks never run on internal
-	// threads or while internal locks are held, so they may safely call back into NetLink.
+	// Queues a public callback invocation onto the event thread
 	void				  postEvent(Event event);
 
 private:
-	void							   wireServices();
+	void												 wireServices();
 
-	void							   applyLocalAddress();
-	void							   updateDiscoveryConfig();
+	void												 applyLocalAddress();
+	void												 updateDiscoveryConfig();
 
-	void							   onConnectionStatus(const ConnectionStatusUpdate &update);
-	void							   onValidationResult(const ValidationResult &result);
+	void												 onConnectionStatus(const ConnectionStatusUpdate &update);
+	void												 onValidationResult(const ValidationResult &result);
 
-	void							   emitConnectionChanged(ConnectionState state, const std::string &message, const DiscoveryEndpoint &remote);
+	void												 emitConnectionChanged(ConnectionState state, const std::string &message, const DiscoveryEndpoint &remote);
 
-	static Endpoint					   toPublicEndpoint(const DiscoveryEndpoint &endpoint);
+	static Endpoint										 toPublicEndpoint(const DiscoveryEndpoint &endpoint);
 
+	std::atomic<std::shared_ptr<const NetLinkCallbacks>> mCallbacks{std::make_shared<const NetLinkCallbacks>()};
 
-	NetLinkConfig					   mConfig;
-	NetLinkCallbacks				   mCallbacks;
+	mutable std::mutex									 mConfigMutex;
+	NetLinkConfig										 mConfig;
+	net::IPv4Address									 mLocalAddress;
+	net::IPv4Address									 mSubnetMask;
+	std::string											 mLocalVersion;
+	std::atomic<bool>									 mInitialized{false};
+	std::atomic<ConnectionState>						 mState{ConnectionState::None};
 
-	std::mutex						   mAddressMutex;
-	net::IPv4Address				   mLocalAddress;
-	std::atomic<bool>				   mInitialized{false};
-	std::atomic<ConnectionState>	   mState{ConnectionState::None};
+	TaskQueue											 mEvents;
 
-	TaskQueue						   mEvents;
-
-	// Services (declaration order = construction order; dependencies first)
-	DiscoveryService				   mDiscovery;
-	SignalingService				   mSignaling;
-	TransportKind					   mTransportKind{TransportKind::Tcp};
-	std::unique_ptr<ITransportFactory> mTransportFactory;
-	PeerValidationService			   mValidation;
-	ConnectionService				   mConnectionService;
-	RemoteCommunication				   mCommunication;
+	// Services
+	DiscoveryService									 mDiscovery;
+	SignalingService									 mSignaling;
+	TransportKind										 mTransportKind{TransportKind::Tcp};
+	std::unique_ptr<ITransportFactory>					 mTransportFactory;
+	PeerValidationService								 mValidation;
+	ConnectionService									 mConnectionService;
+	RemoteCommunication									 mCommunication;
 };
 
 } // namespace netlink

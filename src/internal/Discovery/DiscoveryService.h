@@ -28,10 +28,15 @@ struct DiscoveryConfig
 	int						  signalingPort{0};
 	int						  discoveryPort{5555};
 	netlink::net::IPv4Address broadcastAddress{netlink::net::IPv4Address::broadcast()};
+	int						  peerTimeoutMs{6000};
+	int						  announceIntervalMS{2000};
+
+	netlink::net::IPv4Address subnetMask{}; // When set, inbound announcements from other subnets are ignored
 };
 
 
 using RemoteFoundCallback = std::function<void(const DiscoveryEndpoint &)>;
+using RemoteLostCallback  = std::function<void(const DiscoveryEndpoint &)>;
 
 
 class DiscoveryService : private ThreadBase
@@ -45,13 +50,16 @@ public:
 	// Invoked on the discovery thread for every new (or changed) remote
 	void			  setOnRemoteFound(RemoteFoundCallback cb);
 
+	// Invoked on the discovery thread when a remote stopped announcing for peerTimeoutMs
+	void			  setOnRemoteLost(RemoteLostCallback cb);
+
 	// Applies the configuration. Rebinds the socket only if the discovery port changed. Safe while discovering.
 	bool			  init(const DiscoveryConfig &config);
 	void			  deinit();
 
 	DiscoveryConfig	  getConfig() const;
 
-	void			  startDiscovery();
+	bool			  startDiscovery();
 	void			  stopDiscovery();
 	bool			  isDiscovering() const { return isRunning(); }
 
@@ -64,6 +72,7 @@ private:
 
 	void										   sendPackage();
 	void										   receivePackage();
+	void										   expireStalePeers();
 
 	std::shared_ptr<netlink::net::IDatagramSocket> socket() const;
 
@@ -72,12 +81,21 @@ private:
 	mutable std::mutex							   mMutex;
 	DiscoveryConfig								   mConfig;
 	std::shared_ptr<netlink::net::IDatagramSocket> mSocket;
-	std::vector<DiscoveryEndpoint>				   mRemoteDevices;
-	RemoteFoundCallback							   mOnRemoteFound;
 
-	std::atomic<bool>							   mAnnounceRequested{false};
+	// Liveness is tracked per peer so one that leaves the network can be dropped again
+	struct KnownPeer
+	{
+		DiscoveryEndpoint					  endpoint;
+		std::chrono::steady_clock::time_point lastSeen;
+	};
+
+	std::vector<KnownPeer>				  mRemoteDevices;
+	RemoteFoundCallback					  mOnRemoteFound;
+	RemoteLostCallback					  mOnRemoteLost;
+
+	std::atomic<bool>					  mAnnounceRequested{false};
 
 	// Only touched by the discovery thread
-	std::vector<uint8_t>						   mReceiveBuffer;
-	std::chrono::steady_clock::time_point		   mNextSendTime;
+	std::vector<uint8_t>				  mReceiveBuffer;
+	std::chrono::steady_clock::time_point mNextSendTime;
 };
