@@ -4,12 +4,27 @@ on:
   push:
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CPM_SOURCE_CACHE: ${{ github.workspace }}/.cpm-cache
+
 jobs:
   build:
     runs-on: windows-latest
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Cache CPM dependencies
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.cpm-cache
+          key: ${{ runner.os }}-cpm-${{ hashFiles('CMakeLists.txt', 'cmake/*.cmake') }}
+          restore-keys: ${{ runner.os }}-cpm-
+
 
       - uses: ilammy/msvc-dev-cmd@v1
 
