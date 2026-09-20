@@ -60,17 +60,6 @@ netlink::NetLink::~NetLink()
 }
 
 
-netlink::NetLink &netlink::NetLink::operator=(NetLink &&other) noexcept
-{
-	if (this != &other)
-	{
-		shutdown();
-		pImpl = std::move(other.pImpl);
-	}
-	return *this;
-}
-
-
 void netlink::NetLink::configure(const NetLinkConfig &config, const NetLinkCallbacks &callbacks)
 {
 	pImpl->core.configure(config, callbacks);
@@ -85,13 +74,14 @@ bool netlink::NetLink::init()
 	impl->network.setOnAdapterChanged(
 		[impl](const std::string &newIPv4)
 		{
-			impl->core.setLocalAddress(newIPv4);
+			impl->core.setLocalAddress(newIPv4, impl->network.getCurrentNetworkAdapter().Subnet);
 
-			impl->core.postEvent([adapter = toPublicAdapter(impl->network.getCurrentNetworkAdapter())](const NetLinkCallbacks &callbacks)
-								 {
-									 if (callbacks.onNetworkAdapterChanged)
-										 callbacks.onNetworkAdapterChanged(adapter);
-								 });
+			impl->core.postEvent(
+				[adapter = toPublicAdapter(impl->network.getCurrentNetworkAdapter())](const NetLinkCallbacks &callbacks)
+				{
+					if (callbacks.onNetworkAdapterChanged)
+						callbacks.onNetworkAdapterChanged(adapter);
+				});
 		});
 
 	if (!impl->network.init())
@@ -106,7 +96,7 @@ bool netlink::NetLink::init()
 
 	if (current.isValid())
 	{
-		impl->core.setLocalAddress(current.IPv4);
+		impl->core.setLocalAddress(current.IPv4, current.Subnet);
 		return true;
 	}
 
@@ -126,9 +116,6 @@ bool netlink::NetLink::init()
 
 void netlink::NetLink::shutdown()
 {
-	if (!pImpl)
-		return; // moved-from
-
 	pImpl->core.shutdown();
 }
 

@@ -98,6 +98,10 @@ struct NetLinkCallbacks
 	// A compatible remote was discovered and validated (matching secret): connectTo() can be called
 	std::function<void(const Endpoint &remote)>		   onRemoteDiscovered;
 
+	// A previously discovered remote stopped announcing and is no longer reachable.
+	// Not raised for the peer of an active connection, which may legitimately go quiet.
+	std::function<void(const Endpoint &remote)>		   onRemoteLost;
+
 	// Connected state changed (connected, disconnected, error, etc.)
 	std::function<void(const ConnectionEvent)>		   onConnectionChanged;
 
@@ -118,6 +122,7 @@ struct NetLinkConfig
 	std::string	  broadcastAddress{"255.255.255.255"};
 	std::string	  secret{"NetLink"};
 	TransportKind transport{TransportKind::Tcp};
+	std::string	  applicationVersion{}; // Two peers are compatible when the major and minor components match; patch and build number are ignored
 };
 
 
@@ -129,11 +134,11 @@ public:
 	NetLink();
 	~NetLink();
 
-	// Non-copyable, movable
-	NetLink(const NetLink &)			= delete;
-	NetLink &operator=(const NetLink &) = delete;
-	NetLink(NetLink &&) noexcept		= default;
-	NetLink					   &operator=(NetLink &&) noexcept;
+	// Non-copyable and non-movable
+	NetLink(const NetLink &)						  = delete;
+	NetLink &operator=(const NetLink &)				  = delete;
+	NetLink(NetLink &&)								  = delete;
+	NetLink					   &operator=(NetLink &&) = delete;
 
 	// Register all callbacks. Call before init()
 	// Callbacks run one at a time on NetLink's event thread, never while internal locks are held:
