@@ -56,6 +56,7 @@ public:
 
 	bool						   contains(const DiscoveryEndpoint &endpoint) const;
 	std::optional<KnownPeer>	   find(const DiscoveryEndpoint &endpoint) const;
+	std::optional<KnownPeer>	   findByIP(const netlink::net::IPv4Address &ip) const;
 	std::vector<KnownPeer>		   snapshot() const;
 	size_t						   size() const;
 	void						   clear();

@@ -108,7 +108,7 @@ void DiscoveryService::deinit()
 		mSocket->shutdown();
 
 	mSocket.reset();
-	mRemoteDevices.clear();
+	mRegistry.clear();
 }
 
 
@@ -140,51 +140,23 @@ void DiscoveryService::stopDiscovery()
 
 DiscoveryEndpoint DiscoveryService::getEndpointFromIP(const netlink::net::IPv4Address &IPv4)
 {
-	std::lock_guard<std::mutex> lock(mMutex);
-
-	auto						it = std::ranges::find_if(mRemoteDevices, [&](const KnownPeer &peer) { return peer.endpoint.IPAddress == IPv4; });
-	return it != mRemoteDevices.end() ? it->endpoint : DiscoveryEndpoint{};
+	auto entry = mRegistry.findByIP(IPv4);
+	return entry ? entry->endpoint : DiscoveryEndpoint{};
 }
 
 
 void DiscoveryService::addRemoteToList(DiscoveryEndpoint remote)
 {
-	if (!remote.isValid())
-		return;
+	auto result = mRegistry.addOrUpdate(remote);
 
-	RemoteFoundCallback callback;
-
+	switch (result)
 	{
-		std::lock_guard<std::mutex> lock(mMutex);
-
-		if (mConfig.localIPv4 == remote.IPAddress)
-			return;
-
-		const auto now = std::chrono::steady_clock::now();
-
-		auto	   it  = std::ranges::find_if(mRemoteDevices, [&](const KnownPeer &peer) { return peer.endpoint.IPAddress == remote.IPAddress; });
-
-		if (it != mRemoteDevices.end())
-		{
-			it->lastSeen = now;
-
-			if (it->endpoint == remote && it->endpoint.displayName == remote.displayName)
-				return;			   // periodic re-announcement
-
-			NETLINK_LOG_INFO("Remote updated: IP={}, Port={}, Name={}", remote.IPAddress.toString(), remote.port, remote.displayName);
-			it->endpoint = remote; // e.g. the remote rebound its signaling socket
-		}
-		else
-		{
-			NETLINK_LOG_INFO("Found remote: IP={}, Port={}, Name={}", remote.IPAddress.toString(), remote.port, remote.displayName);
-			mRemoteDevices.push_back({remote, now});
-		}
-
-		callback = mOnRemoteFound;
+	case netlink::discovery::DiscoveryRegistry::UpdateResult::Added:
+	case netlink::discovery::DiscoveryRegistry::UpdateResult::Updated:
+		if (mOnRemoteFound)
+			mOnRemoteFound(remote);
+		break;
 	}
-
-	if (callback)
-		callback(remote);
 }
 
 
@@ -215,34 +187,13 @@ void DiscoveryService::run()
 
 void DiscoveryService::expireStalePeers()
 {
-	std::vector<DiscoveryEndpoint> lost;
-	RemoteLostCallback			   callback;
+	auto timeout = std::chrono::milliseconds(mConfig.peerTimeoutMs);
+	auto stale	 = mRegistry.removeStale(timeout);
 
+	for (auto &endpoint : stale)
 	{
-		std::lock_guard<std::mutex> lock(mMutex);
-
-		const auto					deadline = std::chrono::steady_clock::now() - std::chrono::milliseconds(mConfig.peerTimeoutMs);
-
-		for (auto it = mRemoteDevices.begin(); it != mRemoteDevices.end();)
-		{
-			if (it->lastSeen < deadline)
-			{
-				NETLINK_LOG_INFO("Remote {} stopped announcing, dropping it", it->endpoint.displayName);
-				lost.push_back(it->endpoint);
-				it = mRemoteDevices.erase(it);
-			}
-			else
-				++it;
-		}
-
-		callback = mOnRemoteLost;
-	}
-
-	// Outside the lock: the callback may call back into this service
-	if (callback)
-	{
-		for (const auto &endpoint : lost)
-			callback(endpoint);
+		if (mOnRemoteLost)
+			mOnRemoteLost(endpoint);
 	}
 }
 

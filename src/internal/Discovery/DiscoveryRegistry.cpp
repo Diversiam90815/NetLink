@@ -79,7 +79,7 @@ std::vector<DiscoveryEndpoint> DiscoveryRegistry::removeStale(std::chrono::milli
 															   [&](const KnownPeer &peer)
 															   {
 										 bool isStale = (now - peer.lastSeen) > timeout;
-										 
+
 										 if (isStale)
 											 removed.push_back(peer.endpoint);
 
@@ -103,6 +103,19 @@ std::optional<DiscoveryRegistry::KnownPeer> DiscoveryRegistry::find(const Discov
 	std::lock_guard lock(mMutex);
 
 	auto			it = findIt(endpoint);
+
+	if (it == mKnownPeers.end())
+		return std::nullopt;
+
+	return *it;
+}
+
+
+std::optional<DiscoveryRegistry::KnownPeer> DiscoveryRegistry::findByIP(const netlink::net::IPv4Address &ip) const
+{
+	std::lock_guard lock(mMutex);
+
+	auto			it = std::ranges::find_if(mKnownPeers, [&](const KnownPeer &e) { return e.endpoint.IPAddress == ip; });
 
 	if (it == mKnownPeers.end())
 		return std::nullopt;

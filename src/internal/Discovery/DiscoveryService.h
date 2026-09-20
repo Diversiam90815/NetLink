@@ -2,7 +2,6 @@
   ==============================================================================
 	Module:         DiscoveryService
 	Description:    LAN discovery via UDP broadcast.
-					Announces the local endpoint periodically and reports remotes that announce themselves.
   ==============================================================================
 */
 
@@ -17,6 +16,7 @@
 #include <vector>
 
 #include "DiscoveryEndpoint.h"
+#include "DiscoveryRegistry.h"
 #include "ThreadBase.h"
 #include "Socket/IDatagramSocket.h"
 
@@ -82,20 +82,14 @@ private:
 	DiscoveryConfig								   mConfig;
 	std::shared_ptr<netlink::net::IDatagramSocket> mSocket;
 
-	// Liveness is tracked per peer so one that leaves the network can be dropped again
-	struct KnownPeer
-	{
-		DiscoveryEndpoint					  endpoint;
-		std::chrono::steady_clock::time_point lastSeen;
-	};
+	netlink::discovery::DiscoveryRegistry		   mRegistry;
 
-	std::vector<KnownPeer>				  mRemoteDevices;
-	RemoteFoundCallback					  mOnRemoteFound;
-	RemoteLostCallback					  mOnRemoteLost;
+	RemoteFoundCallback							   mOnRemoteFound;
+	RemoteLostCallback							   mOnRemoteLost;
 
-	std::atomic<bool>					  mAnnounceRequested{false};
+	std::atomic<bool>							   mAnnounceRequested{false};
 
 	// Only touched by the discovery thread
-	std::vector<uint8_t>				  mReceiveBuffer;
-	std::chrono::steady_clock::time_point mNextSendTime;
+	std::vector<uint8_t>						   mReceiveBuffer;
+	std::chrono::steady_clock::time_point		   mNextSendTime;
 };
