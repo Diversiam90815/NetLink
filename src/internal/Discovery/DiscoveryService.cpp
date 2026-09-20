@@ -161,7 +161,7 @@ void DiscoveryService::addRemoteToList(DiscoveryEndpoint remote)
 	switch (result)
 	{
 	case netlink::discovery::DiscoveryRegistry::UpdateResult::Added:
-		// case netlink::discovery::DiscoveryRegistry::UpdateResult::Updated:	// @TODO: implement peer updated callback
+	case netlink::discovery::DiscoveryRegistry::UpdateResult::Updated:
 		if (mOnRemoteFound)
 			mOnRemoteFound(remote);
 		break;

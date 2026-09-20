@@ -31,10 +31,11 @@ public:
 		TimePoint		  lastSeen;
 	};
 
-	enum class UpdateResult
+enum class UpdateResult
 	{
-		Added,	 // New peer, not previously known
-		Updated, // Existing peer, timestamp (and/or metadata) refreshed
+		Added,	   // New peer, not previously known
+		Refreshed, // Existing peer, only timestamp updated (endpoint metadata unchanged)
+		Updated,   // Existing peer, endpoint metadata changed
 	};
 
 	DiscoveryRegistry()													= default;
@@ -66,8 +67,8 @@ private:
 	std::vector<KnownPeer> mKnownPeers;
 
 	// Non-locking helpers, must be called while holding mMutex
-	auto				   findIt(const DiscoveryEndpoint &endpoint);
-	auto				   findIt(const DiscoveryEndpoint &endpoint) const;
+	auto				   findIt(const netlink::net::IPv4Address &ip);
+	auto				   findIt(const netlink::net::IPv4Address &ip) const;
 };
 
 } // namespace netlink::discovery

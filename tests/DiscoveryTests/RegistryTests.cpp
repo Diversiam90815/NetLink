@@ -41,7 +41,7 @@ TEST(DiscoveryRegistry, AddOrUpdate_ReturnsUpdatedForExistingPeer)
 	registry.addOrUpdate(endpoint);
 
 	auto result = registry.addOrUpdate(endpoint);
-	EXPECT_EQ(result, DiscoveryRegistry::UpdateResult::Updated) << "Adding an already-known peer again must report Updated, not Added";
+	EXPECT_EQ(result, DiscoveryRegistry::UpdateResult::Refreshed) << "Adding an already-known peer again must report Refreshed, not Added or Updated";
 	EXPECT_EQ(registry.size(), 1u) << "Re-adding an existing peer must not create a duplicate entry";
 }
 
@@ -83,7 +83,7 @@ TEST(DiscoveryRegistry, AddOrUpdate_TreatsDifferentPortAsDifferentPeer)
 	registry.addOrUpdate(makeEndpoint("10.0.0.6", 6001, "pc-b"));
 	registry.addOrUpdate(makeEndpoint("10.0.0.6", 6002, "pc-b"));
 
-	EXPECT_EQ(registry.size(), 2u) << "Endpoints with the same IP but different ports must be tracked as distinct peers";
+	EXPECT_EQ(registry.size(), 1u) << "Endpoints with the same IP but different ports must be same peer but updated";
 }
 
 

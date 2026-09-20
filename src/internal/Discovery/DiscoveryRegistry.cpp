@@ -11,15 +11,15 @@
 namespace netlink::discovery
 {
 
-auto DiscoveryRegistry::findIt(const DiscoveryEndpoint &endpoint)
+auto DiscoveryRegistry::findIt(const netlink::net::IPv4Address &ip)
 {
-	return std::find_if(mKnownPeers.begin(), mKnownPeers.end(), [&](const KnownPeer &peer) { return peer.endpoint == endpoint; });
+	return std::ranges::find_if(mKnownPeers, [&](const KnownPeer &p) { return p.endpoint.IPAddress == ip; });
 }
 
 
-auto DiscoveryRegistry::findIt(const DiscoveryEndpoint &endpoint) const
+auto DiscoveryRegistry::findIt(const netlink::net::IPv4Address &ip) const
 {
-	return std::find_if(mKnownPeers.begin(), mKnownPeers.end(), [&](const KnownPeer &peer) { return peer.endpoint == endpoint; });
+	return std::ranges::find_if(mKnownPeers, [&](const KnownPeer &p) { return p.endpoint.IPAddress == ip; });
 }
 
 
@@ -27,13 +27,16 @@ DiscoveryRegistry::UpdateResult DiscoveryRegistry::addOrUpdate(const DiscoveryEn
 {
 	std::lock_guard lock(mMutex);
 
-	auto			it = findIt(endpoint);
+	auto			it = findIt(endpoint.IPAddress);
 
 	if (it != mKnownPeers.end())
 	{
-		it->endpoint = endpoint; // refresh metadata
-		it->lastSeen = now;
-		return UpdateResult::Updated;
+		bool metadataChanged = !(it->endpoint.port == endpoint.port && it->endpoint.displayName == endpoint.displayName);
+
+		it->endpoint		 = endpoint;
+		it->lastSeen		 = now;
+
+		return metadataChanged ? UpdateResult::Updated : UpdateResult::Refreshed;
 	}
 
 	mKnownPeers.push_back(KnownPeer{endpoint, now});
@@ -45,7 +48,7 @@ bool DiscoveryRegistry::touch(const DiscoveryEndpoint &endpoint, TimePoint now)
 {
 	std::lock_guard lock(mMutex);
 
-	auto			it = findIt(endpoint);
+	auto			it = findIt(endpoint.IPAddress);
 
 	if (it == mKnownPeers.end())
 		return false;
@@ -59,7 +62,7 @@ bool DiscoveryRegistry::remove(const DiscoveryEndpoint &endpoint)
 {
 	std::lock_guard lock(mMutex);
 
-	auto			it = findIt(endpoint);
+	auto			it = findIt(endpoint.IPAddress);
 
 	if (it == mKnownPeers.end())
 		return false;
@@ -94,7 +97,7 @@ std::vector<DiscoveryEndpoint> DiscoveryRegistry::removeStale(std::chrono::milli
 bool DiscoveryRegistry::contains(const DiscoveryEndpoint &endpoint) const
 {
 	std::lock_guard lock(mMutex);
-	return findIt(endpoint) != mKnownPeers.end();
+	return findIt(endpoint.IPAddress) != mKnownPeers.end();
 }
 
 
@@ -102,7 +105,7 @@ std::optional<DiscoveryRegistry::KnownPeer> DiscoveryRegistry::find(const Discov
 {
 	std::lock_guard lock(mMutex);
 
-	auto			it = findIt(endpoint);
+	auto			it = findIt(endpoint.IPAddress);
 
 	if (it == mKnownPeers.end())
 		return std::nullopt;
