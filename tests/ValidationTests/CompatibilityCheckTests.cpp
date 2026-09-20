@@ -193,4 +193,42 @@ TEST(VersionCompatibilityCheck, SetLocalVersion_AffectsFutureEvaluations)
 	EXPECT_TRUE(check.evaluate("pc-a"));
 }
 
+TEST(VersionCompatibilityCheck, BuildNumberAndPatchAreIgnored)
+{
+	// PROJECT_VERSION's last component is the git commit count, so two builds of the
+	// same release must stay compatible or no two peers could ever connect.
+	EXPECT_TRUE(VersionCompatibilityCheck::isCompatible("0.2.0.141", "0.2.0.189"));
+	EXPECT_TRUE(VersionCompatibilityCheck::isCompatible("0.2.1", "0.2.9"));
+	EXPECT_TRUE(VersionCompatibilityCheck::isCompatible("1.4", "1.4.7.2000"));
+}
+
+
+TEST(VersionCompatibilityCheck, MajorOrMinorDifferenceIsIncompatible)
+{
+	EXPECT_FALSE(VersionCompatibilityCheck::isCompatible("0.2.0", "0.3.0"));
+	EXPECT_FALSE(VersionCompatibilityCheck::isCompatible("1.0.0", "2.0.0"));
+	EXPECT_FALSE(VersionCompatibilityCheck::isCompatible("0.2.0", "2.2.0"));
+}
+
+
+TEST(VersionCompatibilityCheck, MalformedVersionDoesNotThrowAndDoesNotMatchARealOne)
+{
+	// The remote version arrives over the network, so it must never be trusted to parse
+	EXPECT_NO_THROW(static_cast<void>(VersionCompatibilityCheck::isCompatible("not-a-version", "0.2.0")));
+	EXPECT_FALSE(VersionCompatibilityCheck::isCompatible("not-a-version", "0.2.0"));
+	EXPECT_FALSE(VersionCompatibilityCheck::isCompatible("", "0.2.0"));
+}
+
+
+TEST(VersionCompatibilityCheck, FailureMessageNamesBothVersions)
+{
+	VersionCompatibilityCheck check("0.2.0.189");
+	check.onRemoteDataReceived("pc-a", "0.5.0.12");
+
+	const std::string message = check.failureMessage("pc-a");
+
+	EXPECT_NE(message.find("0.5.0.12"), std::string::npos) << "The remote version must be reported so a mismatch is diagnosable";
+	EXPECT_NE(message.find("0.2.0.189"), std::string::npos) << "The local version must be reported too";
+}
+
 } // namespace ValidationTests

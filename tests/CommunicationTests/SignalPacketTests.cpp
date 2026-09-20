@@ -178,4 +178,46 @@ TEST(SignalPacketRoundtrip, SignalTypeNumericValues)
 	}
 }
 
+TEST(SignalPacket, ConnectAnswerCarriesTheDeclineReason)
+{
+	SignalPacket p	   = makeBase(SignalType::ConnectAnswer);
+	p.payload		   = PayloadConnectAnswer{false, "Already in a connection"};
+
+	const auto	result = roundtrip(p);
+	const auto &pl	   = std::get<PayloadConnectAnswer>(result.payload);
+
+	EXPECT_FALSE(pl.accepted);
+	EXPECT_EQ(pl.reason, "Already in a connection") << "The decline reason must survive the wire, otherwise the remote only ever sees a bare refusal";
+}
+
+
+TEST(SignalPacket, ConnectAnswerWithoutReasonFieldStillParses)
+{
+	// A peer built before the reason field existed omits it entirely. Using at() here
+	// would throw and drop the whole packet, so the field must be optional on read.
+	SignalPacket p	 = makeBase(SignalType::ConnectAnswer);
+	p.payload		 = PayloadConnectAnswer{true, ""};
+
+	nlohmann::json j = p;
+	j[JSON_Serialization::Payload].erase(JSON_Serialization::Reason);
+
+	SignalPacket result;
+	ASSERT_NO_THROW(result = j.get<SignalPacket>());
+
+	const auto &pl = std::get<PayloadConnectAnswer>(result.payload);
+	EXPECT_TRUE(pl.accepted);
+	EXPECT_TRUE(pl.reason.empty());
+}
+
+
+TEST(SignalPacket, ReadyFlagCarriesTheActualValue)
+{
+	SignalPacket p	  = makeBase(SignalType::ReadyFlag);
+	p.payload		  = PayloadReadyFlag{false};
+
+	const auto result = roundtrip(p);
+
+	EXPECT_FALSE(std::get<PayloadReadyFlag>(result.payload).ready) << "The ready flag must be transmitted, not hardcoded to true";
+}
+
 } // namespace CommunicationTests

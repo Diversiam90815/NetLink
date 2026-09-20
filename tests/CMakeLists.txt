@@ -84,7 +84,14 @@ target_link_libraries(NetLinkTests PRIVATE
     nlohmann_json::nlohmann_json
 )
 
+if(MSVC)
+    target_compile_options(NetLinkTests PRIVATE /W4)
+else()
+    target_compile_options(NetLinkTests PRIVATE -Wall -Wextra)
+endif()
+
 target_include_directories(NetLinkTests PRIVATE
+    ${PROJECT_BINARY_DIR}/generated
     ${PROJECT_SOURCE_DIR}/src/internal
     ${PROJECT_SOURCE_DIR}/src/internal/Discovery
     ${PROJECT_SOURCE_DIR}/src/internal/PeerValidation

@@ -135,7 +135,7 @@ TEST(DiscoveryService, StartDiscovery_ThrowsWithoutInit)
 {
 	DiscoveryService svc;
 
-	EXPECT_THROW(svc.startDiscovery(), std::runtime_error) << "startDiscovery() must throw if the service has not been initialized";
+	EXPECT_FALSE(svc.startDiscovery()) << "startDiscovery() must report failure if the service has not been initialised";
 }
 
 
@@ -144,7 +144,7 @@ TEST(DiscoveryService, StartDiscovery_SucceedsAfterInit)
 	DiscoveryService svc;
 
 	ASSERT_TRUE(svc.init(makeConfig("pc-a", "127.0.0.1", 45514)));
-	EXPECT_NO_THROW(svc.startDiscovery()) << "startDiscovery() must not throw once the service has been successfully initialized";
+	EXPECT_TRUE(svc.startDiscovery()) << "startDiscovery() must succeed once the service has been successfully initialised";
 
 	svc.deinit();
 }
@@ -429,8 +429,81 @@ TEST_F(FakeNetworkDiscoveryTest, StopAndRestartDiscovery)
 	svcA.stopDiscovery();
 	EXPECT_FALSE(svcA.isDiscovering());
 
-	EXPECT_NO_THROW(svcA.startDiscovery()) << "Discovery must be restartable after stopDiscovery()";
+	EXPECT_TRUE(svcA.startDiscovery()) << "Discovery must be restartable after stopDiscovery()";
 	EXPECT_TRUE(svcA.isDiscovering());
+}
+
+// ---------------------------------------------------------------------------
+// Peer expiry
+// ---------------------------------------------------------------------------
+
+TEST(DiscoveryService, PeerThatStopsAnnouncingExpiresAndIsReported)
+{
+	DiscoveryService svc;
+
+	auto			 cfg = makeConfig("pc-a", "10.0.0.5", 45530);
+	cfg.peerTimeoutMs	 = 150;
+	ASSERT_TRUE(svc.init(cfg));
+
+	std::atomic<int> lost{0};
+	std::mutex		 nameMutex;
+	std::string		 lostName;
+
+	svc.setOnRemoteLost(
+		[&](const DiscoveryEndpoint &endpoint)
+		{
+			{
+				std::lock_guard<std::mutex> lock(nameMutex);
+				lostName = endpoint.displayName;
+			}
+			++lost;
+		});
+
+	svc.addRemoteToList(DiscoveryEndpoint{ipv4("10.0.0.6"), 7001, "pc-b"});
+	ASSERT_FALSE(svc.getEndpointFromIP(ipv4("10.0.0.6")).isEmpty()) << "The peer must be known before it can expire";
+
+	svc.startDiscovery();
+
+	for (int i = 0; i < 200 && lost.load() == 0; ++i)
+		std::this_thread::sleep_for(10ms);
+
+	svc.stopDiscovery();
+
+	EXPECT_EQ(lost.load(), 1) << "A peer that stops announcing must be reported as lost exactly once";
+	{
+		std::lock_guard<std::mutex> lock(nameMutex);
+		EXPECT_EQ(lostName, "pc-b");
+	}
+	EXPECT_TRUE(svc.getEndpointFromIP(ipv4("10.0.0.6")).isEmpty()) << "An expired peer must be dropped from the device list";
+}
+
+
+TEST(DiscoveryService, ReAnnouncementKeepsAPeerAlive)
+{
+	DiscoveryService svc;
+
+	auto			 cfg = makeConfig("pc-a", "10.0.0.5", 45531);
+	cfg.peerTimeoutMs	 = 200;
+	ASSERT_TRUE(svc.init(cfg));
+
+	std::atomic<int> lost{0};
+	svc.setOnRemoteLost([&](const DiscoveryEndpoint &) { ++lost; });
+
+	svc.startDiscovery();
+
+	// An unchanged re-announcement returns early; liveness must still be refreshed or
+	// a peer would expire while it is plainly still on the network.
+	const DiscoveryEndpoint peer{ipv4("10.0.0.6"), 7001, "pc-b"};
+	for (int i = 0; i < 12; ++i)
+	{
+		svc.addRemoteToList(peer);
+		std::this_thread::sleep_for(50ms);
+	}
+
+	svc.stopDiscovery();
+
+	EXPECT_EQ(lost.load(), 0) << "A peer that keeps announcing must never be expired";
+	EXPECT_FALSE(svc.getEndpointFromIP(ipv4("10.0.0.6")).isEmpty());
 }
 
 } // namespace DiscoveryTests

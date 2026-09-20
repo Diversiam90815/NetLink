@@ -103,13 +103,14 @@ protected:
 			GTEST_SKIP() << AddressB << " is not a usable loopback address on this system (e.g. macOS without an alias)";
 	}
 
-	static NetLinkConfig makeConfig(const std::string &name, const std::string &secret)
+	static NetLinkConfig makeConfig(const std::string &name, const std::string &secret, const std::string &version = {})
 	{
 		NetLinkConfig config;
-		config.localDisplayName = name;
-		config.secret			= secret;
-		config.discoveryPort	= 5555;
-		config.broadcastAddress = FakeNet::BroadcastAddress;
+		config.localDisplayName	  = name;
+		config.secret			  = secret;
+		config.applicationVersion = version;
+		config.discoveryPort	  = 5555;
+		config.broadcastAddress	  = FakeNet::BroadcastAddress;
 		return config;
 	}
 
@@ -272,6 +273,31 @@ TEST_F(NetLinkCoreTest, DisconnectFromInsideCallback_DoesNotDeadlock)
 	ASSERT_TRUE(peerA.send(1, {42}, DeliveryMode::ReliableOrdered));
 
 	EXPECT_TRUE(waitFor([this] { return eventsA.countState(ConnectionState::Disconnected) == 1; })) << "B's disconnect from within its callback must go through";
+}
+
+TEST_F(NetLinkCoreTest, MismatchingApplicationVersion_PeerIsNeverOffered)
+{
+	start(peerA, makeConfig("pc-a", "shared", "1.0.0"), recordInto(eventsA), AddressA);
+	start(peerB, makeConfig("pc-b", "shared", "2.0.0"), recordInto(eventsB), AddressB);
+	startDiscovery();
+
+	std::this_thread::sleep_for(1500ms);
+
+	EXPECT_TRUE(eventsA.discovered().empty()) << "A peer running an incompatible application version must not be offered";
+	EXPECT_TRUE(peerA.getPotentialEndpoints().empty());
+}
+
+
+TEST_F(NetLinkCoreTest, PatchAndBuildNumberDifferencesStayCompatible)
+{
+	// The build number comes from the commit count, so two builds of the same release
+	// must still find each other or no two peers could ever connect.
+	start(peerA, makeConfig("pc-a", "shared", "1.4.0.100"), recordInto(eventsA), AddressA);
+	start(peerB, makeConfig("pc-b", "shared", "1.4.9.2000"), recordInto(eventsB), AddressB);
+	startDiscovery();
+
+	EXPECT_TRUE(waitFor([this] { return !eventsA.discovered().empty() && !eventsB.discovered().empty(); }))
+		<< "Builds differing only in patch and build number must stay compatible";
 }
 
 } // namespace IntegrationTests

@@ -55,24 +55,24 @@ TEST(NetworkAdapterInternal, IsValidZeroID)
 // filterSubnetMask
 // ---------------------------------------------------------------------------
 
-TEST(NetworkAdapterInternal, FilterSubnetMaskTrue)
+TEST(NetworkAdapterInternal, FilterSubnetMaskAcceptsAnyContiguousNetmask)
 {
-	auto a = makeAdapter("eth0", "10.0.0.1", "255.255.255.0", 1);
-	EXPECT_TRUE(a.filterSubnetMask()) << "A /24 subnet mask (255.255.255.0) must pass the filter";
+	// The filter used to accept only /24, which excluded every other LAN layout. The
+	// mask is now load bearing (discovery derives the subnet broadcast from it), so
+	// what matters is that it is a well formed netmask.
+	EXPECT_TRUE(makeAdapter("eth0", "10.0.0.1", "255.255.255.0", 1).filterSubnetMask()) << "/24 must pass";
+	EXPECT_TRUE(makeAdapter("eth0", "10.0.0.1", "255.255.0.0", 1).filterSubnetMask()) << "/16 must pass";
+	EXPECT_TRUE(makeAdapter("eth0", "10.0.0.1", "255.0.0.0", 1).filterSubnetMask()) << "/8 must pass";
+	EXPECT_TRUE(makeAdapter("eth0", "10.0.0.1", "255.255.240.0", 1).filterSubnetMask()) << "/20 must pass";
 }
 
 
-TEST(NetworkAdapterInternal, FilterSubnetMaskFalseClassB)
+TEST(NetworkAdapterInternal, FilterSubnetMaskRejectsMalformedMasks)
 {
-	auto a = makeAdapter("eth0", "10.0.0.1", "255.255.0.0", 1);
-	EXPECT_FALSE(a.filterSubnetMask()) << "A /16 subnet mask (255.255.0.0) must not pass the filter — only /24 is accepted";
-}
-
-
-TEST(NetworkAdapterInternal, FilterSubnetMaskFalseClassA)
-{
-	auto a = makeAdapter("eth0", "10.0.0.1", "255.0.0.0", 1);
-	EXPECT_FALSE(a.filterSubnetMask()) << "A /8 subnet mask (255.0.0.0) must not pass the filter — only /24 is accepted";
+	EXPECT_FALSE(makeAdapter("eth0", "10.0.0.1", "255.0.255.0", 1).filterSubnetMask()) << "A non-contiguous mask is not a netmask";
+	EXPECT_FALSE(makeAdapter("eth0", "10.0.0.1", "0.0.0.0", 1).filterSubnetMask()) << "An all-zero mask selects nothing and is unusable";
+	EXPECT_FALSE(makeAdapter("eth0", "10.0.0.1", "not-a-mask", 1).filterSubnetMask()) << "Unparsable text is not a netmask";
+	EXPECT_FALSE(makeAdapter("eth0", "10.0.0.1", "", 1).filterSubnetMask()) << "An adapter without a reported mask is not eligible";
 }
 
 
@@ -83,14 +83,14 @@ TEST(NetworkAdapterInternal, FilterSubnetMaskFalseClassA)
 TEST(NetworkAdapterInternal, ConstructorSetsEligibleWhenSubnetMatches)
 {
 	auto a = makeAdapter("eth0", "192.168.1.1", "255.255.255.0", 1);
-	EXPECT_TRUE(a.Eligible) << "The constructor must set Eligible=true when filterSubnetMask() returns true (subnet is 255.255.255.0)";
+	EXPECT_TRUE(a.Eligible) << "The constructor must set Eligible=true when filterSubnetMask() accepts the mask";
 }
 
 
-TEST(NetworkAdapterInternal, ConstructorSetsEligibleFalseWhenSubnetMismatches)
+TEST(NetworkAdapterInternal, ConstructorSetsEligibleFalseWhenSubnetIsUnusable)
 {
-	auto a = makeAdapter("eth0", "192.168.1.1", "255.255.0.0", 1);
-	EXPECT_FALSE(a.Eligible) << "The constructor must set Eligible=false when filterSubnetMask() returns false (subnet is not 255.255.255.0)";
+	auto a = makeAdapter("eth0", "192.168.1.1", "255.0.255.0", 1);
+	EXPECT_FALSE(a.Eligible) << "The constructor must set Eligible=false when filterSubnetMask() rejects the mask";
 }
 
 

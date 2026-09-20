@@ -54,7 +54,7 @@ protected:
 			lastSender = name;
 			++connectRequests;
 		};
-		callbacks.onConnectRequestAnswered = [this](const std::string &, bool accepted)
+		callbacks.onConnectRequestAnswered = [this](const std::string &, bool accepted, const std::string &)
 		{
 			lastAnswer = accepted;
 			++answers;
@@ -133,7 +133,7 @@ TEST_F(SignalingServiceTest, EverySendMethod_ProducesAPacketTheReceiverCanParse)
 
 	SignalingConnectionCallbacks connection;
 	connection.onConnectRequested		= [this](const std::string &) { ++connectRequests; };
-	connection.onConnectRequestAnswered = [this](const std::string &, bool) { ++answers; };
+	connection.onConnectRequestAnswered = [this](const std::string &, bool, const std::string &) { ++answers; };
 	connection.onDisconnectReceived		= [&](const std::string &) { ++disconnects; };
 	connection.onReadyFlagReceived		= [&](const std::string &) { ++readyFlags; };
 	connection.onDataPortReceived		= [this](const std::string &, int port) { lastDataPort = port; };
