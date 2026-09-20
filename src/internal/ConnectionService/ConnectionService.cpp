@@ -352,7 +352,7 @@ bool netlink::ConnectionService::answerInvitation(const std::string &computerNam
 		return false;
 	}
 
-	mSignaling.sendConnectAnswer(computerName, connectionAccepted);
+	mSignaling.sendConnectAnswer(computerName, connectionAccepted, reason);
 
 	return true;
 }
@@ -368,7 +368,7 @@ bool netlink::ConnectionService::sendConnectionReadyFlag(const std::string &comp
 		return false;
 	}
 
-	mSignaling.sendReadyFlag(computerName);
+	mSignaling.sendReadyFlag(computerName, flag);
 
 	return true;
 }

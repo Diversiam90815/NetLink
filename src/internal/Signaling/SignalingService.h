@@ -27,11 +27,11 @@ namespace netlink
 // Connection lifecycle signals (consumed by ConnectionService)
 struct SignalingConnectionCallbacks
 {
-	std::function<void(const std::string &computerName)>				onConnectRequested;
-	std::function<void(const std::string &computerName, bool accepted)> onConnectRequestAnswered;
-	std::function<void(const std::string &computerName)>				onDisconnectReceived;
-	std::function<void(const std::string &computerName)>				onReadyFlagReceived;
-	std::function<void(const std::string &computerName, int dataPort)>	onDataPortReceived;
+	std::function<void(const std::string &computerName)>										   onConnectRequested;
+	std::function<void(const std::string &computerName, bool accepted, const std::string &reason)> onConnectRequestAnswered;
+	std::function<void(const std::string &computerName)>										   onDisconnectReceived;
+	std::function<void(const std::string &computerName)>										   onReadyFlagReceived;
+	std::function<void(const std::string &computerName, int dataPort)>							   onDataPortReceived;
 };
 
 
@@ -86,9 +86,9 @@ public:
 	void unregisterPeer(const std::string &displayName);
 
 	void sendConnectRequest(const std::string &computerName);
-	void sendConnectAnswer(const std::string &computerName, bool requestAccepted);
+	void sendConnectAnswer(const std::string &computerName, bool requestAccepted, const std::string &reason = {});
 	void sendDisconnect(const std::string &computerName);
-	void sendReadyFlag(const std::string &computerName);
+	void sendReadyFlag(const std::string &computerName, bool ready = true);
 	void sendDataPort(const std::string &computerName, int dataPort);
 
 	// Validation signaling (called via PeerValidationSendCallbacks)

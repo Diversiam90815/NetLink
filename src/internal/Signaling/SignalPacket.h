@@ -28,6 +28,7 @@ constexpr auto ComputerName	 = "name";
 constexpr auto DataPort		 = "dataPort";
 constexpr auto Request		 = "request";
 constexpr auto ConnectAnswer = "answer";
+constexpr auto Reason		 = "reason";
 constexpr auto Secret		 = "secret";
 constexpr auto Version		 = "version";
 constexpr auto ReadyFlag	 = "ready";
@@ -58,7 +59,8 @@ struct PayloadEmpty
 
 struct PayloadConnectAnswer
 {
-	bool accepted{false};
+	bool		accepted{false};
+	std::string reason{}; // why the invitation was declined; empty when accepted
 };
 
 struct PayloadDataPort
@@ -120,7 +122,7 @@ inline void to_json(nlohmann::json &j, const SignalPacket &p)
 		{
 			using T = std::decay_t<decltype(pl)>;
 			if constexpr (std::is_same_v<T, PayloadConnectAnswer>)
-				j[JSON_Serialization::Payload] = {{JSON_Serialization::ConnectAnswer, pl.accepted}};
+				j[JSON_Serialization::Payload] = {{JSON_Serialization::ConnectAnswer, pl.accepted}, {JSON_Serialization::Reason, pl.reason}};
 			else if constexpr (std::is_same_v<T, PayloadReadyFlag>)
 				j[JSON_Serialization::Payload] = {{JSON_Serialization::ReadyFlag, pl.ready}};
 			else if constexpr (std::is_same_v<T, PayloadDataPort>)
@@ -149,7 +151,10 @@ inline void from_json(const nlohmann::json &j, SignalPacket &p)
 	switch (p.signalType)
 	{
 	case SignalType::ReadyFlag: p.payload = PayloadReadyFlag{pl.at(JSON_Serialization::ReadyFlag).get<bool>()}; break;
-	case SignalType::ConnectAnswer: p.payload = PayloadConnectAnswer{pl.at(JSON_Serialization::ConnectAnswer).get<bool>()}; break;
+	// value() rather than at(): a peer on an older build omits the reason field entirely
+	case SignalType::ConnectAnswer:
+		p.payload = PayloadConnectAnswer{pl.at(JSON_Serialization::ConnectAnswer).get<bool>(), pl.value(JSON_Serialization::Reason, std::string{})};
+		break;
 	case SignalType::DataPort: p.payload = PayloadDataPort{pl.at(JSON_Serialization::DataPort).get<int>()}; break;
 	case SignalType::ValidationRequest: p.payload = PayloadValidationRequest{pl.at(JSON_Serialization::Request).get<uint8_t>()}; break;
 	case SignalType::SecretResponse: p.payload = PayloadSecretResponse{pl.at(JSON_Serialization::Secret).get<std::string>()}; break;

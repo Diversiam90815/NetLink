@@ -130,14 +130,14 @@ void netlink::SignalingService::sendConnectRequest(const std::string &computerNa
 }
 
 
-void netlink::SignalingService::sendConnectAnswer(const std::string &computerName, bool requestAccepted)
+void netlink::SignalingService::sendConnectAnswer(const std::string &computerName, bool requestAccepted, const std::string &reason)
 {
 	auto peer = resolvePeer(computerName);
 	if (!peer.isValid())
 		return;
 
 	auto packet	   = makeEnvelope(SignalType::ConnectAnswer);
-	packet.payload = PayloadConnectAnswer{requestAccepted};
+	packet.payload = PayloadConnectAnswer{requestAccepted, reason};
 
 	sendPacket(peer, packet);
 }
@@ -155,14 +155,14 @@ void netlink::SignalingService::sendDisconnect(const std::string &computerName)
 }
 
 
-void netlink::SignalingService::sendReadyFlag(const std::string &computerName)
+void netlink::SignalingService::sendReadyFlag(const std::string &computerName, bool ready)
 {
 	auto peer = resolvePeer(computerName);
 	if (!peer.isValid())
 		return;
 
 	auto packet	   = makeEnvelope(SignalType::ReadyFlag);
-	packet.payload = PayloadReadyFlag{true}; // the receiver requires the payload
+	packet.payload = PayloadReadyFlag{ready};
 
 	sendPacket(peer, packet);
 }
@@ -272,7 +272,7 @@ void netlink::SignalingService::routePacket(const SignalPacket &packet)
 	{
 		const auto &pl = std::get<PayloadConnectAnswer>(packet.payload);
 		if (mConnectionCallbacks.onConnectRequestAnswered)
-			mConnectionCallbacks.onConnectRequestAnswered(sender, pl.accepted);
+			mConnectionCallbacks.onConnectRequestAnswered(sender, pl.accepted, pl.reason);
 		break;
 	}
 
