@@ -14,7 +14,6 @@ namespace netlink::internal
 {
 
 inline constexpr size_t					   PackageBufferSize  = 65536; // 64 KB receive buffer / max. datagram size
-inline constexpr const char				  *DefaultSecret	  = "NETLINK";
 
 // Upper bound for a single framed message
 inline constexpr size_t					   MaxMessagePayload  = size_t{16} * 1024 * 1024; // 16 MiB
