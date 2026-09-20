@@ -1,9 +1,7 @@
 /*
 ==============================================================================
 	Module:         IPv4Address
-	Description:    Validated IPv4 address. An instance can only be created
-					through parse() or fromHostOrder(), so an object of this
-					type always holds a well-formed address.
+	Description:    Validated IPv4 address; can only be created	via parse() / fromHostOrder()
   ==============================================================================
 */
 
@@ -25,8 +23,7 @@ public:
 	// Default is the unspecified address 0.0.0.0
 	constexpr IPv4Address() = default;
 
-	// Strict dotted-quad parse: exactly four octets, decimal digits only, each 0..255,
-	// no surrounding whitespace and no leading zeros (which would be ambiguously octal).
+	// Strict dotted-quad parse: exactly four octets, decimal digits only, each 0..255
 	static constexpr std::optional<IPv4Address> parse(std::string_view text)
 	{
 		uint32_t	 value	= 0;
@@ -86,9 +83,22 @@ public:
 			   std::to_string(mValue & 0xFF);
 	}
 
-	constexpr bool				 isUnspecified() const { return mValue == 0; }		   // 0.0.0.0
-	constexpr bool				 isLoopback() const { return (mValue >> 24) == 127; }  // 127.0.0.0/8
-	constexpr bool				 isBroadcast() const { return mValue == 0xFFFFFFFFu; } // 255.255.255.255
+	constexpr bool isUnspecified() const { return mValue == 0; }		 // 0.0.0.0
+	constexpr bool isLoopback() const { return (mValue >> 24) == 127; }	 // 127.0.0.0/8
+	constexpr bool isBroadcast() const { return mValue == 0xFFFFFFFFu; } // 255.255.255.255
+
+	// True for a well formed netmask
+	constexpr bool isNetmask() const
+	{
+		if (mValue == 0)
+			return false;
+
+		// mValue is non-zero here, so inverted + 1 cannot wrap
+
+		const uint32_t inverted = ~mValue;
+
+		return (inverted & (inverted + 1u)) == 0u;
+	}
 
 	constexpr auto				 operator<=>(const IPv4Address &other) const = default;
 	constexpr bool				 operator==(const IPv4Address &other) const	 = default;
