@@ -12,6 +12,7 @@
 #include <mutex>
 #include <string>
 #include <vector>
+#include <iterator>
 
 #include "Transport/TransportInterfaces.h"
 #include "CommunicationThreads.h"
@@ -46,11 +47,16 @@ public:
 private:
 	void								  clearPendingMessages();
 
+	std::shared_ptr<netlink::ISession>	  session() const;
+	std::shared_ptr<SendThread>			  sendThread() const;
+	std::shared_ptr<ReceiveThread>		  receiveThread() const;
+
 
 	std::atomic<bool>					  mIsInitialized{false};
 	MessageCallback						  mCallback;
 	DisconnectedCallback				  mDisconnectedCallback;
 
+	mutable std::mutex					  mSessionMutex; // guards the three handles below
 	std::shared_ptr<netlink::ISession>	  mSession;
 	std::shared_ptr<SendThread>			  mSendThread;
 	std::shared_ptr<ReceiveThread>		  mReceiveThread;
