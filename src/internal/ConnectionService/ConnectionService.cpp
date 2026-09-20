@@ -462,9 +462,11 @@ void netlink::ConnectionService::onReceivedAnswerToInvite(const std::string &com
 	}
 	else
 	{
-		NETLINK_LOG_WARNING("Connection declined by {}", computerName);
+		NETLINK_LOG_WARNING("Connection declined by {}: {}", computerName, reason.empty() ? "no reason given" : reason);
 
-		notifyStatus(ConnectionStatusUpdate::Type::Declined, "Connection declined by " + computerName, false);
+		// The remote's reason reaches the app through ConnectionEvent::errorMessage
+		const std::string detail = reason.empty() ? std::string{} : ": " + reason;
+		notifyStatus(ConnectionStatusUpdate::Type::Declined, "Connection declined by " + computerName + detail, false);
 		clearCurrentConnection();
 	}
 }
@@ -494,8 +496,7 @@ void netlink::ConnectionService::onReceivedConnectionReadyFlag(const std::string
 			return;
 		}
 
-		NETLINK_LOG_INFO("Connector: connecting to {}:{}", mCurrentRequest->remote.IPAddress, mCurrentRequest->dataPort);
-		mCurrentRequest->state = ConnectionStateInternal::Connected;
+		NETLINK_LOG_INFO("Connector: connecting to {}:{}", mCurrentRequest->remote.IPAddress.toString(), mCurrentRequest->dataPort);
 		mCurrentRequest->client->connect(mLocalIP, mCurrentRequest->remote.IPAddress, static_cast<unsigned short>(mCurrentRequest->dataPort));
 	}
 }
@@ -638,8 +639,7 @@ bool netlink::ConnectionService::determineLocalSessionRole()
 		// If the acceptor's dataport + readyflag already arrived before we got here, connect now
 		if (mReadySync.isRemoteReady() && mCurrentRequest->dataPort != 0)
 		{
-			NETLINK_LOG_INFO("Connector: remote already ready, connecting immediately to {}:{}", mCurrentRequest->remote.IPAddress, mCurrentRequest->dataPort);
-			mCurrentRequest->state = ConnectionStateInternal::Connected;
+			NETLINK_LOG_INFO("Connector: remote already ready, connecting immediately to {}:{}", mCurrentRequest->remote.IPAddress.toString(), mCurrentRequest->dataPort);
 			mCurrentRequest->client->connect(mLocalIP, mCurrentRequest->remote.IPAddress, static_cast<unsigned short>(mCurrentRequest->dataPort));
 		}
 		else
@@ -667,7 +667,7 @@ void netlink::ConnectionService::onTransportEstablished(const ISession::pointer 
 
 	if (!mCurrentRequest.has_value() || mConnected.load())
 	{
-		NETLINK_LOG_WARNING("Transport: dropping session from {}, no connection expected", session->getRemoteAddress());
+		NETLINK_LOG_WARNING("Transport: dropping session from {}, no connection expected", session->getRemoteAddress().toString());
 		session->close();
 		return;
 	}
@@ -675,12 +675,12 @@ void netlink::ConnectionService::onTransportEstablished(const ISession::pointer 
 	// Anybody on the network can connect to the listening port: only accept the peer we negotiated with
 	if (session->getRemoteAddress() != mCurrentRequest->remote.IPAddress)
 	{
-		NETLINK_LOG_WARNING("Transport: rejecting session from {}, expected {}", session->getRemoteAddress(), mCurrentRequest->remote.IPAddress);
+		NETLINK_LOG_WARNING("Transport: rejecting session from {}, expected {}", session->getRemoteAddress().toString(), mCurrentRequest->remote.IPAddress.toString());
 		session->close();
 		return;
 	}
 
-	NETLINK_LOG_INFO("Transport: session with {} established", session->getRemoteAddress());
+	NETLINK_LOG_INFO("Transport: session with {} established", session->getRemoteAddress().toString());
 
 	// One peer per connection: stop accepting further inbound connections
 	if (mCurrentRequest->server)
