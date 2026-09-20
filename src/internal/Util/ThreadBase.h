@@ -11,21 +11,49 @@
 #include <mutex>
 #include <atomic>
 #include <condition_variable>
+#include <exception>
+
+#include "NetLinkLog.h"
 
 
 class ThreadBase
 {
 public:
-	ThreadBase()		  = default;
-	virtual ~ThreadBase() = default;
+	ThreadBase() = default;
+
+	virtual ~ThreadBase()
+	{
+		mRunning.store(false);
+		triggerEvent();
+
+		if (mThread.joinable())
+			mThread.join();
+	}
 
 	void start()
 	{
-		if (isRunning())
-			return;
+		if (mRunning.exchange(true))
+			return; // already running
 
-		mRunning.store(true);
-		mThread = std::thread(&ThreadBase::run, this);
+		if (mThread.joinable())
+			mThread.join();
+
+		mThread = std::thread(
+			[this]
+			{
+				try
+				{
+					run();
+				}
+				catch (const std::exception &e)
+				{
+					NETLINK_LOG_ERROR("Worker thread terminated by an exception: {}", e.what());
+				}
+				catch (...)
+				{
+					NETLINK_LOG_ERROR("Worker thread terminated by an unknown exception");
+				}
+			});
 	}
 
 	virtual void stop()
@@ -75,9 +103,9 @@ protected:
 
 
 private:
-	std::thread				mThread;				///< Worker thread instance
-	std::atomic<bool>		mRunning;				///< Running state flag (set by start()/stop() )
-	std::mutex				mMutex;					///< Protect event flag
-	std::condition_variable cv;						///< Condition variable for event signaling
-	bool					mEventTriggered{false}; ///< Indicates an event has been triggerd
+	std::thread				mThread;				// Worker thread instance
+	std::atomic<bool>		mRunning{false};		// Running state flag (set by start()/stop() )
+	std::mutex				mMutex;					// Protect event flag
+	std::condition_variable cv;						// Condition variable for event signaling
+	bool					mEventTriggered{false}; // Indicates an event has been triggerd
 };
