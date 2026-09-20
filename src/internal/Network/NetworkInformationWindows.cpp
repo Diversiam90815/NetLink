@@ -80,12 +80,12 @@ struct NetworkInformation::Impl
 
 	using AdapterBuffer = std::unique_ptr<IP_ADAPTER_ADDRESSES, void (*)(IP_ADAPTER_ADDRESSES *)>;
 
-	bool					getNetworkInformationFromOS();
-	void					saveAdapter(std::vector<NetworkAdapterInternal> &adapters, const PIP_ADAPTER_ADDRESSES adapter, const int ID, std::unordered_set<ULONG64> &defaultRouteLuidValues);
+	bool		 getNetworkInformationFromOS();
+	void		 saveAdapter(std::vector<NetworkAdapterInternal> &adapters, const PIP_ADAPTER_ADDRESSES adapter, const int ID, std::unordered_set<ULONG64> &defaultRouteLuidValues);
 
-	std::string				sockaddrToString(SOCKADDR *sa) const;
-	std::string				prefixLengthToSubnetMask(USHORT family, ULONG prefixLength) const;
-	AdapterTypes			filterAdapterType(const DWORD Type) const;
+	std::string	 sockaddrToString(SOCKADDR *sa) const;
+	std::string	 prefixLengthToSubnetMask(USHORT family, ULONG prefixLength) const;
+	AdapterTypes filterAdapterType(const DWORD Type) const;
 	AdapterPriorityInternal determinePriority(bool isDefaultRoute, bool IPv4Enabled, AdapterTypes type, IF_OPER_STATUS status);
 
 	bool					getDefaultInterfaces(std::vector<NET_LUID> &pLUIDs);
@@ -108,12 +108,12 @@ struct NetworkInformation::Impl
 	}
 
 
-	AdapterBuffer					 mAdapterAddresses{nullptr, [](IP_ADAPTER_ADDRESSES *p)
-									   {
-										   if (p)
-											   free(p);
-									   }};
-	ULONG							 mOutBufLen{0};
+	AdapterBuffer					mAdapterAddresses{nullptr, [](IP_ADAPTER_ADDRESSES *p)
+													  {
+										if (p)
+											free(p);
+													  }};
+	ULONG							mOutBufLen{0};
 
 	std::unique_ptr<WinsockSession> mWinsockSession;
 };
@@ -219,9 +219,12 @@ void NetworkInformation::processAdapter()
 }
 
 
-void NetworkInformation::Impl::saveAdapter(std::vector<NetworkAdapterInternal> &adapters, const PIP_ADAPTER_ADDRESSES adapter, const int ID, std::unordered_set<ULONG64> &defaultRouteLuidValues)
+void NetworkInformation::Impl::saveAdapter(std::vector<NetworkAdapterInternal> &adapters,
+										   const PIP_ADAPTER_ADDRESSES			adapter,
+										   const int							ID,
+										   std::unordered_set<ULONG64>		   &defaultRouteLuidValues)
 {
-	std::string					 adapterName = WStringToStdString(adapter->Description);
+	std::string					adapterName = WStringToStdString(adapter->Description);
 
 	PIP_ADAPTER_UNICAST_ADDRESS unicast		= adapter->FirstUnicastAddress;
 
@@ -441,7 +444,7 @@ std::string NetworkInformation::Impl::getNetworkGatename(const AdapterTypes type
 		return networkName;
 	}
 
-	for (int i = 0; i < table.ptr->NumEntries; ++i)
+	for (ULONG i = 0; i < table.ptr->NumEntries; ++i)
 	{
 		const auto &entry = table.ptr->Table[i];
 

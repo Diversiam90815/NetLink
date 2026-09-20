@@ -14,6 +14,7 @@
 #include <tuple>
 
 #include "NetLinkLog.h"
+#include "Socket/IPv4Address.h"
 
 
 namespace netlink
@@ -57,12 +58,16 @@ struct NetworkAdapterInternal
 	}
 
 
-	bool					operator==(const NetworkAdapterInternal &other) const { return std::tie(AdapterName, Subnet) == std::tie(other.AdapterName, other.Subnet); }
-	bool					operator!=(const NetworkAdapterInternal &other) const { return !(*this == other); }
+	bool operator==(const NetworkAdapterInternal &other) const { return std::tie(AdapterName, Subnet) == std::tie(other.AdapterName, other.Subnet); }
+	bool operator!=(const NetworkAdapterInternal &other) const { return !(*this == other); }
 
-	bool					isValid() const { return !AdapterName.empty() && !IPv4.empty() && ID != 0; }
+	bool isValid() const { return !AdapterName.empty() && !IPv4.empty() && ID != 0; }
 
-	bool					filterSubnetMask() const { return Subnet == "255.255.255.0"; }
+	bool filterSubnetMask() const
+	{
+		const auto mask = netlink::net::IPv4Address::parse(Subnet);
+		return mask.has_value() && mask->isNetmask();
+	}
 
 	std::string				AdapterName{};
 	std::string				NetworkName{};
@@ -102,12 +107,12 @@ public:
 private:
 	// Platform-specific implementation, defined in NetworkInformation<Platform>.cpp/.mm
 	struct Impl;
-	std::unique_ptr<Impl>				 mImpl;
+	std::unique_ptr<Impl>				mImpl;
 
 	std::vector<NetworkAdapterInternal> mNetworkAdapters{};
-	NetworkAdapterInternal				 mCurrentNetworkAdapter{};
+	NetworkAdapterInternal				mCurrentNetworkAdapter{};
 
-	AdapterChangedCallback				 mOnAdapterChanged;
+	AdapterChangedCallback				mOnAdapterChanged;
 };
 
 
