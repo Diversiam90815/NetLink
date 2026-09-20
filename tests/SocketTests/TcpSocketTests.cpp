@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+
 #include <atomic>
 #include <chrono>
 #include <future>
@@ -6,6 +7,7 @@
 #include <thread>
 #include <vector>
 
+#include "TestIp.h"
 #include "Socket/TcpListener.h"
 #include "Socket/TcpStream.h"
 
@@ -17,7 +19,7 @@ namespace SocketTests
 {
 
 // Blackholed address: SYNs are never answered, so a connect stays pending
-static const SocketAddress UnresponsiveAddress{"10.255.255.1", 9};
+static const SocketAddress UnresponsiveAddress{ipv4("10.255.255.1"), 9};
 
 
 struct ConnectedPair
@@ -30,7 +32,7 @@ struct ConnectedPair
 
 static ConnectedPair connectPair()
 {
-	auto listener = TcpListener::listen({"127.0.0.1", 0});
+	auto listener = TcpListener::listen({ipv4("127.0.0.1"), 0});
 	EXPECT_TRUE(listener.has_value());
 
 	auto pendingClient = std::async(std::launch::async, [address = listener->localAddress()] { return TcpStream::connect(address, 2s); });
@@ -46,7 +48,7 @@ static ConnectedPair connectPair()
 
 TEST(TcpSocket, ListenOnPortZero_AssignsPort)
 {
-	auto listener = TcpListener::listen({"127.0.0.1", 0});
+	auto listener = TcpListener::listen({ipv4("127.0.0.1"), 0});
 
 	ASSERT_TRUE(listener.has_value()) << toString(listener.error());
 	EXPECT_NE(listener->localAddress().port, 0);
@@ -55,7 +57,7 @@ TEST(TcpSocket, ListenOnPortZero_AssignsPort)
 
 TEST(TcpSocket, Accept_TimesOutWithoutClient)
 {
-	auto listener = TcpListener::listen({"127.0.0.1", 0});
+	auto listener = TcpListener::listen({ipv4("127.0.0.1"), 0});
 	ASSERT_TRUE(listener);
 
 	auto stream = listener->accept(50ms);
@@ -170,7 +172,7 @@ TEST(TcpSocket, ConnectToClosedPort_FailsRefused)
 {
 	SocketAddress closedAddress;
 	{
-		auto listener = TcpListener::listen({"127.0.0.1", 0});
+		auto listener = TcpListener::listen({ipv4("127.0.0.1"), 0});
 		ASSERT_TRUE(listener);
 		closedAddress = listener->localAddress();
 	}
@@ -187,12 +189,12 @@ TEST(TcpSocket, Connect_CanBeCancelled)
 	std::atomic<bool> cancel{false};
 
 	auto			  pending = std::async(std::launch::async,
-									   [&]
-									   {
-										   const auto started = std::chrono::steady_clock::now();
-										   auto		  result  = TcpStream::connect(UnresponsiveAddress, 10s, [&] { return cancel.load(); });
-										   return std::make_pair(std::move(result), std::chrono::steady_clock::now() - started);
-									   });
+										   [&]
+										   {
+								  const auto started = std::chrono::steady_clock::now();
+								  auto		 result	 = TcpStream::connect(UnresponsiveAddress, 10s, [&] { return cancel.load(); });
+								  return std::make_pair(std::move(result), std::chrono::steady_clock::now() - started);
+										   });
 
 	std::this_thread::sleep_for(100ms);
 	cancel.store(true);
@@ -205,9 +207,17 @@ TEST(TcpSocket, Connect_CanBeCancelled)
 }
 
 
-TEST(TcpSocket, Connect_InvalidAddress_Fails)
+TEST(TcpSocket, MalformedAddressIsRejectedBeforeItCanReachConnect)
 {
-	auto stream = TcpStream::connect({"999.1.1.1", 80}, 1s);
+	// SocketAddress holds an IPv4Address, so connect() can no longer be handed a
+	// malformed address: it is rejected at parse time instead.
+	EXPECT_FALSE(netlink::net::IPv4Address::parse("999.1.1.1").has_value());
+}
+
+
+TEST(TcpSocket, Connect_UnspecifiedAddress_FailsWithInvalidArgument)
+{
+	auto stream = TcpStream::connect({netlink::net::IPv4Address{}, 80}, 1s);
 
 	ASSERT_FALSE(stream.has_value());
 	EXPECT_EQ(stream.error(), SocketError::InvalidArgument);

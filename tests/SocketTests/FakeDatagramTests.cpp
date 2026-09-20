@@ -1,9 +1,11 @@
 #include <gtest/gtest.h>
+
 #include <algorithm>
 #include <set>
 #include <string>
 #include <vector>
 
+#include "TestIp.h"
 #include "FakeDatagramNetwork.h"
 #include "LossyDatagramSocket.h"
 
@@ -39,11 +41,11 @@ static std::vector<uint32_t> drain(IDatagramSocket &socket)
 TEST(FakeDatagramNetwork, UnicastReachesOnlyTargetHost)
 {
 	auto network = FakeDatagramNetwork::create();
-	auto a		 = network->factory("10.0.0.1")({"0.0.0.0", 4000}, {});
-	auto b		 = network->factory("10.0.0.2")({"0.0.0.0", 4000}, {});
+	auto a		 = network->factory("10.0.0.1")({ipv4("0.0.0.0"), 4000}, {});
+	auto b		 = network->factory("10.0.0.2")({ipv4("0.0.0.0"), 4000}, {});
 	ASSERT_TRUE(a && b);
 
-	static_cast<void>((*a)->sendTo({"10.0.0.2", 4000}, encode(7)));
+	static_cast<void>((*a)->sendTo({ipv4("10.0.0.2"), 4000}, encode(7)));
 
 	EXPECT_EQ(drain(**b), std::vector<uint32_t>{7});
 	EXPECT_TRUE(drain(**a).empty());
@@ -52,16 +54,16 @@ TEST(FakeDatagramNetwork, UnicastReachesOnlyTargetHost)
 
 TEST(FakeDatagramNetwork, BroadcastReachesAllSocketsOnPort)
 {
-	auto network = FakeDatagramNetwork::create();
+	auto		network = FakeDatagramNetwork::create();
 
 	BindOptions shared;
 	shared.reuseAddress = true;
 
-	auto a				= network->factory("10.0.0.1")({"0.0.0.0", 5555}, shared);
-	auto b				= network->factory("10.0.0.2")({"0.0.0.0", 5555}, shared);
+	auto a				= network->factory("10.0.0.1")({ipv4("0.0.0.0"), 5555}, shared);
+	auto b				= network->factory("10.0.0.2")({ipv4("0.0.0.0"), 5555}, shared);
 	ASSERT_TRUE(a && b);
 
-	static_cast<void>((*a)->sendTo({BroadcastAddress, 5555}, encode(1)));
+	static_cast<void>((*a)->sendTo({ipv4(BroadcastAddress), 5555}, encode(1)));
 
 	EXPECT_EQ(drain(**a).size(), 1u) << "Like a real network, the sender receives its own broadcast";
 	EXPECT_EQ(drain(**b).size(), 1u);
@@ -71,8 +73,8 @@ TEST(FakeDatagramNetwork, BroadcastReachesAllSocketsOnPort)
 TEST(FakeDatagramNetwork, BindConflictWithoutReuse)
 {
 	auto network = FakeDatagramNetwork::create();
-	auto first	 = network->factory("10.0.0.1")({"0.0.0.0", 4000}, {});
-	auto second	 = network->factory("10.0.0.1")({"0.0.0.0", 4000}, {});
+	auto first	 = network->factory("10.0.0.1")({ipv4("0.0.0.0"), 4000}, {});
+	auto second	 = network->factory("10.0.0.1")({ipv4("0.0.0.0"), 4000}, {});
 
 	ASSERT_TRUE(first.has_value());
 	ASSERT_FALSE(second.has_value());
@@ -87,12 +89,12 @@ TEST(LossyDatagramSocket, DropsApproximatelyTheConfiguredShare)
 	LossProfile profile;
 	profile.dropRate = 0.25;
 
-	auto sender		 = LossyDatagramSocket::wrap(network->factory("10.0.0.1"), profile)({"0.0.0.0", 0}, {});
-	auto receiver	 = network->factory("10.0.0.2")({"0.0.0.0", 4000}, {});
+	auto sender		 = LossyDatagramSocket::wrap(network->factory("10.0.0.1"), profile)({ipv4("0.0.0.0"), 0}, {});
+	auto receiver	 = network->factory("10.0.0.2")({ipv4("0.0.0.0"), 4000}, {});
 	ASSERT_TRUE(sender && receiver);
 
 	for (uint32_t i = 0; i < 1000; ++i)
-		static_cast<void>((*sender)->sendTo({"10.0.0.2", 4000}, encode(i)));
+		static_cast<void>((*sender)->sendTo({ipv4("10.0.0.2"), 4000}, encode(i)));
 
 	const auto received = drain(**receiver).size();
 	EXPECT_GT(received, 650u);
@@ -107,12 +109,12 @@ TEST(LossyDatagramSocket, DuplicatesEveryDatagram)
 	LossProfile profile;
 	profile.duplicateRate = 1.0;
 
-	auto sender			  = LossyDatagramSocket::wrap(network->factory("10.0.0.1"), profile)({"0.0.0.0", 0}, {});
-	auto receiver		  = network->factory("10.0.0.2")({"0.0.0.0", 4000}, {});
+	auto sender			  = LossyDatagramSocket::wrap(network->factory("10.0.0.1"), profile)({ipv4("0.0.0.0"), 0}, {});
+	auto receiver		  = network->factory("10.0.0.2")({ipv4("0.0.0.0"), 4000}, {});
 	ASSERT_TRUE(sender && receiver);
 
 	for (uint32_t i = 0; i < 10; ++i)
-		static_cast<void>((*sender)->sendTo({"10.0.0.2", 4000}, encode(i)));
+		static_cast<void>((*sender)->sendTo({ipv4("10.0.0.2"), 4000}, encode(i)));
 
 	EXPECT_EQ(drain(**receiver).size(), 20u);
 }
@@ -125,12 +127,12 @@ TEST(LossyDatagramSocket, ReordersWithoutLosingDatagrams)
 	LossProfile profile;
 	profile.reorderRate = 0.5;
 
-	auto sender			= LossyDatagramSocket::wrap(network->factory("10.0.0.1"), profile)({"0.0.0.0", 0}, {});
-	auto receiver		= network->factory("10.0.0.2")({"0.0.0.0", 4000}, {});
+	auto sender			= LossyDatagramSocket::wrap(network->factory("10.0.0.1"), profile)({ipv4("0.0.0.0"), 0}, {});
+	auto receiver		= network->factory("10.0.0.2")({ipv4("0.0.0.0"), 4000}, {});
 	ASSERT_TRUE(sender && receiver);
 
 	for (uint32_t i = 0; i < 200; ++i)
-		static_cast<void>((*sender)->sendTo({"10.0.0.2", 4000}, encode(i)));
+		static_cast<void>((*sender)->sendTo({ipv4("10.0.0.2"), 4000}, encode(i)));
 
 	const auto values = drain(**receiver);
 

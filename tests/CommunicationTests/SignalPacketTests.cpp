@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
+
 #include <nlohmann/json.hpp>
+#include "TestIp.h"
 #include "Signaling/SignalPacket.h"
 
 using namespace netlink;
@@ -19,7 +21,7 @@ static SignalPacket makeBase(SignalType type)
 	SignalPacket p;
 	p.signalType = type;
 	p.senderName = "pc-alpha";
-	p.senderIP	 = "10.0.0.5";
+	p.senderIP	 = ipv4("10.0.0.5");
 	p.senderPort = 9000;
 	return p;
 }
@@ -32,7 +34,7 @@ TEST(SignalPacketRoundtrip, EnvelopeFieldsPreserved)
 	SignalPacket result = roundtrip(p);
 
 	EXPECT_EQ(result.signalType, SignalType::Disconnect) << "signalType must survive JSON serialization unchanged";
-	EXPECT_EQ(result.senderIP, "10.0.0.5") << "senderIP must be written and read back correctly";
+	EXPECT_EQ(result.senderIP, ipv4("10.0.0.5")) << "senderIP must be written and read back correctly";
 	EXPECT_EQ(result.senderPort, 9000) << "senderPort must be written and read back correctly";
 	EXPECT_EQ(result.senderName, "pc-alpha") << "senderName is currently not deserialized in from_json; it must remain empty after round-trip";
 	EXPECT_TRUE(std::holds_alternative<PayloadEmpty>(result.payload)) << "A packet with no structured payload must deserialize to PayloadEmpty";

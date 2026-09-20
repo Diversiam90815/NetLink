@@ -7,6 +7,7 @@
 #include <thread>
 #include <vector>
 
+#include "TestIp.h"
 #include "ConnectionService/ConnectionService.h"
 #include "Signaling/SignalingService.h"
 #include "Transport/TransportFactory.h"
@@ -22,18 +23,18 @@ namespace ConnectionTests
 class FakeSession : public ISession
 {
 public:
-	explicit FakeSession(std::string remote) : remoteAddress(std::move(remote)) {}
+	explicit FakeSession(net::IPv4Address remote) : remoteAddress(remote) {}
 
 	bool			  isConnected() const override { return !closed.load(); }
 	bool			  sendMessage(const InternalMessage &, DeliveryMode) override { return isConnected(); }
 	void			  startReadAsync(MessageReceivedCallback, DisconnectedCallback) override {}
 	void			  stopReadAsync() override {}
 	int				  getBoundPort() const override { return 40000; }
-	std::string		  getRemoteAddress() const override { return remoteAddress; }
+	net::IPv4Address  getRemoteAddress() const override { return remoteAddress; }
 	int				  getRemotePort() const override { return 50000; }
 	void			  close() override { closed.store(true); }
 
-	std::string		  remoteAddress;
+	net::IPv4Address  remoteAddress;
 	std::atomic<bool> closed{false};
 };
 
@@ -41,29 +42,29 @@ public:
 class FakeServer : public IServer
 {
 public:
-	void		   setSessionHandler(SessionHandler handler) override { sessionHandler = std::move(handler); }
-	bool		   start(const std::string &localAddress) override
+	void setSessionHandler(SessionHandler handler) override { sessionHandler = std::move(handler); }
+	bool start(const net::IPv4Address &localAddress) override
 	{
 		startedOn = localAddress;
 		started	  = true;
 		return startSucceeds;
 	}
-	void		   stop() override { stopped = true; }
-	int			   getBoundPort() const override { return boundPort; }
+	void			 stop() override { stopped = true; }
+	int				 getBoundPort() const override { return boundPort; }
 
-	bool		   startSucceeds{true};
-	bool		   started{false};
-	bool		   stopped{false};
-	std::string	   startedOn;
-	int			   boundPort{12345};
-	SessionHandler sessionHandler;
+	bool			 startSucceeds{true};
+	bool			 started{false};
+	bool			 stopped{false};
+	net::IPv4Address startedOn;
+	int				 boundPort{12345};
+	SessionHandler	 sessionHandler;
 };
 
 
 class FakeClient : public IClient
 {
 public:
-	void connect(const std::string &localAddress, const std::string &host, unsigned short port) override
+	void connect(const net::IPv4Address &localAddress, const net::IPv4Address &host, unsigned short port) override
 	{
 		connectedFrom = localAddress;
 		connectedHost = host;
@@ -74,8 +75,8 @@ public:
 	void				  setConnectTimeoutHandler(ConnectTimeoutHandler handler) override { timeoutHandler = std::move(handler); }
 
 	bool				  connectCalled{false};
-	std::string			  connectedFrom;
-	std::string			  connectedHost;
+	net::IPv4Address	  connectedFrom;
+	net::IPv4Address	  connectedHost;
 	unsigned short		  connectedPort{0};
 	ConnectHandler		  connectHandler;
 	ConnectTimeoutHandler timeoutHandler;
@@ -89,8 +90,8 @@ public:
 	{
 		auto server			  = std::make_unique<FakeServer>();
 		server->startSucceeds = !failServerStart;
-		lastServer	  = server.get();
-		serverCreated = true;
+		lastServer			  = server.get();
+		serverCreated		  = true;
 		return server;
 	}
 
@@ -124,11 +125,11 @@ bool waitUntil(Predicate predicate, std::chrono::milliseconds timeout = 1s)
 }
 
 
-static ValidationResult makeReadyResult(const std::string &name, const std::string &ip = "10.0.0.5", int port = 6000)
+static ValidationResult makeReadyResult(const std::string &name, std::string_view ip = "10.0.0.5", int port = 6000)
 {
 	ValidationResult r;
 	r.remoteEndpoint.displayName = name;
-	r.remoteEndpoint.IPAddress	 = ip;
+	r.remoteEndpoint.IPAddress	 = ipv4(ip);
 	r.remoteEndpoint.port		 = port;
 	r.status					 = ValidationResult::Status::ReadyToConnect;
 	r.canConnect				 = true;
@@ -143,7 +144,7 @@ protected:
 	{
 		signaling = std::make_unique<SignalingService>();
 		service	  = std::make_unique<ConnectionService>(*signaling, factory);
-		service->setLocalIP("10.0.0.1");
+		service->setLocalIP(ipv4("10.0.0.1"));
 	}
 
 	FakeTransportFactory			   factory;
@@ -202,7 +203,7 @@ TEST_F(ConnectionServiceTest, InitiateConnection_SetsCurrentRemote)
 	auto remote = service->getCurrentRemote();
 	ASSERT_TRUE(remote.has_value()) << "getCurrentRemote() must return a value once a connection has been initiated";
 	EXPECT_EQ(remote->displayName, "pc-a");
-	EXPECT_EQ(remote->IPAddress, "10.0.0.9");
+	EXPECT_EQ(remote->IPAddress, ipv4("10.0.0.9"));
 }
 
 
@@ -438,7 +439,7 @@ protected:
 	void establish()
 	{
 		acceptInvitationAsAcceptor();
-		factory.lastServer->sessionHandler(std::make_shared<FakeSession>("10.0.0.0"));
+		factory.lastServer->sessionHandler(std::make_shared<FakeSession>(ipv4("10.0.0.0")));
 		ASSERT_TRUE(waitUntil([&] { return service->isConnected(); }));
 	}
 
@@ -458,7 +459,7 @@ TEST_F(ConnectionServiceAcceptorTest, Acceptor_StartsServerOnLocalAddress)
 	acceptInvitationAsAcceptor();
 
 	EXPECT_TRUE(factory.lastServer->started) << "The acceptor must actually start listening, otherwise it announces port 0";
-	EXPECT_EQ(factory.lastServer->startedOn, "10.0.0.1") << "The server must listen on the selected adapter address";
+	EXPECT_EQ(factory.lastServer->startedOn, ipv4("10.0.0.1")) << "The server must listen on the selected adapter address";
 }
 
 
@@ -478,7 +479,7 @@ TEST_F(ConnectionServiceAcceptorTest, Acceptor_SessionFromExpectedPeer_Establish
 {
 	acceptInvitationAsAcceptor();
 
-	auto session = std::make_shared<FakeSession>("10.0.0.0");
+	auto session = std::make_shared<FakeSession>(ipv4("10.0.0.0"));
 	factory.lastServer->sessionHandler(session);
 
 	EXPECT_TRUE(waitUntil([&] { return service->isConnected(); })) << "A session from the negotiated peer must establish the connection";
@@ -492,7 +493,7 @@ TEST_F(ConnectionServiceAcceptorTest, Acceptor_SessionFromUnexpectedAddress_IsRe
 {
 	acceptInvitationAsAcceptor();
 
-	auto intruder = std::make_shared<FakeSession>("10.0.0.99");
+	auto intruder = std::make_shared<FakeSession>(ipv4("10.0.0.99"));
 	factory.lastServer->sessionHandler(intruder);
 
 	EXPECT_TRUE(waitUntil([&] { return intruder->closed.load(); })) << "A connection from any other host must be closed";
@@ -545,11 +546,11 @@ TEST_F(ConnectionServiceTest, Connector_ConnectsOnceRemoteIsReady)
 	service->onReceivedConnectionReadyFlag("pc-b");
 
 	EXPECT_TRUE(factory.lastClient->connectCalled);
-	EXPECT_EQ(factory.lastClient->connectedHost, "10.0.0.2");
+	EXPECT_EQ(factory.lastClient->connectedHost, ipv4("10.0.0.2"));
 	EXPECT_EQ(factory.lastClient->connectedPort, 45678) << "The connector must use the announced data port, not the signaling port";
-	EXPECT_EQ(factory.lastClient->connectedFrom, "10.0.0.1") << "The connection must originate from the selected adapter address";
+	EXPECT_EQ(factory.lastClient->connectedFrom, ipv4("10.0.0.1")) << "The connection must originate from the selected adapter address";
 
-	factory.lastClient->connectHandler(std::make_shared<FakeSession>("10.0.0.2"));
+	factory.lastClient->connectHandler(std::make_shared<FakeSession>(ipv4("10.0.0.2")));
 	EXPECT_TRUE(waitUntil([&] { return service->isConnected(); }));
 }
 

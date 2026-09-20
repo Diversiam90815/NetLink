@@ -44,7 +44,7 @@ void DiscoveryService::setOnRemoteFound(RemoteFoundCallback cb)
 
 bool DiscoveryService::init(const DiscoveryConfig &config)
 {
-	if (config.localIPv4.empty() || config.displayName.empty() || config.discoveryPort <= 0 || config.discoveryPort > 65535)
+	if (config.localIPv4.isUnspecified() || config.displayName.empty() || config.discoveryPort <= 0 || config.discoveryPort > 65535)
 		return false;
 
 	{
@@ -122,7 +122,7 @@ void DiscoveryService::stopDiscovery()
 }
 
 
-DiscoveryEndpoint DiscoveryService::getEndpointFromIP(const std::string &IPv4)
+DiscoveryEndpoint DiscoveryService::getEndpointFromIP(const netlink::net::IPv4Address &IPv4)
 {
 	std::lock_guard<std::mutex> lock(mMutex);
 

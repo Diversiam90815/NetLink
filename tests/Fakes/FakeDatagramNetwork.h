@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "Socket/IDatagramSocket.h"
+#include "TestIp.h"
 
 
 namespace FakeNet
@@ -34,7 +35,7 @@ public:
 	static std::shared_ptr<FakeDatagramNetwork> create() { return std::shared_ptr<FakeDatagramNetwork>(new FakeDatagramNetwork()); }
 
 	// Sockets created by this factory behave like sockets of a host with the given IP
-	DatagramSocketFactory						factory(const std::string &hostIp);
+	DatagramSocketFactory						factory(std::string_view hostIp);
 
 	size_t										deliveredCount() const
 	{
@@ -47,26 +48,26 @@ private:
 
 	struct Inbox
 	{
-		std::mutex											   mutex;
-		std::condition_variable								   cv;
+		std::mutex												   mutex;
+		std::condition_variable									   cv;
 		std::deque<std::pair<std::vector<uint8_t>, SocketAddress>> queue;
-		bool												   shutdown{false};
+		bool													   shutdown{false};
 	};
 
 	struct Binding
 	{
 		std::weak_ptr<Inbox> inbox;
-		std::string			 hostIp;
-		std::string			 boundIp;
+		IPv4Address			 hostIp;
+		IPv4Address			 boundIp;
 		uint16_t			 port{0};
 		bool				 reuse{false};
 	};
 
 	FakeDatagramNetwork() = default;
 
-	Result<std::unique_ptr<IDatagramSocket>> bind(const std::string &hostIp, const SocketAddress &local, const BindOptions &options);
+	Result<std::unique_ptr<IDatagramSocket>> bind(const IPv4Address &hostIp, const SocketAddress &local, const BindOptions &options);
 
-	void deliver(const SocketAddress &from, const SocketAddress &to, std::span<const uint8_t> data)
+	void									 deliver(const SocketAddress &from, const SocketAddress &to, std::span<const uint8_t> data)
 	{
 		std::vector<std::shared_ptr<Inbox>> targets;
 
@@ -79,7 +80,7 @@ private:
 				if (!inbox || binding.port != to.port)
 					continue;
 
-				const bool matches = to.ip == BroadcastAddress || to.ip == binding.boundIp || to.ip == binding.hostIp;
+				const bool matches = to.ip.isBroadcast() || to.ip == binding.boundIp || to.ip == binding.hostIp;
 				if (matches)
 					targets.push_back(std::move(inbox));
 			}
@@ -107,8 +108,8 @@ private:
 class FakeDatagramSocket final : public IDatagramSocket
 {
 public:
-	FakeDatagramSocket(std::weak_ptr<FakeDatagramNetwork> network, std::shared_ptr<FakeDatagramNetwork::Inbox> inbox, std::string hostIp, SocketAddress local)
-		: mNetwork(std::move(network)), mInbox(std::move(inbox)), mHostIp(std::move(hostIp)), mLocal(std::move(local))
+	FakeDatagramSocket(std::weak_ptr<FakeDatagramNetwork> network, std::shared_ptr<FakeDatagramNetwork::Inbox> inbox, IPv4Address hostIp, SocketAddress local)
+		: mNetwork(std::move(network)), mInbox(std::move(inbox)), mHostIp(hostIp), mLocal(std::move(local))
 	{
 	}
 
@@ -135,7 +136,7 @@ public:
 		auto [payload, from] = std::move(mInbox->queue.front());
 		mInbox->queue.pop_front();
 
-		const size_t size	 = std::min(payload.size(), buffer.size());
+		const size_t size = std::min(payload.size(), buffer.size());
 		std::memcpy(buffer.data(), payload.data(), size);
 		return Datagram{size, from};
 	}
@@ -152,14 +153,14 @@ public:
 	}
 
 private:
-	std::weak_ptr<FakeDatagramNetwork>			 mNetwork;
+	std::weak_ptr<FakeDatagramNetwork>			mNetwork;
 	std::shared_ptr<FakeDatagramNetwork::Inbox> mInbox;
-	std::string									 mHostIp;
-	SocketAddress								 mLocal;
+	IPv4Address									mHostIp;
+	SocketAddress								mLocal;
 };
 
 
-inline Result<std::unique_ptr<IDatagramSocket>> FakeDatagramNetwork::bind(const std::string &hostIp, const SocketAddress &local, const BindOptions &options)
+inline Result<std::unique_ptr<IDatagramSocket>> FakeDatagramNetwork::bind(const IPv4Address &hostIp, const SocketAddress &local, const BindOptions &options)
 {
 	std::lock_guard<std::mutex> lock(mMutex);
 
@@ -181,15 +182,15 @@ inline Result<std::unique_ptr<IDatagramSocket>> FakeDatagramNetwork::bind(const 
 	}
 
 	auto inbox = std::make_shared<Inbox>();
-	mBindings.push_back({inbox, hostIp, local.ip.empty() ? "0.0.0.0" : local.ip, port, options.reuseAddress});
+	mBindings.push_back({inbox, hostIp, local.ip, port, options.reuseAddress});
 
-	return std::make_unique<FakeDatagramSocket>(weak_from_this(), inbox, hostIp, SocketAddress{local.ip.empty() ? "0.0.0.0" : local.ip, port});
+	return std::make_unique<FakeDatagramSocket>(weak_from_this(), inbox, hostIp, SocketAddress{local.ip, port});
 }
 
 
-inline DatagramSocketFactory FakeDatagramNetwork::factory(const std::string &hostIp)
+inline DatagramSocketFactory FakeDatagramNetwork::factory(std::string_view hostIp)
 {
-	return [network = shared_from_this(), hostIp](const SocketAddress &local, const BindOptions &options) { return network->bind(hostIp, local, options); };
+	return [network = shared_from_this(), host = ipv4(hostIp)](const SocketAddress &local, const BindOptions &options) { return network->bind(host, local, options); };
 }
 
 } // namespace FakeNet

@@ -23,11 +23,11 @@
 
 struct DiscoveryConfig
 {
-	std::string displayName{};
-	std::string localIPv4{};
-	int			signalingPort{0};
-	int			discoveryPort{5555};
-	std::string broadcastAddress{"255.255.255.255"};
+	std::string				  displayName{};
+	netlink::net::IPv4Address localIPv4{};
+	int						  signalingPort{0};
+	int						  discoveryPort{5555};
+	netlink::net::IPv4Address broadcastAddress{netlink::net::IPv4Address::broadcast()};
 };
 
 
@@ -55,7 +55,7 @@ public:
 	void			  stopDiscovery();
 	bool			  isDiscovering() const { return isRunning(); }
 
-	DiscoveryEndpoint getEndpointFromIP(const std::string &IPv4);
+	DiscoveryEndpoint getEndpointFromIP(const netlink::net::IPv4Address &IPv4);
 	void			  addRemoteToList(DiscoveryEndpoint remote);
 
 

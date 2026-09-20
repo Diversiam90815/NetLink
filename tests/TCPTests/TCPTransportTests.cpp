@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+
 #include <atomic>
 #include <chrono>
 #include <memory>
@@ -8,6 +9,7 @@
 #include <thread>
 #include <vector>
 
+#include "TestIp.h"
 #include "TCP/TCPServer.h"
 #include "TCP/TCPClient.h"
 #include "TCP/TCPSession.h"
@@ -56,7 +58,7 @@ protected:
 				serverSession = std::move(session);
 			});
 
-		ASSERT_TRUE(server.start("127.0.0.1"));
+		ASSERT_TRUE(server.start(ipv4("127.0.0.1")));
 	}
 
 	void connect()
@@ -68,7 +70,7 @@ protected:
 				clientSession = std::move(session);
 			});
 
-		client.connect("", "127.0.0.1", static_cast<unsigned short>(server.getBoundPort()));
+		client.connect(netlink::net::IPv4Address{}, ipv4("127.0.0.1"), static_cast<unsigned short>(server.getBoundPort()));
 
 		ASSERT_TRUE(waitUntil([this] { return bothConnected(); })) << "Client and server must both produce a session";
 	}
@@ -134,7 +136,7 @@ TEST_F(TCPTransportTest, Server_BoundPortIsNonZeroAfterStart)
 TEST(TCPServer, StartFails_ForAddressNotOnThisMachine)
 {
 	TCPServer server;
-	EXPECT_FALSE(server.start("203.0.113.1")) << "Listening on a foreign address must fail instead of silently accepting nothing";
+	EXPECT_FALSE(server.start(ipv4("203.0.113.1"))) << "Listening on a foreign address must fail instead of silently accepting nothing";
 	EXPECT_EQ(server.getBoundPort(), 0);
 }
 
@@ -143,8 +145,8 @@ TEST(TCPServer, TwoInstances_GetDifferentPorts)
 {
 	TCPServer serverA;
 	TCPServer serverB;
-	ASSERT_TRUE(serverA.start("127.0.0.1"));
-	ASSERT_TRUE(serverB.start("127.0.0.1"));
+	ASSERT_TRUE(serverA.start(ipv4("127.0.0.1")));
+	ASSERT_TRUE(serverB.start(ipv4("127.0.0.1")));
 
 	EXPECT_NE(serverA.getBoundPort(), serverB.getBoundPort());
 }
@@ -157,7 +159,7 @@ TEST_F(TCPTransportTest, Server_AcceptsIncomingClientConnection)
 	std::lock_guard<std::mutex> lock(mutex);
 	EXPECT_TRUE(serverSession->isConnected());
 	EXPECT_TRUE(clientSession->isConnected());
-	EXPECT_EQ(serverSession->getRemoteAddress(), "127.0.0.1");
+	EXPECT_EQ(serverSession->getRemoteAddress(), ipv4("127.0.0.1"));
 	EXPECT_EQ(serverSession->getRemotePort(), clientSession->getBoundPort()) << "Both sessions must describe the same connection";
 }
 
@@ -179,7 +181,7 @@ TEST(TCPClient, ConnectTimeoutHandler_FiresOnRefusedConnection)
 	int closedPort = 0;
 	{
 		TCPServer server;
-		ASSERT_TRUE(server.start("127.0.0.1"));
+		ASSERT_TRUE(server.start(ipv4("127.0.0.1")));
 		closedPort = server.getBoundPort();
 	}
 
@@ -189,7 +191,7 @@ TEST(TCPClient, ConnectTimeoutHandler_FiresOnRefusedConnection)
 	client.setConnectTimeoutHandler([&] { failed.store(true); });
 	client.setConnectHandler([&](ISession::pointer) { connected.store(true); });
 
-	client.connect("", "127.0.0.1", static_cast<unsigned short>(closedPort));
+	client.connect(netlink::net::IPv4Address{}, ipv4("127.0.0.1"), static_cast<unsigned short>(closedPort));
 
 	EXPECT_TRUE(waitUntil([&] { return failed.load(); }, 8s)) << "A refused connection must invoke the timeout/failure handler";
 	EXPECT_FALSE(connected.load());
@@ -198,15 +200,15 @@ TEST(TCPClient, ConnectTimeoutHandler_FiresOnRefusedConnection)
 
 TEST(TCPClient, Destructor_CancelsPendingConnectPromptly)
 {
-	auto	   destroyed	  = std::make_shared<std::atomic<bool>>(false);
-	auto	   lateCallback	  = std::make_shared<std::atomic<bool>>(false);
-	const auto started		  = std::chrono::steady_clock::now();
+	auto	   destroyed	= std::make_shared<std::atomic<bool>>(false);
+	auto	   lateCallback = std::make_shared<std::atomic<bool>>(false);
+	const auto started		= std::chrono::steady_clock::now();
 
 	{
 		TCPClient client;
 		client.setConnectHandler([=](ISession::pointer) { lateCallback->store(destroyed->load()); });
 		client.setConnectTimeoutHandler([=] { lateCallback->store(destroyed->load()); });
-		client.connect("", "10.255.255.1", 9); // blackholed: normally stays pending until the timeout
+		client.connect(netlink::net::IPv4Address{}, ipv4("10.255.255.1"), 9); // blackholed: normally stays pending until the timeout
 
 		std::this_thread::sleep_for(100ms);
 	}
@@ -358,11 +360,11 @@ TEST(TCPServer, StopFromInsideSessionHandler_IsSafe)
 			server.stop();
 			stopped.store(true);
 		});
-	ASSERT_TRUE(server.start("127.0.0.1"));
+	ASSERT_TRUE(server.start(ipv4("127.0.0.1")));
 
 	TCPClient client;
 	client.setConnectHandler([](ISession::pointer) {});
-	client.connect("", "127.0.0.1", static_cast<unsigned short>(server.getBoundPort()));
+	client.connect(netlink::net::IPv4Address{}, ipv4("127.0.0.1"), static_cast<unsigned short>(server.getBoundPort()));
 
 	EXPECT_TRUE(waitUntil([&] { return stopped.load(); }));
 }

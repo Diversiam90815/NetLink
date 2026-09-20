@@ -91,7 +91,7 @@ public:
 	// Configuration
 	void							 setCallbacks(ConnectionServiceCallbacks cb) { mCallbacks = std::move(cb); }
 	void							 setConfig(const ConnectionConfig &config);
-	void							 setLocalIP(const std::string &ip);
+	void							 setLocalIP(const net::IPv4Address &ip);
 	void							 setTransportFactory(ITransportFactory &transportFactory);
 
 	// Connection management
@@ -158,7 +158,7 @@ private:
 	// Configuration and callbacks
 	ConnectionConfig				 mConfig;
 	ConnectionServiceCallbacks		 mCallbacks;
-	std::string						 mLocalIP{};
+	net::IPv4Address				 mLocalIP{};
 
 	TaskQueue						 mTaskQueue;
 	ValidatedPeerRegistry			 mValidatedPeers;

@@ -116,7 +116,7 @@ int TCPSession::getBoundPort() const
 }
 
 
-std::string TCPSession::getRemoteAddress() const
+net::IPv4Address TCPSession::getRemoteAddress() const
 {
 	return mState->stream.remoteAddress().ip;
 }

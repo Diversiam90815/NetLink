@@ -1,8 +1,10 @@
 #include <gtest/gtest.h>
+
 #include <chrono>
 #include <string>
 #include <vector>
 
+#include "TestIp.h"
 #include "Socket/UdpSocket.h"
 
 using namespace netlink::net;
@@ -20,18 +22,18 @@ static std::span<const uint8_t> asBytes(const std::string &text)
 
 TEST(UdpSocket, BindToPortZero_AssignsPort)
 {
-	auto socket = UdpSocket::bind({"127.0.0.1", 0});
+	auto socket = UdpSocket::bind({ipv4("127.0.0.1"), 0});
 
 	ASSERT_TRUE(socket.has_value()) << toString(socket.error());
 	EXPECT_NE(socket->localAddress().port, 0) << "Binding port 0 must report the OS assigned port";
-	EXPECT_EQ(socket->localAddress().ip, "127.0.0.1");
+	EXPECT_EQ(socket->localAddress().ip, ipv4("127.0.0.1"));
 }
 
 
 TEST(UdpSocket, SendAndReceiveOverLoopback)
 {
-	auto receiver = UdpSocket::bind({"127.0.0.1", 0});
-	auto sender	  = UdpSocket::bind({"127.0.0.1", 0});
+	auto receiver = UdpSocket::bind({ipv4("127.0.0.1"), 0});
+	auto sender	  = UdpSocket::bind({ipv4("127.0.0.1"), 0});
 	ASSERT_TRUE(receiver && sender);
 
 	auto sent = sender->sendTo(receiver->localAddress(), asBytes("hello"));
@@ -49,7 +51,7 @@ TEST(UdpSocket, SendAndReceiveOverLoopback)
 
 TEST(UdpSocket, Receive_TimesOutWhenNothingArrives)
 {
-	auto socket = UdpSocket::bind({"127.0.0.1", 0});
+	auto socket = UdpSocket::bind({ipv4("127.0.0.1"), 0});
 	ASSERT_TRUE(socket);
 
 	std::vector<uint8_t> buffer(64);
@@ -64,7 +66,7 @@ TEST(UdpSocket, Receive_TimesOutWhenNothingArrives)
 
 TEST(UdpSocket, SecondBindWithoutReuse_FailsWithAddressInUse)
 {
-	auto first = UdpSocket::bind({"127.0.0.1", 0});
+	auto first = UdpSocket::bind({ipv4("127.0.0.1"), 0});
 	ASSERT_TRUE(first);
 
 	auto second = UdpSocket::bind(first->localAddress());
@@ -79,27 +81,27 @@ TEST(UdpSocket, ReuseAddress_AllowsSharedPort)
 	BindOptions options;
 	options.reuseAddress = true;
 
-	auto first			 = UdpSocket::bind({"0.0.0.0", 0}, options);
+	auto first			 = UdpSocket::bind({ipv4("0.0.0.0"), 0}, options);
 	ASSERT_TRUE(first);
 
-	auto second = UdpSocket::bind({"0.0.0.0", first->localAddress().port}, options);
+	auto second = UdpSocket::bind({ipv4("0.0.0.0"), first->localAddress().port}, options);
 	EXPECT_TRUE(second.has_value()) << "Two sockets with reuseAddress must be able to share a port (needed for LAN discovery)";
 }
 
 
-TEST(UdpSocket, InvalidAddress_FailsWithInvalidArgument)
+TEST(UdpSocket, MalformedAddressIsRejectedBeforeItCanReachBind)
 {
-	auto socket = UdpSocket::bind({"not-an-ip", 0});
-
-	ASSERT_FALSE(socket.has_value());
-	EXPECT_EQ(socket.error(), SocketError::InvalidArgument);
+	// SocketAddress holds an IPv4Address, so a malformed address is rejected at parse
+	// time and bind() can no longer be reached with one.
+	EXPECT_FALSE(IPv4Address::parse("not-an-ip").has_value());
+	EXPECT_FALSE(IPv4Address::parse("300.1.1.1").has_value());
 }
 
 
 TEST(UdpSocket, Factory_CreatesBoundSocket)
 {
 	auto factory = UdpSocket::factory();
-	auto socket	 = factory({"127.0.0.1", 0}, {});
+	auto socket	 = factory({ipv4("127.0.0.1"), 0}, {});
 
 	ASSERT_TRUE(socket.has_value());
 	EXPECT_NE((*socket)->localAddress().port, 0);

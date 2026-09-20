@@ -29,7 +29,7 @@ public:
 	void	   setConnectHandler(ConnectHandler handler) override;
 	void	   setConnectTimeoutHandler(ConnectTimeoutHandler handler) override;
 
-	void	   connect(const std::string &localAddress, const std::string &host, unsigned short port) override;
+	void	   connect(const net::IPv4Address &localAddress, const net::IPv4Address &host, unsigned short port) override;
 
 private:
 	// Cancels a pending attempt; returns once its handlers can no longer fire

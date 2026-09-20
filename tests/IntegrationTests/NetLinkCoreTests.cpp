@@ -8,6 +8,7 @@
 #include <thread>
 #include <vector>
 
+#include "TestIp.h"
 #include "Core/NetLinkCore.h"
 #include "Socket/TcpListener.h"
 #include "FakeDatagramNetwork.h"
@@ -98,7 +99,7 @@ protected:
 
 	void						 SetUp() override
 	{
-		if (!net::TcpListener::listen({AddressB, 0}))
+		if (!net::TcpListener::listen({ipv4(AddressB), 0}))
 			GTEST_SKIP() << AddressB << " is not a usable loopback address on this system (e.g. macOS without an alias)";
 	}
 

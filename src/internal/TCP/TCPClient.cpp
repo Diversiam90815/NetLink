@@ -37,7 +37,7 @@ void TCPClient::setConnectTimeoutHandler(ConnectTimeoutHandler handler)
 }
 
 
-void TCPClient::connect(const std::string &localAddress, const std::string &host, unsigned short port)
+void TCPClient::connect(const net::IPv4Address &localAddress, const net::IPv4Address &host, unsigned short port)
 {
 	cancel();
 

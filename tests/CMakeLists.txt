@@ -33,6 +33,7 @@ set(Utils_Tests
 )
 
 set(Socket_Tests
+    ${Test_Directory}/SocketTests/IPv4AddressTests.cpp
     ${Test_Directory}/SocketTests/UdpSocketTests.cpp
     ${Test_Directory}/SocketTests/TcpSocketTests.cpp
     ${Test_Directory}/SocketTests/FakeDatagramTests.cpp
@@ -47,6 +48,7 @@ set(Integration_Tests
 )
 
 set(Test_Fakes
+    ${Test_Directory}/Fakes/TestIp.h
     ${Test_Directory}/Fakes/FakeDatagramNetwork.h
     ${Test_Directory}/Fakes/LossyDatagramSocket.h
 )

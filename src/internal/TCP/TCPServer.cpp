@@ -41,7 +41,7 @@ void TCPServer::setSessionHandler(SessionHandler handler)
 }
 
 
-bool TCPServer::start(const std::string &localAddress)
+bool TCPServer::start(const net::IPv4Address &localAddress)
 {
 	stop();
 
@@ -49,7 +49,7 @@ bool TCPServer::start(const std::string &localAddress)
 
 	if (!listener)
 	{
-		NETLINK_LOG_ERROR("TCPServer: listening on {} failed: {}", localAddress, net::toString(listener.error()));
+		NETLINK_LOG_ERROR("TCPServer: listening on {} failed: {}", localAddress.toString(), net::toString(listener.error()));
 		return false;
 	}
 

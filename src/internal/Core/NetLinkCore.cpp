@@ -57,9 +57,11 @@ void netlink::NetLinkCore::wireServices()
 
 	// Signaling -> peer validation
 	SignalingValidationCallbacks validationSignals;
-	validationSignals.onValidationRequestReceived	= [this](const std::string &name, RemoteRequest request) { mValidation.onRequestReceived(name, request); };
-	validationSignals.onSecretResponseReceived		= [this](const std::string &name, const std::string &secret) { mValidation.onCheckResponseReceived(name, RemoteRequest::Secret, secret); };
-	validationSignals.onVersionResponseReceived		= [this](const std::string &name, const std::string &version) { mValidation.onCheckResponseReceived(name, RemoteRequest::Version, version); };
+	validationSignals.onValidationRequestReceived = [this](const std::string &name, RemoteRequest request) { mValidation.onRequestReceived(name, request); };
+	validationSignals.onSecretResponseReceived	  = [this](const std::string &name, const std::string &secret)
+	{ mValidation.onCheckResponseReceived(name, RemoteRequest::Secret, secret); };
+	validationSignals.onVersionResponseReceived = [this](const std::string &name, const std::string &version)
+	{ mValidation.onCheckResponseReceived(name, RemoteRequest::Version, version); };
 	validationSignals.onValidationHandshakeReceived = [this](const std::string &name) { mValidation.onHandshakeReceived(name); };
 	mSignaling.setValidationCallbacks(std::move(validationSignals));
 
@@ -81,11 +83,12 @@ void netlink::NetLinkCore::wireServices()
 	mCommunication.setMessageCallback(
 		[this](uint32_t type, std::vector<uint8_t> &data)
 		{
-			postEvent([message = Message{type, std::move(data)}](const NetLinkCallbacks &callbacks)
-					  {
-						  if (callbacks.onMessageReceived)
-							  callbacks.onMessageReceived(message);
-					  });
+			postEvent(
+				[message = Message{type, std::move(data)}](const NetLinkCallbacks &callbacks)
+				{
+					if (callbacks.onMessageReceived)
+						callbacks.onMessageReceived(message);
+				});
 		});
 
 	mCommunication.setDisconnectedCallback([this](const std::string &reason) { mConnectionService.onTransportDisconnected(reason); });
@@ -148,9 +151,18 @@ void netlink::NetLinkCore::shutdown()
 
 void netlink::NetLinkCore::setLocalAddress(const std::string &ipv4)
 {
+	// Boundary between the OS-facing string addresses and the validated type used internally
+	const auto parsed = net::IPv4Address::parse(ipv4);
+
+	if (!parsed.has_value())
+	{
+		NETLINK_LOG_ERROR("Ignoring malformed local address '{}'", ipv4);
+		return;
+	}
+
 	{
 		std::lock_guard<std::mutex> lock(mAddressMutex);
-		mLocalAddress = ipv4;
+		mLocalAddress = *parsed;
 	}
 
 	if (mInitialized.load())
@@ -160,13 +172,13 @@ void netlink::NetLinkCore::setLocalAddress(const std::string &ipv4)
 
 void netlink::NetLinkCore::applyLocalAddress()
 {
-	std::string address;
+	net::IPv4Address address;
 	{
 		std::lock_guard<std::mutex> lock(mAddressMutex);
 		address = mLocalAddress;
 	}
 
-	if (address.empty())
+	if (address.isUnspecified())
 		return;
 
 	mConnectionService.setLocalIP(address);
@@ -186,11 +198,12 @@ void netlink::NetLinkCore::updateDiscoveryConfig()
 
 	discoveryConfig.displayName		 = mConfig.localDisplayName;
 	discoveryConfig.discoveryPort	 = mConfig.discoveryPort;
-	discoveryConfig.broadcastAddress = mConfig.broadcastAddress;
+	// A malformed configured broadcast address falls back to the global one
+	discoveryConfig.broadcastAddress = net::IPv4Address::parse(mConfig.broadcastAddress).value_or(net::IPv4Address::broadcast());
 	discoveryConfig.signalingPort	 = mSignaling.getBoundPort();
 
 	if (!mDiscovery.init(discoveryConfig))
-		NETLINK_LOG_ERROR("Discovery could not be configured for {}", discoveryConfig.localIPv4);
+		NETLINK_LOG_ERROR("Discovery could not be configured for {}", discoveryConfig.localIPv4.toString());
 }
 
 
@@ -295,11 +308,12 @@ void netlink::NetLinkCore::onValidationResult(const ValidationResult &result)
 		return;
 	}
 
-	postEvent([endpoint = toPublicEndpoint(result.remoteEndpoint)](const NetLinkCallbacks &callbacks)
-			  {
-				  if (callbacks.onRemoteDiscovered)
-					  callbacks.onRemoteDiscovered(endpoint);
-			  });
+	postEvent(
+		[endpoint = toPublicEndpoint(result.remoteEndpoint)](const NetLinkCallbacks &callbacks)
+		{
+			if (callbacks.onRemoteDiscovered)
+				callbacks.onRemoteDiscovered(endpoint);
+		});
 }
 
 
@@ -343,15 +357,16 @@ void netlink::NetLinkCore::onConnectionStatus(const ConnectionStatusUpdate &upda
 
 void netlink::NetLinkCore::emitConnectionChanged(ConnectionState state, const std::string &message, const DiscoveryEndpoint &remote)
 {
-	postEvent([event = ConnectionEvent{state, message, toPublicEndpoint(remote)}](const NetLinkCallbacks &callbacks)
-			  {
-				  if (callbacks.onConnectionChanged)
-					  callbacks.onConnectionChanged(event);
-			  });
+	postEvent(
+		[event = ConnectionEvent{state, message, toPublicEndpoint(remote)}](const NetLinkCallbacks &callbacks)
+		{
+			if (callbacks.onConnectionChanged)
+				callbacks.onConnectionChanged(event);
+		});
 }
 
 
 netlink::Endpoint netlink::NetLinkCore::toPublicEndpoint(const DiscoveryEndpoint &endpoint)
 {
-	return {endpoint.IPAddress, endpoint.port, endpoint.displayName};
+	return {endpoint.IPAddress.toString(), endpoint.port, endpoint.displayName};
 }

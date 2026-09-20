@@ -16,7 +16,7 @@ netlink::ConnectionService::ConnectionService(SignalingService &signaling, ITran
 }
 
 
-void netlink::ConnectionService::setLocalIP(const std::string &ip)
+void netlink::ConnectionService::setLocalIP(const net::IPv4Address &ip)
 {
 	std::lock_guard<std::mutex> lock(mConnectingMutex);
 	mLocalIP = ip;
@@ -581,11 +581,11 @@ bool netlink::ConnectionService::determineLocalSessionRole()
 	if (!mCurrentRequest.has_value())
 		return false;
 
-	const std::string &remoteIP = mCurrentRequest->remote.IPAddress;
-	SessionRole		   role		= determineRole(mLocalIP, remoteIP);
-	mCurrentRequest->localRole	= role;
+	const net::IPv4Address &remoteIP = mCurrentRequest->remote.IPAddress;
+	SessionRole				role	 = determineRole(mLocalIP, remoteIP);
+	mCurrentRequest->localRole		 = role;
 
-	NETLINK_LOG_INFO("Session role for {}: {}", remoteIP, role == SessionRole::Acceptor ? "Acceptor" : "Connector");
+	NETLINK_LOG_INFO("Session role for {}: {}", remoteIP.toString(), role == SessionRole::Acceptor ? "Acceptor" : "Connector");
 
 	if (role == SessionRole::Acceptor)
 	{
@@ -596,7 +596,7 @@ bool netlink::ConnectionService::determineLocalSessionRole()
 
 		if (!server->start(mLocalIP))
 		{
-			NETLINK_LOG_ERROR("Acceptor: failed to listen on {}", mLocalIP);
+			NETLINK_LOG_ERROR("Acceptor: failed to listen on {}", mLocalIP.toString());
 			return false;
 		}
 
@@ -743,7 +743,7 @@ void netlink::ConnectionService::armTimeout(const TimeoutKey &key, int timeoutMs
 											 std::lock_guard<std::mutex> lock(mConnectingMutex);
 
 											 // Ignore a timeout that was cancelled or restarted while this task was queued
-											 auto it = mArmedTimeouts.find(expired);
+											 auto						 it = mArmedTimeouts.find(expired);
 											 if (it == mArmedTimeouts.end() || it->second != generation)
 												 return;
 

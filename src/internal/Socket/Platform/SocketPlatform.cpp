@@ -27,20 +27,14 @@ std::unexpected<SocketError> failure()
 }
 
 
+// An IPv4Address is always well formed, so this cannot fail. It keeps returning
+// Result<> so the call sites stay uniform with the rest of the platform layer.
 Result<sockaddr_in> toSockaddr(const SocketAddress &address)
 {
 	sockaddr_in addr{};
-	addr.sin_family = AF_INET;
-	addr.sin_port	= htons(address.port);
-
-	if (address.ip.empty())
-	{
-		addr.sin_addr.s_addr = htonl(INADDR_ANY);
-		return addr;
-	}
-
-	if (inet_pton(AF_INET, address.ip.c_str(), &addr.sin_addr) != 1)
-		return std::unexpected(SocketError::InvalidArgument);
+	addr.sin_family		 = AF_INET;
+	addr.sin_port		 = htons(address.port);
+	addr.sin_addr.s_addr = htonl(address.ip.toHostOrder()); // 0.0.0.0 maps to INADDR_ANY
 
 	return addr;
 }
@@ -48,9 +42,7 @@ Result<sockaddr_in> toSockaddr(const SocketAddress &address)
 
 SocketAddress fromSockaddr(const sockaddr_in &addr)
 {
-	char text[INET_ADDRSTRLEN]{};
-	inet_ntop(AF_INET, &addr.sin_addr, text, sizeof(text));
-	return {text, ntohs(addr.sin_port)};
+	return {IPv4Address::fromHostOrder(ntohl(addr.sin_addr.s_addr)), ntohs(addr.sin_port)};
 }
 
 
@@ -159,7 +151,7 @@ Result<void> startConnect(NativeHandle handle, const SocketAddress &remote)
 	if (!addr)
 		return std::unexpected(addr.error());
 
-	if (remote.ip.empty() || remote.port == 0)
+	if (remote.ip.isUnspecified() || remote.port == 0)
 		return std::unexpected(SocketError::InvalidArgument);
 
 	if (::connect(toNative(handle), reinterpret_cast<sockaddr *>(&*addr), sizeof(sockaddr_in)) == SocketErrorRet)

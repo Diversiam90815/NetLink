@@ -62,16 +62,16 @@ void netlink::SignalingService::deinit()
 }
 
 
-void netlink::SignalingService::setLocalIPv4(const std::string &localIPv4)
+void netlink::SignalingService::setLocalIPv4(const net::IPv4Address &localIPv4)
 {
-	if (localIPv4.empty())
+	if (localIPv4.isUnspecified())
 		return;
 
 	auto socket = mSocketFactory({localIPv4, 0}, {});
 
 	if (!socket)
 	{
-		NETLINK_LOG_ERROR("Failed to bind signaling socket to {}: {}", localIPv4, net::toString(socket.error()));
+		NETLINK_LOG_ERROR("Failed to bind signaling socket to {}: {}", localIPv4.toString(), net::toString(socket.error()));
 		return;
 	}
 
@@ -88,7 +88,7 @@ void netlink::SignalingService::setLocalIPv4(const std::string &localIPv4)
 		previous->shutdown();
 
 	mBoundPort.store(boundPort);
-	NETLINK_LOG_INFO("SignalingService bound to {}:{}", localIPv4, boundPort);
+	NETLINK_LOG_INFO("SignalingService bound to {}:{}", localIPv4.toString(), boundPort);
 
 	if (mOnSocketBound)
 		mOnSocketBound(boundPort);
@@ -102,11 +102,11 @@ std::shared_ptr<netlink::net::IDatagramSocket> netlink::SignalingService::socket
 }
 
 
-void netlink::SignalingService::registerPeer(const std::string &displayName, const std::string &ipv4, const int signalingPort)
+void netlink::SignalingService::registerPeer(const std::string &displayName, const net::IPv4Address &ipv4, const int signalingPort)
 {
 	std::lock_guard<std::mutex> lock(mPeerRegistryMutex);
 	mPeerRegistry[displayName] = {ipv4, signalingPort};
-	NETLINK_LOG_DEBUG("Registered peer {} -> {}:{}", displayName, ipv4, signalingPort);
+	NETLINK_LOG_DEBUG("Registered peer {} -> {}:{}", displayName, ipv4.toString(), signalingPort);
 }
 
 

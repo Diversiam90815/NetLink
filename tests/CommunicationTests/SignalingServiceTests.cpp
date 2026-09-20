@@ -1,10 +1,12 @@
 #include <gtest/gtest.h>
+
 #include <atomic>
 #include <chrono>
 #include <mutex>
 #include <string>
 #include <thread>
 
+#include "TestIp.h"
 #include "Signaling/SignalingService.h"
 #include "FakeDatagramNetwork.h"
 
@@ -37,13 +39,13 @@ protected:
 		ASSERT_TRUE(pcA.init("pc-a"));
 		ASSERT_TRUE(pcB.init("pc-b"));
 
-		pcA.setLocalIPv4("10.0.0.1");
-		pcB.setLocalIPv4("10.0.0.2");
+		pcA.setLocalIPv4(ipv4("10.0.0.1"));
+		pcB.setLocalIPv4(ipv4("10.0.0.2"));
 		ASSERT_NE(pcA.getBoundPort(), 0);
 		ASSERT_NE(pcB.getBoundPort(), 0);
 
-		pcA.registerPeer("pc-b", "10.0.0.2", pcB.getBoundPort());
-		pcB.registerPeer("pc-a", "10.0.0.1", pcA.getBoundPort());
+		pcA.registerPeer("pc-b", ipv4("10.0.0.2"), pcB.getBoundPort());
+		pcB.registerPeer("pc-a", ipv4("10.0.0.1"), pcA.getBoundPort());
 
 		SignalingConnectionCallbacks callbacks;
 		callbacks.onConnectRequested = [this](const std::string &name)
@@ -124,10 +126,10 @@ TEST_F(SignalingServiceTest, PayloadsSurviveTheRoundTrip)
 
 TEST_F(SignalingServiceTest, EverySendMethod_ProducesAPacketTheReceiverCanParse)
 {
-	std::atomic<int> readyFlags{0};
-	std::atomic<int> disconnects{0};
-	std::atomic<int> handshakes{0};
-	std::atomic<int> versions{0};
+	std::atomic<int>			 readyFlags{0};
+	std::atomic<int>			 disconnects{0};
+	std::atomic<int>			 handshakes{0};
+	std::atomic<int>			 versions{0};
 
 	SignalingConnectionCallbacks connection;
 	connection.onConnectRequested		= [this](const std::string &) { ++connectRequests; };
@@ -137,8 +139,8 @@ TEST_F(SignalingServiceTest, EverySendMethod_ProducesAPacketTheReceiverCanParse)
 	connection.onDataPortReceived		= [this](const std::string &, int port) { lastDataPort = port; };
 
 	SignalingValidationCallbacks validation;
-	validation.onValidationRequestReceived	 = [this](const std::string &, RemoteRequest request) { lastRequest = static_cast<int>(request); };
-	validation.onSecretResponseReceived		 = [this](const std::string &, const std::string &secret)
+	validation.onValidationRequestReceived = [this](const std::string &, RemoteRequest request) { lastRequest = static_cast<int>(request); };
+	validation.onSecretResponseReceived	   = [this](const std::string &, const std::string &secret)
 	{
 		std::lock_guard<std::mutex> lock(mutex);
 		lastSecret = secret;
@@ -149,11 +151,11 @@ TEST_F(SignalingServiceTest, EverySendMethod_ProducesAPacketTheReceiverCanParse)
 	// Callbacks must be set before start(): use a fresh receiver
 	SignalingService receiver{network->factory("10.0.0.3")};
 	ASSERT_TRUE(receiver.init("pc-c"));
-	receiver.setLocalIPv4("10.0.0.3");
+	receiver.setLocalIPv4(ipv4("10.0.0.3"));
 	receiver.setConnectionCallbacks(connection);
 	receiver.setValidationCallbacks(validation);
 	receiver.start();
-	pcA.registerPeer("pc-c", "10.0.0.3", receiver.getBoundPort());
+	pcA.registerPeer("pc-c", ipv4("10.0.0.3"), receiver.getBoundPort());
 
 	pcA.sendConnectRequest("pc-c");
 	pcA.sendConnectAnswer("pc-c", true);
@@ -200,12 +202,12 @@ TEST_F(SignalingServiceTest, Rebind_WhileRunning_KeepsReceiving)
 	int		  boundPort = 0;
 	pcB.setOnSocketBound([&](int port) { boundPort = port; });
 
-	pcB.setLocalIPv4("10.0.0.2"); // e.g. adapter change
+	pcB.setLocalIPv4(ipv4("10.0.0.2")); // e.g. adapter change
 
 	ASSERT_NE(pcB.getBoundPort(), oldPort) << "Rebinding picks a new OS assigned port";
 	EXPECT_EQ(boundPort, pcB.getBoundPort()) << "The new port must be reported so discovery can announce it";
 
-	pcA.registerPeer("pc-b", "10.0.0.2", pcB.getBoundPort());
+	pcA.registerPeer("pc-b", ipv4("10.0.0.2"), pcB.getBoundPort());
 	pcA.sendConnectRequest("pc-b");
 
 	EXPECT_TRUE(waitUntilTrue([this] { return connectRequests.load() == 1; })) << "The receive loop must pick up the new socket without a restart";

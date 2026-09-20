@@ -12,6 +12,8 @@
 #include <variant>
 #include <nlohmann/json.hpp>
 
+#include "Socket/IPv4Address.h"
+
 
 namespace netlink
 {
@@ -93,7 +95,7 @@ struct SignalPacket
 {
 	SignalType																																					 signalType{};
 	std::string																																					 senderName{};
-	std::string																																					 senderIP{};
+	net::IPv4Address																																			 senderIP{};
 	int																																							 senderPort{0};
 
 	// Type-specific payload
@@ -110,7 +112,7 @@ inline void to_json(nlohmann::json &j, const SignalPacket &p)
 {
 	j[JSON_Serialization::SignalType]	= static_cast<int>(p.signalType);
 	j[JSON_Serialization::ComputerName] = p.senderName;
-	j[JSON_Serialization::SenderIPv4]	= p.senderIP;
+	j[JSON_Serialization::SenderIPv4]	= p.senderIP.toString();
 	j[JSON_Serialization::SenderPort]	= p.senderPort;
 
 	std::visit(
@@ -137,7 +139,8 @@ inline void to_json(nlohmann::json &j, const SignalPacket &p)
 inline void from_json(const nlohmann::json &j, SignalPacket &p)
 {
 	p.signalType = static_cast<SignalType>(j.at(JSON_Serialization::SignalType).get<int>());
-	j.at(JSON_Serialization::SenderIPv4).get_to(p.senderIP);
+	if (auto ip = net::IPv4Address::parse(j.at(JSON_Serialization::SenderIPv4).get<std::string>()); ip.has_value())
+		p.senderIP = *ip;
 	j.at(JSON_Serialization::SenderPort).get_to(p.senderPort);
 	j.at(JSON_Serialization::ComputerName).get_to(p.senderName);
 

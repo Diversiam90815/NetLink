@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+
 #include <atomic>
 #include <chrono>
 #include <mutex>
@@ -6,6 +7,7 @@
 #include <thread>
 #include <vector>
 
+#include "TestIp.h"
 #include "Discovery/DiscoveryService.h"
 #include "FakeDatagramNetwork.h"
 
@@ -29,14 +31,14 @@ bool waitUntil(Predicate predicate, std::chrono::milliseconds timeout = 1s)
 }
 
 
-static DiscoveryConfig makeConfig(const std::string &name = "pc-a", const std::string &ip = "127.0.0.1", int discoveryPort = 45501, int sigPort = 6000)
+static DiscoveryConfig makeConfig(const std::string &name = "pc-a", std::string_view ip = "127.0.0.1", int discoveryPort = 45501, int sigPort = 6000)
 {
 	DiscoveryConfig cfg;
 	cfg.displayName		 = name;
-	cfg.localIPv4		 = ip;
+	cfg.localIPv4		 = ipv4(ip);
 	cfg.discoveryPort	 = discoveryPort;
 	cfg.signalingPort	 = sigPort;
-	cfg.broadcastAddress = "127.0.0.1"; // loopback avoids real broadcast during tests
+	cfg.broadcastAddress = ipv4("127.0.0.1"); // loopback avoids real broadcast during tests
 	return cfg;
 }
 
@@ -50,7 +52,7 @@ TEST(DiscoveryService, Init_FailsWithEmptyIP)
 	DiscoveryService svc;
 
 	DiscoveryConfig	 cfg = makeConfig();
-	cfg.localIPv4		 = "";
+	cfg.localIPv4		 = netlink::net::IPv4Address{};
 
 	EXPECT_FALSE(svc.init(cfg)) << "init() must fail when the local IPv4 address is empty";
 }
@@ -160,7 +162,8 @@ TEST(DiscoveryService, AddRemoteToList_IgnoresInvalidEndpoint)
 	DiscoveryEndpoint invalid{}; // empty IP, port 0
 	svc.addRemoteToList(invalid);
 
-	EXPECT_TRUE(svc.getEndpointFromIP("").IPAddress.empty()) << "An invalid endpoint must not be registered, so lookups for it must yield an empty result";
+	EXPECT_TRUE(svc.getEndpointFromIP(netlink::net::IPv4Address{}).IPAddress.isUnspecified())
+		<< "An invalid endpoint must not be registered, so lookups for it must yield an empty result";
 
 	svc.deinit();
 }
@@ -171,10 +174,10 @@ TEST(DiscoveryService, AddRemoteToList_IgnoresLocalIP)
 	DiscoveryService svc;
 	ASSERT_TRUE(svc.init(makeConfig("pc-a", "10.0.0.5", 45516)));
 
-	DiscoveryEndpoint self{"10.0.0.5", 6000, "pc-a"};
+	DiscoveryEndpoint self{ipv4("10.0.0.5"), 6000, "pc-a"};
 	svc.addRemoteToList(self);
 
-	EXPECT_TRUE(svc.getEndpointFromIP("10.0.0.5").isEmpty()) << "An endpoint matching the local IP must never be added to the remote device list";
+	EXPECT_TRUE(svc.getEndpointFromIP(ipv4("10.0.0.5")).isEmpty()) << "An endpoint matching the local IP must never be added to the remote device list";
 
 	svc.deinit();
 }
@@ -185,10 +188,10 @@ TEST(DiscoveryService, AddRemoteToList_AddsValidRemote)
 	DiscoveryService svc;
 	ASSERT_TRUE(svc.init(makeConfig("pc-a", "10.0.0.5", 45517)));
 
-	DiscoveryEndpoint remote{"10.0.0.6", 6001, "pc-b"};
+	DiscoveryEndpoint remote{ipv4("10.0.0.6"), 6001, "pc-b"};
 	svc.addRemoteToList(remote);
 
-	auto found = svc.getEndpointFromIP("10.0.0.6");
+	auto found = svc.getEndpointFromIP(ipv4("10.0.0.6"));
 	EXPECT_EQ(found.displayName, "pc-b") << "A valid, non-local remote endpoint must be added and retrievable via getEndpointFromIP()";
 	EXPECT_EQ(found.port, 6001);
 
@@ -201,11 +204,11 @@ TEST(DiscoveryService, AddRemoteToList_IgnoresDuplicates)
 	DiscoveryService svc;
 	ASSERT_TRUE(svc.init(makeConfig("pc-a", "10.0.0.5", 45518)));
 
-	DiscoveryEndpoint remote{"10.0.0.6", 6001, "pc-b"};
+	DiscoveryEndpoint remote{ipv4("10.0.0.6"), 6001, "pc-b"};
 	svc.addRemoteToList(remote);
 	svc.addRemoteToList(remote); // duplicate, must be filtered
 
-	auto found = svc.getEndpointFromIP("10.0.0.6");
+	auto found = svc.getEndpointFromIP(ipv4("10.0.0.6"));
 	EXPECT_EQ(found.displayName, "pc-b");
 
 	svc.deinit();
@@ -217,7 +220,7 @@ TEST(DiscoveryService, GetEndpointFromIP_ReturnsEmptyForUnknownIP)
 	DiscoveryService svc;
 	ASSERT_TRUE(svc.init(makeConfig("pc-a", "10.0.0.5", 45519)));
 
-	auto found = svc.getEndpointFromIP("192.168.99.99");
+	auto found = svc.getEndpointFromIP(ipv4("192.168.99.99"));
 	EXPECT_TRUE(found.isEmpty()) << "Looking up an IP that was never discovered must yield an empty DiscoveryEndpoint";
 
 	svc.deinit();
@@ -238,7 +241,7 @@ TEST(DiscoveryService, AddRemoteToList_TriggersOnRemoteFoundCallback)
 			callbackFired.store(true);
 		});
 
-	DiscoveryEndpoint remote{"10.0.0.7", 6002, "pc-c"};
+	DiscoveryEndpoint remote{ipv4("10.0.0.7"), 6002, "pc-c"};
 	svc.addRemoteToList(remote);
 
 	EXPECT_TRUE(callbackFired.load()) << "Adding a new valid remote must invoke the onRemoteFound callback";
@@ -256,7 +259,7 @@ TEST(DiscoveryService, AddRemoteToList_DuplicateDoesNotRetriggerCallback)
 	std::atomic<int> callCount{0};
 	svc.setOnRemoteFound([&](const DiscoveryEndpoint &) { ++callCount; });
 
-	DiscoveryEndpoint remote{"10.0.0.7", 6002, "pc-c"};
+	DiscoveryEndpoint remote{ipv4("10.0.0.7"), 6002, "pc-c"};
 	svc.addRemoteToList(remote);
 	svc.addRemoteToList(remote);
 
@@ -311,14 +314,14 @@ TEST(DiscoveryService, TwoServices_DiscoverEachOtherOverLoopback)
 class FakeNetworkDiscoveryTest : public ::testing::Test
 {
 protected:
-	static DiscoveryConfig makeLanConfig(const std::string &name, const std::string &ip, int signalingPort)
+	static DiscoveryConfig makeLanConfig(const std::string &name, std::string_view ip, int signalingPort)
 	{
 		DiscoveryConfig cfg;
 		cfg.displayName		 = name;
-		cfg.localIPv4		 = ip;
+		cfg.localIPv4		 = ipv4(ip);
 		cfg.signalingPort	 = signalingPort;
 		cfg.discoveryPort	 = 5555;
-		cfg.broadcastAddress = FakeNet::BroadcastAddress;
+		cfg.broadcastAddress = ipv4(FakeNet::BroadcastAddress);
 		return cfg;
 	}
 
@@ -369,7 +372,7 @@ TEST_F(FakeNetworkDiscoveryTest, TwoHosts_DiscoverEachOther)
 
 	const auto seenByA = foundByA.snapshot();
 	EXPECT_EQ(seenByA[0].displayName, "pc-b");
-	EXPECT_EQ(seenByA[0].IPAddress, "10.0.0.2");
+	EXPECT_EQ(seenByA[0].IPAddress, ipv4("10.0.0.2"));
 	EXPECT_EQ(seenByA[0].port, 6002) << "The announced port is the signaling port";
 }
 
@@ -389,7 +392,7 @@ TEST_F(FakeNetworkDiscoveryTest, OwnAnnouncement_IsIgnored_AndRepeatsDoNotRetrig
 	std::this_thread::sleep_for(2500ms);
 
 	for (const auto &ep : foundByA.snapshot())
-		EXPECT_NE(ep.IPAddress, "10.0.0.1") << "A host must never discover itself";
+		EXPECT_NE(ep.IPAddress, ipv4("10.0.0.1")) << "A host must never discover itself";
 
 	EXPECT_EQ(foundByA.count(), 1u) << "Periodic re-announcements must not trigger the callback again";
 	EXPECT_EQ(foundByB.count(), 1u);
@@ -412,7 +415,7 @@ TEST_F(FakeNetworkDiscoveryTest, ChangedSignalingPort_IsReannouncedAndReported)
 
 	ASSERT_TRUE(waitUntil([this] { return foundByA.count() == 2; }, 3s)) << "An updated remote must be reported again";
 	EXPECT_EQ(foundByA.snapshot()[1].port, 7002);
-	EXPECT_EQ(svcA.getEndpointFromIP("10.0.0.2").port, 7002) << "The stored endpoint must be updated, not duplicated";
+	EXPECT_EQ(svcA.getEndpointFromIP(ipv4("10.0.0.2")).port, 7002) << "The stored endpoint must be updated, not duplicated";
 }
 
 

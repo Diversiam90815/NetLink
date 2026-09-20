@@ -13,6 +13,8 @@
 #include <string>
 #include <string_view>
 
+#include "IPv4Address.h"
+
 
 namespace netlink::net
 {
@@ -20,14 +22,14 @@ namespace netlink::net
 // IPv4 address + port
 struct SocketAddress
 {
-	std::string			 ip{};
+	IPv4Address			 ip{};
 	uint16_t			 port{0};
 
 	bool				 operator==(const SocketAddress &other) const = default;
 
-	std::string			 toString() const { return ip + ":" + std::to_string(port); }
+	std::string			 toString() const { return ip.toString() + ":" + std::to_string(port); }
 
-	static SocketAddress any(uint16_t port = 0) { return {"0.0.0.0", port}; }
+	static SocketAddress any(uint16_t port = 0) { return {IPv4Address::unspecified(), port}; }
 };
 
 

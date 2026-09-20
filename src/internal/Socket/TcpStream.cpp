@@ -37,7 +37,7 @@ Result<TcpStream> TcpStream::connect(const SocketAddress &remote, std::chrono::m
 
 	SocketHandle handle(*native);
 
-	if (!localAddress.ip.empty())
+	if (!localAddress.ip.isUnspecified())
 	{
 		if (auto bound = platform::bindTo(handle.get(), localAddress); !bound)
 			return std::unexpected(bound.error());

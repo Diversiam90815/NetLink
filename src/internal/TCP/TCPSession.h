@@ -23,21 +23,21 @@ class TCPSession final : public ISession
 public:
 	explicit TCPSession(net::TcpStream stream);
 	~TCPSession() override;
-	TCPSession(const TCPSession &)			  = delete;
-	TCPSession &operator=(const TCPSession &) = delete;
+	TCPSession(const TCPSession &)				   = delete;
+	TCPSession		&operator=(const TCPSession &) = delete;
 
-	bool		isConnected() const override;
+	bool			 isConnected() const override;
 
-	bool		sendMessage(const InternalMessage &message, DeliveryMode mode) override;
+	bool			 sendMessage(const InternalMessage &message, DeliveryMode mode) override;
 
-	void		startReadAsync(MessageReceivedCallback onMessage, DisconnectedCallback onDisconnected) override;
-	void		stopReadAsync() override;
+	void			 startReadAsync(MessageReceivedCallback onMessage, DisconnectedCallback onDisconnected) override;
+	void			 stopReadAsync() override;
 
-	int			getBoundPort() const override;
-	std::string getRemoteAddress() const override;
-	int			getRemotePort() const override;
+	int				 getBoundPort() const override;
+	net::IPv4Address getRemoteAddress() const override;
+	int				 getRemotePort() const override;
 
-	void		close() override;
+	void			 close() override;
 
 private:
 	// Everything the read thread touches

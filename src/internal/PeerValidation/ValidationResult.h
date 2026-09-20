@@ -19,7 +19,7 @@ namespace netlink
 struct PendingValidation
 {
 	std::string							  computerName{};
-	std::string							  IPv4{};
+	net::IPv4Address					  IPv4{};
 	DiscoveryEndpoint					  remoteEndpoint{};
 
 	std::chrono::steady_clock::time_point requestTime{};

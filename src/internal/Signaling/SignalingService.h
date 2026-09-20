@@ -49,10 +49,10 @@ using SocketBoundCallback = std::function<void(int boundPort)>;
 
 struct PeerEndpoint
 {
-	std::string IPv4{};
-	int			signalingPort{0};
+	net::IPv4Address IPv4{};
+	int				 signalingPort{0};
 
-	bool		isValid() const { return !IPv4.empty() && signalingPort != 0; }
+	bool			 isValid() const { return !IPv4.isUnspecified() && signalingPort != 0; }
 };
 
 
@@ -68,7 +68,7 @@ public:
 	void			  deinit();
 
 	// Binds the signaling socket to the adapter address
-	void			  setLocalIPv4(const std::string &localIPv4);
+	void			  setLocalIPv4(const net::IPv4Address &localIPv4);
 
 	// Receive loop
 	using ThreadBase::start;
@@ -82,7 +82,7 @@ public:
 	void setOnSocketBound(SocketBoundCallback cb) { mOnSocketBound = std::move(cb); }
 
 	// Peer registry
-	void registerPeer(const std::string &displayName, const std::string &ipv4, const int signalingPort);
+	void registerPeer(const std::string &displayName, const net::IPv4Address &ipv4, const int signalingPort);
 	void unregisterPeer(const std::string &displayName);
 
 	void sendConnectRequest(const std::string &computerName);
@@ -115,14 +115,14 @@ private:
 	mutable std::mutex					  mSocketMutex;
 	std::shared_ptr<net::IDatagramSocket> mSocket;
 	std::string							  mLocalComputerName;
-	std::string							  mLocalIPv4;
+	net::IPv4Address					  mLocalIPv4;
 	std::atomic<int>					  mBoundPort{0};
 
 	std::vector<uint8_t>				  mReceiveBuffer; // signaling thread only
 
 	std::atomic<bool>					  mInitialized{false};
-	SignalingConnectionCallbacks					  mConnectionCallbacks;
-	SignalingValidationCallbacks					  mValidationCallbacks;
+	SignalingConnectionCallbacks		  mConnectionCallbacks;
+	SignalingValidationCallbacks		  mValidationCallbacks;
 	SocketBoundCallback					  mOnSocketBound;
 
 	std::map<std::string, PeerEndpoint>	  mPeerRegistry; // key = displayName

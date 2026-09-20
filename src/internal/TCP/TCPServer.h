@@ -28,7 +28,7 @@ public:
 
 	void	   setSessionHandler(SessionHandler handler) override;
 
-	bool	   start(const std::string &localAddress) override;
+	bool	   start(const net::IPv4Address &localAddress) override;
 	void	   stop() override;
 
 	int		   getBoundPort() const override { return mBoundPort.load(); }
