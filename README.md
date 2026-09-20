@@ -19,12 +19,13 @@ Key design goals:
 
 ## Features
 
-- **LAN Discovery**: UDP broadcast lets peers find each other without manual IP entry
+- **LAN Discovery**: UDP broadcast lets peers find each other without manual IP entry, scoped to the selected adapter's subnet
+- **Peer Expiry**: a peer that stops announcing is dropped and reported via `onRemoteLost`
 - **Role Negotiation**: automatic host/client role assignment during the connection handshake
-- **Peer Validation**: configurable shared secret and version checking before a connection is accepted
+- **Peer Validation**: shared-secret and protocol-version checking before a connection is accepted
 - **TCP Sessions**: full-duplex, length-framed message passing on a dependency-free socket layer (Winsock / POSIX)
 - **Pluggable Transports**: the data transport is selected via `NetLinkConfig::transport`; every send carries a `DeliveryMode` so reliable-UDP transports can be added without API changes
-- **Connection Loss Detection**: a dropped TCP connection is reported as `ConnectionState::Disconnected`
+- **Connection Loss Detection**: a dropped TCP connection is reported as `ConnectionState::Disconnected`; a declined invitation carries the remote's reason
 - **Typed Messages**: opaque `Message` envelope with a `uint32_t` type tag and binary payload
 - **Network Adapter Management**: enumerates adapters with priority hints; supports live adapter switching
 - **Callback Model**: four event callbacks covering discovery, connection state, messages, and adapter changes
@@ -37,27 +38,27 @@ Key design goals:
 │              include/NetLink/NetLink.h              │
 └──────────────────────┬──────────────────────────────┘
                        │  Pimpl
-┌──────────────────────▼──────────────────────────────┐
-│        NetLinkCore (wires all services)             │
-│  ┌──────────────┐  ┌───────────────┐  ┌──────────┐  │
-│  │  Discovery   │  │  Connection   │  │Signaling │  │
-│  │  Service     │  │  Service      │  │Service   │  │
-│  └──────┬───────┘  └──────┬────────┘  └─────┬────┘  │
-│         │                 │                 │       │
-│         │         IServer / IClient         │       │
-│         │          ┌──────▼──────┐          │       │
-│         │          │TCP Transport│          │       │
-│         │          └──────┬──────┘          │       │
-│  ┌──────▼─────────────────▼─────────────────▼────┐  │
-│  │ IDatagramSocket (Discovery, Signaling)        │  │
-│  │ UdpSocket · TcpListener · TcpStream           │  │
-│  │ platform shim: Winsock / POSIX                │  │
-│  └───────────────────────────────────────────────┘  │
-│  ┌──────────────────┐  ┌─────────────────────────┐  │
-│  │ PeerValidation   │  │  NetworkInformation     │  │
-│  │ Service          │  │  (adapter enumeration)  │  │
-│  └──────────────────┘  └─────────────────────────┘  │
-└─────────────────────────────────────────────────────┘
+┌──────────────────────▼───────────────────────────────┐
+│        NetLinkCore (wires all services)              │
+│  ┌──────────────┐  ┌───────────────┐  ┌───────────┐  │
+│  │  Discovery   │  │  Connection   │  │ Signaling │  │
+│  │  Service     │  │  Service      │  │ Service   │  │
+│  └──────┬───────┘  └──────┬────────┘  └──────┬────┘  │
+│         │                 │                  │       │
+│         │         IServer / IClient          │       │
+│         │          ┌──────▼──────┐           │       │
+│         │          │TCP Transport│           │       │
+│         │          └──────┬──────┘           │       │
+│  ┌──────▼─────────────────▼──────────────────▼────┐  │
+│  │ IDatagramSocket (Discovery, Signaling)         │  │
+│  │ UdpSocket · TcpListener · TcpStream            │  │
+│  │ platform shim: Winsock / POSIX                 │  │
+│  └────────────────────────────────────────────────┘  │
+│  ┌──────────────────┐  ┌──────────────────────────┐  │
+│  │ PeerValidation   │  │  NetworkInformation      │  │
+│  │ Service          │  │  (adapter enumeration)   │  │
+│  └──────────────────┘  └──────────────────────────┘  │
+└──────────────────────────────────────────────────────┘
 ```
 
 ### Internal Services
@@ -67,7 +68,7 @@ Key design goals:
 | `DiscoveryService` | UDP broadcast - advertises presence and collects peer announcements |
 | `ConnectionService` | Orchestrates the full connection lifecycle with timeout and retry logic |
 | `SignalingService` | UDP control messages for handshake and disconnect coordination |
-| `PeerValidationService` | Validates shared secret before a connection is accepted |
+| `PeerValidationService` | Validates shared secret and protocol version before a connection is accepted |
 | `RemoteCommunication` | Dedicated async send/receive threads; dispatches typed `Message` objects |
 | `NetworkInformation` | Adapter enumeration (Windows / Linux / macOS backends); fires adapter-change events |
 | Socket layer | `UdpSocket`, `TcpListener`, `TcpStream` with `std::expected` error handling; OS specifics isolated in `Socket/Platform` |
@@ -89,16 +90,17 @@ All types live in the `netlink` namespace. Single include:
 | `Message` | `type` (`uint32_t`) + `data` (`vector<uint8_t>`) : opaque message envelope |
 | `NetworkAdapter` | Adapter metadata: name, network, IPv4, ID, `AdapterPriority` |
 | `ConnectionState` | `None` · `Hosting` · `Searching` · `PendingInbound` · `Connected` · `Disconnected` · `Error` |
-| `NetLinkConfig` | `localDisplayName`, `discoveryPort` (default 5555), `broadcastAddress`, `secret`, `transport` |
+| `NetLinkConfig` | `localDisplayName`, `discoveryPort` (default 5555), `broadcastAddress`, `secret`, `transport`, `applicationVersion` |
 | `DeliveryMode` | `ReliableOrdered` (default) · `UnreliableSequenced` — TCP delivers both reliably |
 | `TransportKind` | `Tcp` |
-| `NetLinkCallbacks` | Four `std::function` callbacks (see below) |
+| `NetLinkCallbacks` | Five `std::function` callbacks (see below) |
 
 ### Callbacks
 
 ```cpp
 netlink::NetLinkCallbacks cb;
 cb.onRemoteDiscovered      = [](const netlink::Endpoint &e)          { /* compatible peer found and validated */ };
+cb.onRemoteLost            = [](const netlink::Endpoint &e)          { /* peer stopped announcing */ };
 cb.onConnectionChanged     = [](netlink::ConnectionEvent ev)         { /* state machine update */ };
 cb.onMessageReceived       = [](const netlink::Message &msg)         { /* handle inbound data */ };
 cb.onNetworkAdapterChanged = [](const netlink::NetworkAdapter &a)    { /* adapter hotplug event */ };
@@ -115,8 +117,9 @@ netlink::NetLink net;
 
 // 1. Configure
 netlink::NetLinkConfig cfg;
-cfg.localDisplayName = "MyApp";
-cfg.secret           = "shared-secret";
+cfg.localDisplayName   = "MyApp";
+cfg.secret             = "shared-secret";
+cfg.applicationVersion = "1.4.0";   // peers must agree on major.minor
 
 netlink::NetLinkCallbacks cb;
 cb.onRemoteDiscovered  = [&](const netlink::Endpoint &e) {
@@ -165,6 +168,7 @@ net.shutdown();
 | `send(type, payload, mode)` | Convenience overload — constructs a `Message` inline |
 | `getAvailableAdapters()` | List all network adapters with their priority hints |
 | `setActiveAdapter(id)` | Switch the active network adapter by ID |
+| `getActiveAdapterID()` | ID of the currently active adapter (0 if none) |
 
 ## Integrating via CPM
 
@@ -174,7 +178,7 @@ include(cmake/cpm.cmake)   # or however CPM is loaded in your project
 CPMAddPackage(
     NAME    NetLink
     GITHUB_REPOSITORY Diversiam90815/NetLink
-    VERSION 0.1.0
+    VERSION 0.2.0
 )
 
 target_link_libraries(YourTarget PRIVATE NetLink::NetLink)
@@ -226,6 +230,24 @@ ctest --test-dir build
 ## Platform
 
 Windows, Linux and macOS. Platform specific code is confined to `src/internal/Network/NetworkInformation*` and `src/internal/Socket/Platform/SocketPlatform*`; CMake selects the matching backend.
+
+
+## Compatibility
+
+Set `NetLinkConfig::applicationVersion` to your application's own version: it is what
+decides whether two instances can talk to each other. If you leave it empty, NetLink
+advertises its own version instead, which is only useful until your application has
+versioning of its own.
+
+Two peers are compatible when the **major and minor** components of that version match.
+The patch and trailing build number are ignored, so builds from different commits of the
+same release interoperate. A peer reporting an incompatible version is never offered
+through `onRemoteDiscovered`.
+
+Discovery is scoped to the selected adapter's subnet: announcements go to that subnet's
+directed broadcast, and announcements arriving from other subnets are ignored. A peer that
+has not announced for three announcement intervals (6 s by default) is dropped and reported
+through `onRemoteLost`.
 
 ## License
 
