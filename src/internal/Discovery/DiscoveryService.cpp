@@ -147,6 +147,15 @@ DiscoveryEndpoint DiscoveryService::getEndpointFromIP(const netlink::net::IPv4Ad
 
 void DiscoveryService::addRemoteToList(DiscoveryEndpoint remote)
 {
+	if (!remote.isValid())
+		return;
+
+	{
+		std::lock_guard<std::mutex> lock(mMutex);
+		if (remote.IPAddress == mConfig.localIPv4)
+			return; // Ignore our own announcements
+	}
+
 	auto result = mRegistry.addOrUpdate(remote);
 
 	switch (result)
