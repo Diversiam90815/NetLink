@@ -5,6 +5,7 @@
 
 # Build Results
 [Bb]uild/
+cmake-build-*/
 [Ii]nstall/
 [Rr]elease/
 [Dd]ebug/
