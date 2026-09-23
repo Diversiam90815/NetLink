@@ -38,6 +38,7 @@ jobs:
           cmake -S . -B build -G Ninja
           -DCMAKE_CXX_COMPILER=clang++
           -DCMAKE_CXX_FLAGS=-stdlib=libc++
+          -DCMAKE_CXX_SCAN_FOR_MODULES=OFF
           -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
           -DNETLINK_BUILD_TESTS=OFF
           -DNETLINK_ENABLE_LOGGING=ON
