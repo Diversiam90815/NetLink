@@ -129,7 +129,10 @@ void netlink::NetLinkCore::configure(const NetLinkConfig &config, const NetLinkC
 		mConfig = config;
 	}
 
-	mCallbacks.store(std::make_shared<const NetLinkCallbacks>(callbacks));
+	{
+		std::lock_guard<std::mutex> lock(mCallbacksMutex);
+		mCallbacks = std::make_shared<const NetLinkCallbacks>(callbacks);
+	}
 
 	if (config.transport != mTransportKind)
 	{
@@ -340,7 +343,13 @@ void netlink::NetLinkCore::postEvent(Event event)
 	mEvents.post(
 		[this, event = std::move(event)]()
 		{
-			if (auto callbacks = mCallbacks.load())
+			std::shared_ptr<const NetLinkCallbacks> callbacks;
+			{
+				std::lock_guard<std::mutex> lock(mCallbacksMutex);
+				callbacks = mCallbacks;
+			}
+
+			if (callbacks)
 				event(*callbacks);
 		});
 }

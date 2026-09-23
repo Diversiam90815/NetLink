@@ -100,7 +100,7 @@ endif()
 
 if(NETLINK_ENABLE_LOGGING)
     target_compile_definitions(${PROJECT_NAME} PRIVATE NETLINK_LOGGING_ENABLED)
-    target_link_libraries(${PROJECT_NAME} PRIVATE Logger)
+    target_link_libraries(${PROJECT_NAME} PRIVATE $<BUILD_INTERFACE:Logger>)
 endif()
 
 target_link_libraries(${PROJECT_NAME} PRIVATE $<BUILD_INTERFACE:nlohmann_json::nlohmann_json>)

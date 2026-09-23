@@ -86,7 +86,8 @@ private:
 
 	static Endpoint										 toPublicEndpoint(const DiscoveryEndpoint &endpoint);
 
-	std::atomic<std::shared_ptr<const NetLinkCallbacks>> mCallbacks{std::make_shared<const NetLinkCallbacks>()};
+	mutable std::mutex									 mCallbacksMutex;
+	std::shared_ptr<const NetLinkCallbacks>			 mCallbacks{std::make_shared<const NetLinkCallbacks>()};
 
 	mutable std::mutex									 mConfigMutex;
 	NetLinkConfig										 mConfig;
