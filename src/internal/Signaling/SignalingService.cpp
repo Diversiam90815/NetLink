@@ -6,14 +6,19 @@
 */
 
 #include "SignalingService.h"
+
+#include <span>
+
+#include "NetLinkConstants.h"
 #include "NetLinkLog.h"
+#include "Socket/UdpSocket.h"
 
 using json = nlohmann::json;
 
 
-netlink::SignalingService::SignalingService(asio::io_context &ioContext) : mSocket(ioContext)
+netlink::SignalingService::SignalingService(net::DatagramSocketFactory socketFactory)
+	: mSocketFactory(socketFactory ? std::move(socketFactory) : net::UdpSocket::factory()), mReceiveBuffer(internal::PackageBufferSize)
 {
-	mIoContext = &ioContext;
 }
 
 
@@ -28,23 +33,12 @@ bool netlink::SignalingService::init(const std::string &localComputerName)
 	if (localComputerName.empty())
 		return false;
 
-	mLocalComputerName = localComputerName;
-
-	asio::error_code ec;
-	mSocket.open(udp::v4(), ec);
-
-	if (ec)
 	{
-		NETLINK_LOG_ERROR("Failed to open signaling socket: {}", ec.message());
-		return false;
+		std::lock_guard<std::mutex> lock(mSocketMutex);
+		mLocalComputerName = localComputerName;
 	}
 
-	mSocket.set_option(asio::socket_base::reuse_address(true), ec);
-
-	if (ec)
-		NETLINK_LOG_ERROR("Failed to set reuse_address option: {}", ec.message());
-
-	// Socket opened, binding deferred until setLocalIPv4() is called
+	// Binding deferred until setLocalIPv4() is called
 	mInitialized.store(true);
 	return true;
 }
@@ -52,69 +46,67 @@ bool netlink::SignalingService::init(const std::string &localComputerName)
 
 void netlink::SignalingService::deinit()
 {
-	asio::error_code ec;
+	ThreadBase::stop(); // qualified: also called from the destructor
 
-	mSocket.cancel(ec);
+	{
+		std::lock_guard<std::mutex> lock(mSocketMutex);
 
-	if (ec)
-		NETLINK_LOG_ERROR("Error cancelling socket operations: {}", ec.message());
+		if (mSocket)
+			mSocket->shutdown();
 
-	mSocket.close(ec);
+		mSocket.reset();
+	}
 
-	if (ec)
-		NETLINK_LOG_ERROR("Error closing signaling socket: {}", ec.message());
-
-	stop();
-	mBoundPort = 0;
+	mBoundPort.store(0);
 	mInitialized.store(false);
 }
 
 
-void netlink::SignalingService::setLocalIPv4(const std::string &localIPv4)
+void netlink::SignalingService::setLocalIPv4(const net::IPv4Address &localIPv4)
 {
-	if (localIPv4.empty())
+	if (localIPv4.isUnspecified())
 		return;
 
-	asio::error_code ec;
+	auto socket = mSocketFactory({localIPv4, 0}, {});
 
-	// Rebind if already bound to a previous address
-	if (mBoundPort != 0)
+	if (!socket)
 	{
-		mSocket.cancel(ec);
-		mSocket.close(ec);
-		mSocket.open(udp::v4(), ec);
-		if (ec)
-		{
-			NETLINK_LOG_ERROR("Failed to reopen signaling socket: {}", ec.message());
-			return;
-		}
-		mSocket.set_option(asio::socket_base::reuse_address(true), ec);
-	}
-
-	mLocalIPv4 = localIPv4;
-
-	udp::endpoint localEndpoint(asio::ip::make_address_v4(localIPv4), 0);
-	mSocket.bind(localEndpoint, ec);
-
-	if (ec)
-	{
-		NETLINK_LOG_ERROR("Failed to bind signaling socket to {}: {}", localIPv4, ec.message());
+		NETLINK_LOG_ERROR("Failed to bind signaling socket to {}: {}", localIPv4.toString(), net::toString(socket.error()));
 		return;
 	}
 
-	mBoundPort = static_cast<int>(mSocket.local_endpoint().port());
-	NETLINK_LOG_INFO("SignalingService bound to {}:{}", localIPv4, mBoundPort);
+	const int							  boundPort = (*socket)->localAddress().port;
+	std::shared_ptr<net::IDatagramSocket> previous;
+
+	{
+		std::lock_guard<std::mutex> lock(mSocketMutex);
+		previous   = std::exchange(mSocket, std::shared_ptr<net::IDatagramSocket>(std::move(*socket)));
+		mLocalIPv4 = localIPv4;
+	}
+
+	if (previous)
+		previous->shutdown();
+
+	mBoundPort.store(boundPort);
+	NETLINK_LOG_INFO("SignalingService bound to {}:{}", localIPv4.toString(), boundPort);
 
 	if (mOnSocketBound)
-		mOnSocketBound(mBoundPort);
+		mOnSocketBound(boundPort);
 }
 
 
-void netlink::SignalingService::registerPeer(const std::string &displayName, const std::string &ipv4, const int signalingPort)
+std::shared_ptr<netlink::net::IDatagramSocket> netlink::SignalingService::socket() const
+{
+	std::lock_guard<std::mutex> lock(mSocketMutex);
+	return mSocket;
+}
+
+
+void netlink::SignalingService::registerPeer(const std::string &displayName, const net::IPv4Address &ipv4, const int signalingPort)
 {
 	std::lock_guard<std::mutex> lock(mPeerRegistryMutex);
 	mPeerRegistry[displayName] = {ipv4, signalingPort};
-	NETLINK_LOG_DEBUG("Registered peer {} -> {}:{}", displayName, ipv4, signalingPort);
+	NETLINK_LOG_DEBUG("Registered peer {} -> {}:{}", displayName, ipv4.toString(), signalingPort);
 }
 
 
@@ -138,14 +130,14 @@ void netlink::SignalingService::sendConnectRequest(const std::string &computerNa
 }
 
 
-void netlink::SignalingService::sendConnectAnswer(const std::string &computerName, bool requestAccepted)
+void netlink::SignalingService::sendConnectAnswer(const std::string &computerName, bool requestAccepted, const std::string &reason)
 {
 	auto peer = resolvePeer(computerName);
 	if (!peer.isValid())
 		return;
 
 	auto packet	   = makeEnvelope(SignalType::ConnectAnswer);
-	packet.payload = PayloadConnectAnswer{requestAccepted};
+	packet.payload = PayloadConnectAnswer{requestAccepted, reason};
 
 	sendPacket(peer, packet);
 }
@@ -163,13 +155,14 @@ void netlink::SignalingService::sendDisconnect(const std::string &computerName)
 }
 
 
-void netlink::SignalingService::sendReadyFlag(const std::string &computerName)
+void netlink::SignalingService::sendReadyFlag(const std::string &computerName, bool ready)
 {
 	auto peer = resolvePeer(computerName);
 	if (!peer.isValid())
 		return;
 
-	auto packet = makeEnvelope(SignalType::ReadyFlag);
+	auto packet	   = makeEnvelope(SignalType::ReadyFlag);
+	packet.payload = PayloadReadyFlag{ready};
 
 	sendPacket(peer, packet);
 }
@@ -257,50 +250,8 @@ netlink::PeerEndpoint netlink::SignalingService::resolvePeer(const std::string &
 
 void netlink::SignalingService::run()
 {
-	receiveAsync();
-
-	while (isRunning())
-	{
-		mIoContext->run_one();
-		waitForEvent(50);
-	}
-}
-
-
-void netlink::SignalingService::receiveAsync()
-{
-	if (!mInitialized.load())
-		return;
-
-	mSocket.async_receive_from(asio::buffer(mRecvBuffer), mSenderEndpoint, [this](const asio::error_code &error, size_t bytesReceived) { handleReceive(error, bytesReceived); });
-}
-
-
-void netlink::SignalingService::handleReceive(const asio::error_code &error, size_t bytesReceived)
-{
-	if (!error && bytesReceived > 0)
-	{
-		try
-		{
-			std::string	 data(mRecvBuffer.data(), bytesReceived);
-			json		 j		= json::parse(data);
-			SignalPacket packet = j.get<SignalPacket>();
-
-			routePacket(packet);
-		}
-		catch (std::exception &e)
-		{
-			NETLINK_LOG_ERROR("Error parsing signal packet: {}", e.what());
-		}
-	}
-	else if (error && error != asio::error::operation_aborted)
-	{
-		NETLINK_LOG_WARNING("Signaling receive error: {}", error.message());
-	}
-
-	// Continue listening if still running
-	if (isRunning())
-		receiveAsync();
+	while (ThreadBase::isRunning())
+		receivePackage();
 }
 
 
@@ -312,64 +263,70 @@ void netlink::SignalingService::routePacket(const SignalPacket &packet)
 	{
 	case SignalType::ConnectRequest:
 	{
-		if (mCallbacks.onConnectRequested)
-			mCallbacks.onConnectRequested(sender);
+		if (mConnectionCallbacks.onConnectRequested)
+			mConnectionCallbacks.onConnectRequested(sender);
 		break;
 	}
 
 	case SignalType::ConnectAnswer:
 	{
 		const auto &pl = std::get<PayloadConnectAnswer>(packet.payload);
-		if (mCallbacks.onConnectRequestAnswered)
-			mCallbacks.onConnectRequestAnswered(sender, pl.accepted);
+		if (mConnectionCallbacks.onConnectRequestAnswered)
+			mConnectionCallbacks.onConnectRequestAnswered(sender, pl.accepted, pl.reason);
 		break;
 	}
 
 	case SignalType::Disconnect:
-		if (mCallbacks.onDisconnectReceived)
-			mCallbacks.onDisconnectReceived(sender);
+		if (mConnectionCallbacks.onDisconnectReceived)
+			mConnectionCallbacks.onDisconnectReceived(sender);
 		break;
 
 	case SignalType::ReadyFlag:
-		if (mCallbacks.onReadyFlagReceived)
-			mCallbacks.onReadyFlagReceived(sender);
+		if (mConnectionCallbacks.onReadyFlagReceived)
+			mConnectionCallbacks.onReadyFlagReceived(sender);
 		break;
 
 	case SignalType::DataPort:
 	{
 		const auto &pl = std::get<PayloadDataPort>(packet.payload);
-		if (mCallbacks.onDataPortReceived)
-			mCallbacks.onDataPortReceived(sender, pl.dataPort);
+		if (mConnectionCallbacks.onDataPortReceived)
+			mConnectionCallbacks.onDataPortReceived(sender, pl.dataPort);
 		break;
 	}
 
 	case SignalType::ValidationRequest:
 	{
 		const auto &pl = std::get<PayloadValidationRequest>(packet.payload);
-		if (mCallbacks.onValidationRequestReceived)
-			mCallbacks.onValidationRequestReceived(sender, pl.request);
+		if (pl.request != static_cast<uint8_t>(RemoteRequest::Secret) && pl.request != static_cast<uint8_t>(RemoteRequest::Version))
+		{
+			NETLINK_LOG_WARNING("Ignoring unknown validation request {} from {}", static_cast<int>(pl.request), sender);
+			break;
+		}
+
+		if (mValidationCallbacks.onValidationRequestReceived)
+			mValidationCallbacks.onValidationRequestReceived(sender, static_cast<RemoteRequest>(pl.request));
 		break;
 	}
 
 	case SignalType::SecretResponse:
 	{
 		const auto &pl = std::get<PayloadSecretResponse>(packet.payload);
-		if (mCallbacks.onSecretResponseReceived)
-			mCallbacks.onSecretResponseReceived(sender, pl.secret);
+		if (mValidationCallbacks.onSecretResponseReceived)
+			mValidationCallbacks.onSecretResponseReceived(sender, pl.secret);
 		break;
 	}
 
 	case SignalType::VersionResponse:
 	{
 		const auto &pl = std::get<PayloadVersionResponse>(packet.payload);
-		if (mCallbacks.onVersionResponseReceived)
-			mCallbacks.onVersionResponseReceived(sender, pl.version);
+		if (mValidationCallbacks.onVersionResponseReceived)
+			mValidationCallbacks.onVersionResponseReceived(sender, pl.version);
 		break;
 	}
 
 	case SignalType::ValidationHandshake:
-		if (mCallbacks.onValidationHandshakeReceived)
-			mCallbacks.onValidationHandshakeReceived(sender);
+		if (mValidationCallbacks.onValidationHandshakeReceived)
+			mValidationCallbacks.onValidationHandshakeReceived(sender);
 		break;
 
 	default: NETLINK_LOG_WARNING("Unknown signal type received: {}", static_cast<int>(packet.signalType)); break;
@@ -385,18 +342,57 @@ void netlink::SignalingService::sendPacket(const PeerEndpoint &endpoint, const S
 		return;
 	}
 
-	json			 j	 = packet;
-	std::string		 msg = j.dump();
+	auto socket = this->socket();
 
-	udp::endpoint	 target(asio::ip::make_address_v4(endpoint.IPv4), static_cast<unsigned short>(endpoint.signalingPort));
-	asio::error_code ec;
+	if (!socket)
+	{
+		NETLINK_LOG_ERROR("SignalingService not bound -> cannot send.");
+		return;
+	}
 
-	mSocket.send_to(asio::buffer(msg), target, 0, ec);
+	const std::string msg	 = json(packet).dump();
+	const auto		  target = net::SocketAddress{endpoint.IPv4, static_cast<uint16_t>(endpoint.signalingPort)};
 
-	if (ec)
-		NETLINK_LOG_ERROR("Failed to send signal to {}:{} - {}", endpoint.IPv4, endpoint.signalingPort, ec.message());
+	if (auto sent = socket->sendTo(target, std::span(reinterpret_cast<const uint8_t *>(msg.data()), msg.size())); !sent)
+		NETLINK_LOG_ERROR("Failed to send signal to {}: {}", target.toString(), net::toString(sent.error()));
 	else
-		NETLINK_LOG_DEBUG("Signal sent to {}:{} (type={})", endpoint.IPv4, endpoint.signalingPort, static_cast<int>(packet.signalType));
+		NETLINK_LOG_DEBUG("Signal sent to {} (type={})", target.toString(), static_cast<int>(packet.signalType));
+}
+
+
+void netlink::SignalingService::receivePackage()
+{
+	auto socket = mInitialized.load() ? this->socket() : nullptr;
+
+	if (!socket)
+	{
+		waitForEvent(static_cast<unsigned long>(internal::SocketPollInterval.count()));
+		return;
+	}
+
+	auto datagram = socket->receiveFrom(mReceiveBuffer, internal::SocketPollInterval);
+
+	if (!datagram)
+	{
+		// Timeouts are the normal idle case; anything else is retried on the next cycle
+		if (datagram.error() != net::SocketError::Timeout)
+			waitForEvent(static_cast<unsigned long>(internal::SocketPollInterval.count()));
+
+		return;
+	}
+
+	try
+	{
+		const auto	 begin	= mReceiveBuffer.data();
+		json		 j		= json::parse(begin, begin + datagram->size);
+		SignalPacket signal = j.get<SignalPacket>();
+
+		routePacket(signal);
+	}
+	catch (const std::exception &e)
+	{
+		NETLINK_LOG_ERROR("Error parsing signal packet from {}: {}", datagram->from.toString(), e.what());
+	}
 }
 
 
@@ -404,9 +400,13 @@ netlink::SignalPacket netlink::SignalingService::makeEnvelope(SignalType type) c
 {
 	SignalPacket packet{};
 
-	packet.senderName = mLocalComputerName;
-	packet.senderIP	  = mLocalIPv4;
-	packet.senderPort = mBoundPort;
+	{
+		std::lock_guard<std::mutex> lock(mSocketMutex);
+		packet.senderName = mLocalComputerName;
+		packet.senderIP	  = mLocalIPv4;
+	}
+
+	packet.senderPort = mBoundPort.load();
 	packet.signalType = type;
 
 	return packet;

@@ -1,81 +1,118 @@
 /*
   ==============================================================================
 	Module:         TCPServer
-	Description:    Server implementation used for the multiplayer mode
+	Description:    Accepts inbound TCP connections and wraps them in TCPSessions
   ==============================================================================
 */
 
 #include "TCPServer.h"
+
+#include "NetLinkConstants.h"
 #include "NetLinkLog.h"
+#include "Socket/TcpListener.h"
+#include "TCPSession.h"
+#include "Util/ThreadUtils.h"
 
 
-TCPServer::TCPServer(asio::io_context &ioContext) : mIoContext(ioContext), mAcceptor(ioContext, tcp::endpoint(tcp::v4(), 0)) {}
-
-
-TCPServer::~TCPServer() {}
-
-
-void TCPServer::startAccept()
+namespace netlink
 {
-	auto session = TCPSession::create(mIoContext);
-	mBoundPort	 = mAcceptor.local_endpoint().port();
 
-	NETLINK_LOG_INFO("Bound Port = {}", mBoundPort);
+// Shared with the accept thread, so stopping from inside the session handler cannot destroy what the thread still uses.
+struct TCPServer::AcceptState
+{
+	AcceptState(net::TcpListener l, SessionHandler h) : listener(std::move(l)), handler(std::move(h)) {}
 
-	mAcceptor.async_accept(
-		[this](const asio::error_code &error, tcp::socket socket)
-		{
-			if (!error)
-			{
-				NETLINK_LOG_INFO("TCP accepted connection from {}", socket.remote_endpoint().address().to_string().c_str());
+	net::TcpListener  listener;
+	SessionHandler	  handler;
+	std::atomic<bool> stopRequested{false};
+};
 
-				// Store pending session
-				auto newSession = TCPSession::create(std::move(socket));
-				mPendingSession = newSession;
 
-				if (mSessionHandler)
-					mSessionHandler(mPendingSession);
-
-				// We start waiting for invitation message
-			}
-		});
+TCPServer::~TCPServer()
+{
+	stop();
 }
 
 
 void TCPServer::setSessionHandler(SessionHandler handler)
 {
-	mSessionHandler = handler;
+	std::lock_guard<std::mutex> lock(mMutex);
+	mSessionHandler = std::move(handler);
 }
 
 
-void TCPServer::respondToConnectionRequest(bool accepted)
+bool TCPServer::start(const net::IPv4Address &localAddress)
 {
-	if (!mPendingSession)
-		return;
+	stop();
 
-	if (accepted)
+	auto listener = net::TcpListener::listen({localAddress, 0});
+
+	if (!listener)
 	{
-		NETLINK_LOG_INFO("Accepting connection from: {}", mPendingSession->socket().remote_endpoint().address().to_string().c_str());
-
-		if (mSessionHandler)
-			mSessionHandler(mPendingSession);
+		NETLINK_LOG_ERROR("TCPServer: listening on {} failed: {}", localAddress.toString(), net::toString(listener.error()));
+		return false;
 	}
 
-	else
-	{
-		NETLINK_LOG_INFO("Rejecting connection from {}", mPendingSession->socket().remote_endpoint().address().to_string().c_str());
+	std::lock_guard<std::mutex> lock(mMutex);
 
-		// Close the socket
-		asio::error_code ec;
-		mPendingSession->socket().close(ec);
+	mBoundPort.store(listener->localAddress().port);
+	NETLINK_LOG_INFO("TCPServer listening on {}", listener->localAddress().toString());
+
+	mState	= std::make_shared<AcceptState>(std::move(*listener), mSessionHandler);
+	mThread = std::thread([state = mState]() { acceptLoop(state); });
+	return true;
+}
+
+
+void TCPServer::stop()
+{
+	std::thread thread;
+
+	{
+		std::lock_guard<std::mutex> lock(mMutex);
+
+		if (!mState)
+			return;
+
+		mState->stopRequested.store(true);
+		mState->listener.shutdown();
+		mState.reset();
+
+		thread = std::move(mThread);
 	}
 
-	// Clear the pending session
-	mPendingSession.reset();
+	joinOrDetach(thread);
+	mBoundPort.store(0);
 }
 
 
-int TCPServer::getBoundPort() const
+void TCPServer::acceptLoop(const std::shared_ptr<AcceptState> &state)
 {
-	return mBoundPort;
+	while (!state->stopRequested.load())
+	{
+		auto stream = state->listener.accept(internal::SocketPollInterval);
+
+		if (!stream)
+		{
+			if (stream.error() == net::SocketError::Timeout)
+				continue;
+
+			if (state->stopRequested.load())
+				return;
+
+			NETLINK_LOG_ERROR("TCPServer: accept failed: {}", net::toString(stream.error()));
+
+			// Listener is unusable (e.g. network interface went away)
+			return;
+		}
+
+		NETLINK_LOG_INFO("TCPServer: accepted connection from {}", stream->remoteAddress().toString());
+
+		auto session = std::make_shared<TCPSession>(std::move(*stream));
+
+		if (state->handler)
+			state->handler(std::move(session));
+	}
 }
+
+} // namespace netlink

@@ -9,104 +9,80 @@
 
 #include <functional>
 #include <memory>
+#include <string>
 
 #include "Messaging/MessageTypes.h"
+#include "Socket/IPv4Address.h"
 
 
-/**
- * @brief	Interface for a session handling an established connection.
- */
+namespace netlink
+{
+
+//	An established, message oriented connection to one remote peer
 class ISession
 {
 public:
-	using MessageReceivedCallback								  = std::function<void(netlink::InternalMessage &message)>;
-	using pointer												  = std::shared_ptr<ISession>;
+	using MessageReceivedCallback																					= std::function<void(InternalMessage message)>;
+	using DisconnectedCallback																						= std::function<void(const std::string &reason)>;
+	using pointer																									= std::shared_ptr<ISession>;
 
-	virtual ~ISession()											  = default;
+	virtual ~ISession()																								= default;
 
-	/**
-	 * @brief	True if socket is in a connected state.
-	 */
-	virtual bool isConnected() const							  = 0;
+	virtual bool			 isConnected() const																	= 0;
 
-	/**
-	 * @brief	Send a serialized multiplayer message (synchronous or async fire-and-forget).
-	 * @return	true if queued / sent successfully.
-	 */
-	virtual bool sendMessage(netlink::InternalMessage &message)	  = 0;
+	// Returns once the message was handed to the transport, or false if the session cannot deliver it.
+	virtual bool			 sendMessage(const InternalMessage &message, DeliveryMode mode)							= 0;
 
-	/**
-	 * @brief	Begin asynchronous read loop invoking callback per complete message.
-	 */
-	virtual void startReadAsync(MessageReceivedCallback callback) = 0;
+	// Delivers received messages until stopReadAsync()/close(). onDisconnected fires once if the connection is lost
+	virtual void			 startReadAsync(MessageReceivedCallback onMessage, DisconnectedCallback onDisconnected) = 0;
 
-	/**
-	 * @brief	Stop ongoing async read loop (callback will no longer fire).
-	 */
-	virtual void stopReadAsync()								  = 0;
+	// Returns once no callback is running anymore
+	virtual void			 stopReadAsync()																		= 0;
 
-	/**
-	 * @brief	The bound local port (after connect / accept).
-	 */
-	virtual int	 getBoundPort() const							  = 0;
+	virtual int				 getBoundPort() const																	= 0;
+	virtual net::IPv4Address getRemoteAddress() const																= 0;
+	virtual int				 getRemotePort() const																	= 0;
+
+	virtual void			 close()																				= 0;
 };
 
 
-/**
- * @brief	Interface for a server accepting inbound connections.
- */
+// Accepts inbound connections
 class IServer
 {
 public:
-	using SessionHandler								   = std::function<void(ISession::pointer session)>;
+	using SessionHandler									 = std::function<void(ISession::pointer session)>;
 
-	virtual ~IServer()									   = default;
+	virtual ~IServer()										 = default;
 
-	/**
-	 * @brief	Begin accepting connections (continuously or single depending on implementation).
-	 */
-	virtual void startAccept()							   = 0;
+	// Must be set before start(). Called on the accept thread for every inbound connection.
+	virtual void setSessionHandler(SessionHandler handler)	 = 0;
 
-	/**
-	 * @brief	Local port currently bound.
-	 */
-	virtual int	 getBoundPort() const					   = 0;
+	// Listens on localAddress with an OS assigned port and starts accepting. Returns false if listening failed.
+	virtual bool start(const net::IPv4Address &localAddress) = 0;
 
-	/**
-	 * @brief	Register handler invoked with newly created session.
-	 */
-	virtual void setSessionHandler(SessionHandler handler) = 0;
+	// Stops accepting. Established sessions stay alive.
+	virtual void stop()										 = 0;
 
-	/**
-	 * @brief	Respond to pending connection request (e.g., after an invitation flow).
-	 */
-	virtual void respondToConnectionRequest(bool accepted) = 0;
+	virtual int	 getBoundPort() const						 = 0;
 };
 
 
-/**
- * @brief	Interface for a client initiating outbound connections.
- */
+// Initiates outbound connections
 class IClient
 {
 public:
-	using ConnectHandler												 = std::function<void(ISession::pointer session)>;
-	using ConnectTimeoutHandler											 = std::function<void()>;
+	using ConnectHandler																						  = std::function<void(ISession::pointer session)>;
+	using ConnectTimeoutHandler																					  = std::function<void()>;
 
-	virtual ~IClient()													 = default;
+	virtual ~IClient()																							  = default;
 
-	/**
-	 * @brief	Begin async connect to host:port.
-	 */
-	virtual void connect(const std::string &host, unsigned short port)	 = 0;
+	// Must be set before connect(). Exactly one of them fires per connect() unless the client is destroyed first.
+	virtual void setConnectHandler(ConnectHandler handler)														  = 0;
+	virtual void setConnectTimeoutHandler(ConnectTimeoutHandler handler)										  = 0;
 
-	/**
-	 * @brief	Set handler invoked on successful connection establishment.
-	 */
-	virtual void setConnectHandler(ConnectHandler handler)				 = 0;
-
-	/**
-	 * @brief	Set handler invoked if connection attempt times out.
-	 */
-	virtual void setConnectTimeoutHandler(ConnectTimeoutHandler handler) = 0;
+	// Connects asynchronously from localAddress (the selected adapter; empty = OS choice). A previous pending attempt is cancelled.
+	virtual void connect(const net::IPv4Address &localAddress, const net::IPv4Address &host, unsigned short port) = 0;
 };
+
+} // namespace netlink

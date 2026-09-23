@@ -1,0 +1,17 @@
+/*
+  ==============================================================================
+	Module:         NetLinkVersion
+	Description:    Generated from CMake's PROJECT_VERSION at configure time.
+  ==============================================================================
+*/
+
+#pragma once
+
+
+namespace netlink::internal
+{
+
+// Full version, e.g. "0.2.0.189"
+inline constexpr const char *Version = "@PROJECT_VERSION@.@NETLINK_BUILD_NUMBER@";
+
+} // namespace netlink::internal

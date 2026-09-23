@@ -12,6 +12,8 @@
 #include <variant>
 #include <nlohmann/json.hpp>
 
+#include "Socket/IPv4Address.h"
+
 
 namespace netlink
 {
@@ -26,6 +28,7 @@ constexpr auto ComputerName	 = "name";
 constexpr auto DataPort		 = "dataPort";
 constexpr auto Request		 = "request";
 constexpr auto ConnectAnswer = "answer";
+constexpr auto Reason		 = "reason";
 constexpr auto Secret		 = "secret";
 constexpr auto Version		 = "version";
 constexpr auto ReadyFlag	 = "ready";
@@ -56,7 +59,8 @@ struct PayloadEmpty
 
 struct PayloadConnectAnswer
 {
-	bool accepted{false};
+	bool		accepted{false};
+	std::string reason{}; // why the invitation was declined; empty when accepted
 };
 
 struct PayloadDataPort
@@ -93,7 +97,7 @@ struct SignalPacket
 {
 	SignalType																																					 signalType{};
 	std::string																																					 senderName{};
-	std::string																																					 senderIP{};
+	net::IPv4Address																																			 senderIP{};
 	int																																							 senderPort{0};
 
 	// Type-specific payload
@@ -110,7 +114,7 @@ inline void to_json(nlohmann::json &j, const SignalPacket &p)
 {
 	j[JSON_Serialization::SignalType]	= static_cast<int>(p.signalType);
 	j[JSON_Serialization::ComputerName] = p.senderName;
-	j[JSON_Serialization::SenderIPv4]	= p.senderIP;
+	j[JSON_Serialization::SenderIPv4]	= p.senderIP.toString();
 	j[JSON_Serialization::SenderPort]	= p.senderPort;
 
 	std::visit(
@@ -118,7 +122,7 @@ inline void to_json(nlohmann::json &j, const SignalPacket &p)
 		{
 			using T = std::decay_t<decltype(pl)>;
 			if constexpr (std::is_same_v<T, PayloadConnectAnswer>)
-				j[JSON_Serialization::Payload] = {{JSON_Serialization::ConnectAnswer, pl.accepted}};
+				j[JSON_Serialization::Payload] = {{JSON_Serialization::ConnectAnswer, pl.accepted}, {JSON_Serialization::Reason, pl.reason}};
 			else if constexpr (std::is_same_v<T, PayloadReadyFlag>)
 				j[JSON_Serialization::Payload] = {{JSON_Serialization::ReadyFlag, pl.ready}};
 			else if constexpr (std::is_same_v<T, PayloadDataPort>)
@@ -137,7 +141,8 @@ inline void to_json(nlohmann::json &j, const SignalPacket &p)
 inline void from_json(const nlohmann::json &j, SignalPacket &p)
 {
 	p.signalType = static_cast<SignalType>(j.at(JSON_Serialization::SignalType).get<int>());
-	j.at(JSON_Serialization::SenderIPv4).get_to(p.senderIP);
+	if (auto ip = net::IPv4Address::parse(j.at(JSON_Serialization::SenderIPv4).get<std::string>()); ip.has_value())
+		p.senderIP = *ip;
 	j.at(JSON_Serialization::SenderPort).get_to(p.senderPort);
 	j.at(JSON_Serialization::ComputerName).get_to(p.senderName);
 
@@ -146,7 +151,10 @@ inline void from_json(const nlohmann::json &j, SignalPacket &p)
 	switch (p.signalType)
 	{
 	case SignalType::ReadyFlag: p.payload = PayloadReadyFlag{pl.at(JSON_Serialization::ReadyFlag).get<bool>()}; break;
-	case SignalType::ConnectAnswer: p.payload = PayloadConnectAnswer{pl.at(JSON_Serialization::ConnectAnswer).get<bool>()}; break;
+	// value() rather than at(): a peer on an older build omits the reason field entirely
+	case SignalType::ConnectAnswer:
+		p.payload = PayloadConnectAnswer{pl.at(JSON_Serialization::ConnectAnswer).get<bool>(), pl.value(JSON_Serialization::Reason, std::string{})};
+		break;
 	case SignalType::DataPort: p.payload = PayloadDataPort{pl.at(JSON_Serialization::DataPort).get<int>()}; break;
 	case SignalType::ValidationRequest: p.payload = PayloadValidationRequest{pl.at(JSON_Serialization::Request).get<uint8_t>()}; break;
 	case SignalType::SecretResponse: p.payload = PayloadSecretResponse{pl.at(JSON_Serialization::Secret).get<std::string>()}; break;

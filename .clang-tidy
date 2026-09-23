@@ -4,5 +4,6 @@ Checks: >
   bugprone-*,
   performance-*,
   -bugprone-easily-swappable-parameters,
-  -clang-analyzer-cplusplus.StringChecker
+  -clang-analyzer-cplusplus.StringChecker,
+  -bugprone-exception-escape
 WarningsAsErrors: 'clang-analyzer-*,bugprone-*'

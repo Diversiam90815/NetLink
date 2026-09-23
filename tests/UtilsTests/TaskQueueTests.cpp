@@ -1,4 +1,6 @@
 #include <gtest/gtest.h>
+
+#include <stdexcept>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -211,6 +213,41 @@ TEST(TaskQueue, DestructorStopsCleanly)
 	} // destructor calls stop()
 
 	EXPECT_TRUE(ran.load()) << "A task posted and given time to run before destruction should have executed";
+}
+
+TEST(TaskQueue, ThrowingTaskDoesNotKillTheQueue)
+{
+	// Public NetLink callbacks are dispatched from a TaskQueue worker. Without a barrier
+	// an exception escaping one of them reaches the thread entry point and calls
+	// std::terminate, taking the whole process with it.
+	TaskQueue		  q;
+	std::atomic<bool> ranAfterThrow{false};
+
+	q.start();
+	q.post([] { throw std::runtime_error("callback blew up"); });
+	q.post([&ranAfterThrow] { ranAfterThrow.store(true); });
+
+	for (int i = 0; i < 200 && !ranAfterThrow.load(); ++i)
+		std::this_thread::sleep_for(10ms);
+
+	EXPECT_TRUE(ranAfterThrow.load()) << "A task queued after a throwing one must still run";
+	EXPECT_TRUE(q.isRunning()) << "The queue must stay usable after a task throws";
+}
+
+
+TEST(TaskQueue, TaskThrowingNonStandardExceptionIsAlsoContained)
+{
+	TaskQueue		  q;
+	std::atomic<bool> ranAfterThrow{false};
+
+	q.start();
+	q.post([] { throw 42; }); // not derived from std::exception
+	q.post([&ranAfterThrow] { ranAfterThrow.store(true); });
+
+	for (int i = 0; i < 200 && !ranAfterThrow.load(); ++i)
+		std::this_thread::sleep_for(10ms);
+
+	EXPECT_TRUE(ranAfterThrow.load()) << "The catch-all must contain exceptions that do not derive from std::exception";
 }
 
 } // namespace UtilsTests

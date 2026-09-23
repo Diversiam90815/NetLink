@@ -6,116 +6,142 @@
 */
 
 #include "DiscoveryService.h"
+
+#include <algorithm>
+#include <span>
+
+#include "NetLinkConstants.h"
 #include "NetLinkLog.h"
+#include "Socket/UdpSocket.h"
 
 using json = nlohmann::json;
 
-
-DiscoveryService::DiscoveryService(asio::io_context &ioContext) : mSocket(ioContext), mTimer(ioContext)
+namespace
 {
-	mIoContext = &ioContext;
+netlink::net::IPv4Address broadcastTarget(const DiscoveryConfig &config)
+{
+	if (config.broadcastAddress.isBroadcast() && config.subnetMask.isNetmask() && !config.localIPv4.isUnspecified())
+		return netlink::net::subnetBroadcast(config.localIPv4, config.subnetMask);
+
+	return config.broadcastAddress;
+}
+} // namespace
+
+
+DiscoveryService::DiscoveryService(netlink::net::DatagramSocketFactory socketFactory)
+	: mSocketFactory(socketFactory ? std::move(socketFactory) : netlink::net::UdpSocket::factory()), mReceiveBuffer(netlink::internal::PackageBufferSize)
+{
 }
 
 
 DiscoveryService::~DiscoveryService()
 {
-	try
-	{
-		deinit();
-	}
-	catch (const std::exception &e)
-	{
-		NETLINK_LOG_ERROR("Exception during DiscoveryService destruction: {}", e.what());
-	}
-	catch (...)
-	{
-		NETLINK_LOG_ERROR("Unknown exception during DiscoveryService destruction");
-	}
+	deinit();
+}
+
+
+void DiscoveryService::setOnRemoteFound(RemoteFoundCallback cb)
+{
+	std::lock_guard<std::mutex> lock(mMutex);
+	mOnRemoteFound = std::move(cb);
+}
+
+
+void DiscoveryService::setOnRemoteLost(RemoteLostCallback cb)
+{
+	std::lock_guard<std::mutex> lock(mMutex);
+	mOnRemoteLost = std::move(cb);
 }
 
 
 bool DiscoveryService::init(const DiscoveryConfig &config)
 {
-	if (config.localIPv4.empty() || config.displayName.empty())
+	if (config.localIPv4.isUnspecified() || config.displayName.empty() || config.discoveryPort <= 0 || config.discoveryPort > 65535)
 		return false;
 
-	const bool needsRebind = !mInitialized.load() || mConfig.localIPv4 != config.localIPv4 || mConfig.discoveryPort != config.discoveryPort;
-
-	mConfig				   = config;
-
-	if (!needsRebind)
 	{
-		NETLINK_LOG_DEBUG("DiscoveryService config updated (no rebind required)");
-		return true;
+		std::lock_guard<std::mutex> lock(mMutex);
+
+		if (mSocket && mConfig.discoveryPort == config.discoveryPort)
+		{
+			mConfig = config;
+			mAnnounceRequested.store(true);
+			return true;
+		}
 	}
 
-	asio::error_code ec;
-	mSocket.open(udp::v4());
+	netlink::net::BindOptions options;
+	options.enableBroadcast = true;
+	options.reuseAddress	= true;
 
-	mSocket.set_option(asio::socket_base::reuse_address(true), ec);
+	auto socket				= mSocketFactory(netlink::net::SocketAddress::any(static_cast<uint16_t>(config.discoveryPort)), options);
 
-	if (ec)
-		NETLINK_LOG_ERROR("Failed to set reuse_address option: {}", ec.message().c_str());
-
-	mLocalEndpoint	= udp::endpoint(udp::v4(), mConfig.discoveryPort);
-	mTargetEndpoint = udp::endpoint(asio::ip::make_address_v4(mConfig.broadCastAddress), mConfig.discoveryPort);
-
-	mSocket.bind(mLocalEndpoint, ec);
-
-	if (ec)
+	if (!socket)
 	{
-		NETLINK_LOG_ERROR("Failed to bind UDP Socket: {}", ec.message().c_str());
+		NETLINK_LOG_ERROR("DiscoveryService: binding port {} failed: {}", config.discoveryPort, netlink::net::toString(socket.error()));
 		return false;
 	}
 
-	mSocket.set_option(asio::socket_base::broadcast(true));
+	std::shared_ptr<netlink::net::IDatagramSocket> previous;
 
-	mInitialized.store(true);
+	{
+		std::lock_guard<std::mutex> lock(mMutex);
+		previous = std::exchange(mSocket, std::shared_ptr<netlink::net::IDatagramSocket>(std::move(*socket)));
+		mConfig	 = config;
+	}
+
+	if (previous)
+		previous->shutdown();
+
+	mAnnounceRequested.store(true);
 	return true;
 }
 
 
 void DiscoveryService::deinit()
 {
-	asio::error_code ec;
+	ThreadBase::stop();
 
-	// Cancel any pending async operations on the socket
-	mSocket.cancel(ec);
+	std::lock_guard<std::mutex> lock(mMutex);
 
-	if (ec)
-		NETLINK_LOG_ERROR("Error cancelling socket operations: {}", ec.message().c_str());
+	if (mSocket)
+		mSocket->shutdown();
 
-	mSocket.close(ec);
-
-	if (ec)
-		NETLINK_LOG_ERROR("Error occurred during closing of the socket! Error : {}", ec.message().c_str());
-
-	mTimer.cancel();
-	stop();
-	mInitialized.store(false);
+	mSocket.reset();
+	mRegistry.clear();
 }
 
 
-void DiscoveryService::startDiscovery()
+DiscoveryConfig DiscoveryService::getConfig() const
 {
-	if (!isInitialized())
-	{
-		throw std::runtime_error("Discovery Service has not been initialized but was called to start!");
-		return;
-	}
-
-	start();
+	std::lock_guard<std::mutex> lock(mMutex);
+	return mConfig;
 }
 
 
-DiscoveryEndpoint DiscoveryService::getEndpointFromIP(const std::string &IPv4)
+bool DiscoveryService::startDiscovery()
 {
-	for (auto &endpoint : mRemoteDevices)
+	if (!socket())
 	{
-		if (endpoint.IPAddress == IPv4)
-			return endpoint;
+		NETLINK_LOG_ERROR("Discovery cannot start: the service has not been initialised");
+		return false;
 	}
-	return {};
+
+	ThreadBase::start();
+	return true;
+}
+
+
+void DiscoveryService::stopDiscovery()
+{
+	ThreadBase::stop();
+}
+
+
+DiscoveryEndpoint DiscoveryService::getEndpointFromIP(const netlink::net::IPv4Address &IPv4)
+{
+	auto entry = mRegistry.findByIP(IPv4);
+	return entry ? entry->endpoint : DiscoveryEndpoint{};
 }
 
 
@@ -124,89 +150,121 @@ void DiscoveryService::addRemoteToList(DiscoveryEndpoint remote)
 	if (!remote.isValid())
 		return;
 
-	for (const auto &ep : mRemoteDevices)
 	{
-		if (ep == remote)
-			return;
+		std::lock_guard<std::mutex> lock(mMutex);
+		if (remote.IPAddress == mConfig.localIPv4)
+			return; // Ignore our own announcements
 	}
 
-	if (mConfig.localIPv4 == remote.IPAddress)
-		return;
+	auto result = mRegistry.addOrUpdate(remote);
 
-	NETLINK_LOG_INFO("Found remote: IP={}, Port={}, Name={}", remote.IPAddress.c_str(), remote.port, remote.displayName.c_str());
+	switch (result)
+	{
+	case netlink::discovery::DiscoveryRegistry::UpdateResult::Added:
+	case netlink::discovery::DiscoveryRegistry::UpdateResult::Updated:
+		if (mOnRemoteFound)
+			mOnRemoteFound(remote);
+		break;
+	}
+}
 
-	mRemoteDevices.push_back(remote);
 
-	if (mOnRemoteFound)
-		mOnRemoteFound(remote);
+std::shared_ptr<netlink::net::IDatagramSocket> DiscoveryService::socket() const
+{
+	std::lock_guard<std::mutex> lock(mMutex);
+	return mSocket;
 }
 
 
 void DiscoveryService::run()
 {
+	mNextSendTime = std::chrono::steady_clock::now();
+
 	while (isRunning())
 	{
+		if (mAnnounceRequested.exchange(false) || std::chrono::steady_clock::now() >= mNextSendTime)
+		{
+			sendPackage();
+			mNextSendTime = std::chrono::steady_clock::now() + std::chrono::milliseconds(mConfig.announceIntervalMS);
+		}
+
+		expireStalePeers();
 		receivePackage();
-		sendPackage();
-		waitForEvent(200);
+	}
+}
+
+
+void DiscoveryService::expireStalePeers()
+{
+	auto timeout = std::chrono::milliseconds(mConfig.peerTimeoutMs);
+	auto stale	 = mRegistry.removeStale(timeout);
+
+	for (auto &endpoint : stale)
+	{
+		if (mOnRemoteLost)
+			mOnRemoteLost(endpoint);
 	}
 }
 
 
 void DiscoveryService::sendPackage()
 {
-	if (!isInitialized())
-	{
-		NETLINK_LOG_ERROR("Tried to start the Discovery in Server mode without initializing first! Please initialize before attempting to start the Discovery in Server Mode!");
+	auto socket = this->socket();
+
+	if (!socket)
 		return;
-	}
 
 	DiscoveryEndpoint local{};
-	local.IPAddress			 = mConfig.localIPv4;
-	local.displayName		 = mConfig.displayName;
-	local.port				 = mConfig.signalingPort;
+	local.IPAddress			  = mConfig.localIPv4;
+	local.displayName		  = mConfig.displayName;
+	local.port				  = mConfig.signalingPort;
 
-	json			 j		 = local;
-	std::string		 message = j.dump();
+	const std::string message = json(local).dump();
+	const auto		  target  = netlink::net::SocketAddress{broadcastTarget(mConfig), static_cast<uint16_t>(mConfig.discoveryPort)};
 
-	asio::error_code ec;
-
-	// Sending the message
-	size_t			 bytesSent = mSocket.send_to(asio::buffer(message), mTargetEndpoint, 0, ec);
-
-	if (ec)
-		NETLINK_LOG_ERROR("Error sending discovery package: {}", ec.message().c_str());
-	else
-		NETLINK_LOG_DEBUG("Discovery package sent ({} bytes)!", bytesSent);
+	if (auto sent = socket->sendTo(target, std::span(reinterpret_cast<const uint8_t *>(message.data()), message.size())); !sent)
+		NETLINK_LOG_WARNING("DiscoveryService: announcing to {} failed: {}", target.toString(), netlink::net::toString(sent.error()));
 }
 
 
 void DiscoveryService::receivePackage()
 {
-	mSocket.async_receive(asio::buffer(mRecvBuffer), [this](const asio::error_code &error, size_t bytesReceived) { handleReceive(error, bytesReceived); });
-}
+	auto socket = this->socket();
 
-
-void DiscoveryService::handleReceive(const asio::error_code &error, size_t bytesReceived)
-{
-	if (!error && bytesReceived > 0)
+	if (!socket)
 	{
-		try
-		{
-			std::string		  receivedData(mRecvBuffer.data(), bytesReceived);
-			json			  j		 = json::parse(receivedData);
+		waitForEvent(static_cast<unsigned long>(netlink::internal::SocketPollInterval.count()));
+		return;
+	}
 
-			DiscoveryEndpoint remote = j.get<DiscoveryEndpoint>();
+	auto datagram = socket->receiveFrom(mReceiveBuffer, netlink::internal::SocketPollInterval);
 
-			addRemoteToList(remote);
-		}
-		catch (std::exception &e)
+	if (!datagram)
+	{
+		if (datagram.error() != netlink::net::SocketError::Timeout)
+			waitForEvent(static_cast<unsigned long>(netlink::internal::SocketPollInterval.count()));
+
+		return;
+	}
+
+	if (mConfig.subnetMask.isNetmask() && !mConfig.localIPv4.isUnspecified())
+	{
+		if (!netlink::net::sameSubnet(mConfig.localIPv4, datagram->from.ip, mConfig.subnetMask))
 		{
-			NETLINK_LOG_ERROR("Error parsing discovery package: {}", e.what());
+			NETLINK_LOG_DEBUG("Ignoring announcement from {}: outside the selected subnet", datagram->from.toString());
+			return;
 		}
 	}
-	else if (error)
+
+	try
 	{
-		NETLINK_LOG_WARNING("Receive error occurred: {}", error.message().c_str());
+		const auto		  begin	 = mReceiveBuffer.data();
+		auto			  j		 = json::parse(begin, begin + datagram->size);
+		DiscoveryEndpoint remote = j.get<DiscoveryEndpoint>();
+		addRemoteToList(remote);
+	}
+	catch (const std::exception &e)
+	{
+		NETLINK_LOG_ERROR("Error parsing discovery package from {}: {}", datagram->from.toString(), e.what());
 	}
 }

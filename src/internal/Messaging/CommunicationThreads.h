@@ -17,6 +17,7 @@ class SendThread : public ThreadBase
 {
 public:
 	explicit SendThread(RemoteCommunication *owner);
+	~SendThread() override { stop(); } // must stop before ~ThreadBase destroys the base part
 
 protected:
 	void run() override;
@@ -30,6 +31,7 @@ class ReceiveThread : public ThreadBase
 {
 public:
 	explicit ReceiveThread(RemoteCommunication *owner);
+	~ReceiveThread() override { stop(); } // must stop before ~ThreadBase destroys the base part
 
 protected:
 	void run() override;

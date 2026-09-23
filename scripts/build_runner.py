@@ -1,8 +1,7 @@
 from pathlib import Path
 
-from .enums import Architecture, Configuration, Environment, Platform
+from .enums import Architecture, Configuration, Platform
 from .utils import BuildUtils, working_directory
-from .env_config import update_environment_in_cmake
 from .versioning import VersionManager
 from .paths import *
 
@@ -13,18 +12,15 @@ class BuildRunner:
         self.build_dir = build_dir
         self.project_name = project_name
 
-        self.env: Environment = Environment.Development
         self.version: str | None = None
+        self.build_number: int = 0
 
         self.version_manager = VersionManager(CMAKE_FILE)
 
-    # ---- Environment ----
-    def update_environment(self) -> None:
-        self.env = update_environment_in_cmake(CMAKE_FILE)
-
     # ---- Versioning ----
     def update_app_version(self) -> None:
-        self.version = self.version_manager.update_build_number_in_version()
+        self.build_number = self.version_manager.get_build_number()
+        self.version = self.version_manager.full_version()
 
 
     # ---- CMake / build ----
@@ -34,6 +30,7 @@ class BuildRunner:
             "-G", str(platform),
             "-S", str(self.root_dir),
             "-B", str(self.build_dir),
+            f"-DNETLINK_BUILD_NUMBER={self.build_number}",
         ]  
         if platform == Platform.VS2022 or platform == Platform.VS2026:
             prepare_cmd += ["-A", str(architecture)]

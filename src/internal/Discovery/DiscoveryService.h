@@ -1,97 +1,95 @@
 /*
   ==============================================================================
 	Module:         DiscoveryService
-	Description:    LAN discovery via UDP broadcast
+	Description:    LAN discovery via UDP broadcast.
   ==============================================================================
 */
 
 #pragma once
 
-#include <asio.hpp>
-#include <asio/steady_timer.hpp>
-#include <asio/ip/udp.hpp>
-
-#include <string>
-#include <functional>
-#include <vector>
-#include <array>
 #include <atomic>
+#include <chrono>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <vector>
 
 #include "DiscoveryEndpoint.h"
+#include "DiscoveryRegistry.h"
 #include "ThreadBase.h"
-
-
-using asio::ip::udp;
+#include "Socket/IDatagramSocket.h"
 
 
 struct DiscoveryConfig
 {
-	std::string displayName{};
-	std::string localIPv4{};
-	int			signalingPort{0};
-	int			discoveryPort{5555};
-	std::string broadCastAddress{"255.255.255.255"};
+	std::string				  displayName{};
+	netlink::net::IPv4Address localIPv4{};
+	int						  signalingPort{0};
+	int						  discoveryPort{5555};
+	netlink::net::IPv4Address broadcastAddress{netlink::net::IPv4Address::broadcast()};
+	int						  peerTimeoutMs{6000};
+	int						  announceIntervalMS{2000};
+
+	netlink::net::IPv4Address subnetMask{}; // When set, inbound announcements from other subnets are ignored
 };
 
 
-// @brief		Callback signature when a remote endpoint is discovered
 using RemoteFoundCallback = std::function<void(const DiscoveryEndpoint &)>;
+using RemoteLostCallback  = std::function<void(const DiscoveryEndpoint &)>;
 
 
-/**
- * @brief	Provides LAN discovery via UDP broadcast.
- */
-class DiscoveryService : public ThreadBase
+class DiscoveryService : private ThreadBase
 {
 public:
-	DiscoveryService(asio::io_context &ioContext);
-	~DiscoveryService();
+	explicit DiscoveryService(netlink::net::DatagramSocketFactory socketFactory = {});
+	~DiscoveryService() override;
+	DiscoveryService(const DiscoveryService &)			  = delete;
+	DiscoveryService &operator=(const DiscoveryService &) = delete;
 
-	// @brief		Set callback invoked when a remote is discovered
-	void				   setOnRemoteFound(RemoteFoundCallback cb) { mOnRemoteFound = std::move(cb); }
+	// Invoked on the discovery thread for every new (or changed) remote
+	void			  setOnRemoteFound(RemoteFoundCallback cb);
 
-	// @brief		Initialize socket and bind to discovery port.
-	bool				   init(const DiscoveryConfig &config);
+	// Invoked on the discovery thread when a remote stopped announcing for peerTimeoutMs
+	void			  setOnRemoteLost(RemoteLostCallback cb);
 
-	// @brief		Tear down socket and stop thread. Safe to call multiple times.
-	void				   deinit();
+	// Applies the configuration. Rebinds the socket only if the discovery port changed. Safe while discovering.
+	bool			  init(const DiscoveryConfig &config);
+	void			  deinit();
 
-	const DiscoveryConfig &getConfig() const { return mConfig; }
+	DiscoveryConfig	  getConfig() const;
 
-	// @brief		Begin broadcasting
-	void				   startDiscovery();
+	bool			  startDiscovery();
+	void			  stopDiscovery();
+	bool			  isDiscovering() const { return isRunning(); }
 
-	// @brief		Look up a previously discovered endpoint by IP.
-	DiscoveryEndpoint	   getEndpointFromIP(const std::string &IPv4);
-
-	// @brief		Manually add a remote endpoint (duplicates are filtered).
-	void				   addRemoteToList(DiscoveryEndpoint remote);
+	DiscoveryEndpoint getEndpointFromIP(const netlink::net::IPv4Address &IPv4);
+	void			  addRemoteToList(DiscoveryEndpoint remote);
 
 
 private:
-	void						   run() override;
+	void										   run() override;
 
-	void						   sendPackage();
+	void										   sendPackage();
+	void										   receivePackage();
+	void										   expireStalePeers();
 
-	void						   receivePackage();
+	std::shared_ptr<netlink::net::IDatagramSocket> socket() const;
 
-	void						   handleReceive(const asio::error_code &error, size_t bytesReceived);
+	netlink::net::DatagramSocketFactory			   mSocketFactory;
 
-	bool						   isInitialized() const { return mInitialized.load(); }
+	mutable std::mutex							   mMutex;
+	DiscoveryConfig								   mConfig;
+	std::shared_ptr<netlink::net::IDatagramSocket> mSocket;
 
+	netlink::discovery::DiscoveryRegistry		   mRegistry;
 
-	DiscoveryConfig				   mConfig;
-	std::atomic<bool>			   mInitialized{false};
+	RemoteFoundCallback							   mOnRemoteFound;
+	RemoteLostCallback							   mOnRemoteLost;
 
-	asio::io_context			  *mIoContext = nullptr;
-	udp::socket					   mSocket;
+	std::atomic<bool>							   mAnnounceRequested{false};
 
-	udp::endpoint				   mLocalEndpoint;
-	udp::endpoint				   mTargetEndpoint;
-	std::vector<DiscoveryEndpoint> mRemoteDevices;
-
-	std::array<char, 1024>		   mRecvBuffer{};
-	asio::steady_timer			   mTimer;
-
-	RemoteFoundCallback			   mOnRemoteFound;
+	// Only touched by the discovery thread
+	std::vector<uint8_t>						   mReceiveBuffer;
+	std::chrono::steady_clock::time_point		   mNextSendTime;
 };

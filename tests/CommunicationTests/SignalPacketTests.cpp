@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
+
 #include <nlohmann/json.hpp>
+#include "TestIp.h"
 #include "Signaling/SignalPacket.h"
 
 using namespace netlink;
@@ -19,7 +21,7 @@ static SignalPacket makeBase(SignalType type)
 	SignalPacket p;
 	p.signalType = type;
 	p.senderName = "pc-alpha";
-	p.senderIP	 = "10.0.0.5";
+	p.senderIP	 = ipv4("10.0.0.5");
 	p.senderPort = 9000;
 	return p;
 }
@@ -32,7 +34,7 @@ TEST(SignalPacketRoundtrip, EnvelopeFieldsPreserved)
 	SignalPacket result = roundtrip(p);
 
 	EXPECT_EQ(result.signalType, SignalType::Disconnect) << "signalType must survive JSON serialization unchanged";
-	EXPECT_EQ(result.senderIP, "10.0.0.5") << "senderIP must be written and read back correctly";
+	EXPECT_EQ(result.senderIP, ipv4("10.0.0.5")) << "senderIP must be written and read back correctly";
 	EXPECT_EQ(result.senderPort, 9000) << "senderPort must be written and read back correctly";
 	EXPECT_EQ(result.senderName, "pc-alpha") << "senderName is currently not deserialized in from_json; it must remain empty after round-trip";
 	EXPECT_TRUE(std::holds_alternative<PayloadEmpty>(result.payload)) << "A packet with no structured payload must deserialize to PayloadEmpty";
@@ -174,6 +176,48 @@ TEST(SignalPacketRoundtrip, SignalTypeNumericValues)
 		nlohmann::json j = p;
 		EXPECT_EQ(j[JSON_Serialization::SignalType].get<int>(), 8) << "ValidationHandshake must serialize to numeric type 8 — reordering the enum would break the wire format";
 	}
+}
+
+TEST(SignalPacket, ConnectAnswerCarriesTheDeclineReason)
+{
+	SignalPacket p	   = makeBase(SignalType::ConnectAnswer);
+	p.payload		   = PayloadConnectAnswer{false, "Already in a connection"};
+
+	const auto	result = roundtrip(p);
+	const auto &pl	   = std::get<PayloadConnectAnswer>(result.payload);
+
+	EXPECT_FALSE(pl.accepted);
+	EXPECT_EQ(pl.reason, "Already in a connection") << "The decline reason must survive the wire, otherwise the remote only ever sees a bare refusal";
+}
+
+
+TEST(SignalPacket, ConnectAnswerWithoutReasonFieldStillParses)
+{
+	// A peer built before the reason field existed omits it entirely. Using at() here
+	// would throw and drop the whole packet, so the field must be optional on read.
+	SignalPacket p	 = makeBase(SignalType::ConnectAnswer);
+	p.payload		 = PayloadConnectAnswer{true, ""};
+
+	nlohmann::json j = p;
+	j[JSON_Serialization::Payload].erase(JSON_Serialization::Reason);
+
+	SignalPacket result;
+	ASSERT_NO_THROW(result = j.get<SignalPacket>());
+
+	const auto &pl = std::get<PayloadConnectAnswer>(result.payload);
+	EXPECT_TRUE(pl.accepted);
+	EXPECT_TRUE(pl.reason.empty());
+}
+
+
+TEST(SignalPacket, ReadyFlagCarriesTheActualValue)
+{
+	SignalPacket p	  = makeBase(SignalType::ReadyFlag);
+	p.payload		  = PayloadReadyFlag{false};
+
+	const auto result = roundtrip(p);
+
+	EXPECT_FALSE(std::get<PayloadReadyFlag>(result.payload).ready) << "The ready flag must be transmitted, not hardcoded to true";
 }
 
 } // namespace CommunicationTests

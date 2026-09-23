@@ -1,77 +1,91 @@
 /*
   ==============================================================================
 	Module:         TCPClient
-	Description:    Client implementation used for the multiplayer mode
+	Description:    Connects to a remote TCP server and provides a TCPSession
   ==============================================================================
 */
 
 #include "TCPClient.h"
+
+#include "NetLinkConstants.h"
 #include "NetLinkLog.h"
+#include "Socket/TcpStream.h"
+#include "TCPSession.h"
+#include "Util/ThreadUtils.h"
 
 
-TCPClient::TCPClient(asio::io_context &ioContext) : mIoContext(ioContext) {}
-
-
-void TCPClient::connect(const std::string &host, unsigned short port)
+namespace netlink
 {
-	// Create a new session
-	auto session = TCPSession::create(mIoContext); // TCPSession constructor binds the socket to a port
 
-	// Create timer for the connection timeout
-	auto timer	 = std::make_shared<asio::steady_timer>(mIoContext);
-	timer->expires_after(std::chrono::seconds(mTimeoutInSeconds));
-
-	// Start timeout timer
-	timer->async_wait(
-		[this, timer](const asio::error_code &ec)
-		{
-			if (!ec)
-			{
-				// Timer expired -> connection timed out
-				if (mConnectTimeoutHandler)
-					mConnectTimeoutHandler();
-			}
-		});
-
-	// Resolve host and port
-	tcp::resolver resolver(mIoContext);
-	auto		  endpoints = resolver.resolve(host, std::to_string(port));
-
-	asio::async_connect(session->socket(), endpoints,
-						[session, timer, this](const asio::error_code &error, const tcp::endpoint &endpoint)
-						{
-							// Cancel timeout timer
-							timer->cancel();
-
-							if (!error)
-							{
-								NETLINK_LOG_INFO("TCPClient connected to {}", endpoint.address().to_string().c_str());
-
-								if (mConnectHandler)
-									mConnectHandler(session);
-							}
-							else
-							{
-								NETLINK_LOG_ERROR("TCPClient connect error : {}!", error.message().c_str());
-
-								// Call the timeout handler if it is a timeout-related error
-								if (error == asio::error::timed_out || error == asio::error::connection_refused)
-								{
-									if (mConnectTimeoutHandler)
-										mConnectTimeoutHandler();
-								}
-							}
-						});
+TCPClient::~TCPClient()
+{
+	cancel();
 }
 
 
 void TCPClient::setConnectHandler(ConnectHandler handler)
 {
-	mConnectHandler = handler;
+	std::lock_guard<std::mutex> lock(mMutex);
+	mConnectHandler = std::move(handler);
 }
 
 
 void TCPClient::setConnectTimeoutHandler(ConnectTimeoutHandler handler)
 {
-	mConnectTimeoutHandler = handler;
+	std::lock_guard<std::mutex> lock(mMutex);
+	mConnectTimeoutHandler = std::move(handler);
 }
+
+
+void TCPClient::connect(const net::IPv4Address &localAddress, const net::IPv4Address &host, unsigned short port)
+{
+	cancel();
+
+	std::lock_guard<std::mutex> lock(mMutex);
+
+	auto						cancelled = std::make_shared<std::atomic<bool>>(false);
+	mCancelled							  = cancelled;
+
+	// The thread owns copies of everything it uses, so it never touches this object
+	mThread								  = std::thread(
+		[cancelled, local = net::SocketAddress{localAddress, 0}, remote = net::SocketAddress{host, port}, onConnected = mConnectHandler, onFailed = mConnectTimeoutHandler]()
+		{
+			auto stream = net::TcpStream::connect(remote, internal::TcpConnectTimeout, [&cancelled]() { return cancelled->load(); }, local);
+
+			if (cancelled->load())
+				return;
+
+			if (!stream)
+			{
+				NETLINK_LOG_ERROR("TCPClient: connecting to {} failed: {}", remote.toString(), net::toString(stream.error()));
+
+				if (onFailed)
+					onFailed();
+				return;
+			}
+
+			NETLINK_LOG_INFO("TCPClient: connected to {}", remote.toString());
+
+			if (onConnected)
+				onConnected(std::make_shared<TCPSession>(std::move(*stream)));
+		});
+}
+
+
+void TCPClient::cancel()
+{
+	std::thread thread;
+
+	{
+		std::lock_guard<std::mutex> lock(mMutex);
+
+		if (mCancelled)
+			mCancelled->store(true);
+
+		thread = std::move(mThread);
+	}
+
+	joinOrDetach(thread);
+}
+
+} // namespace netlink

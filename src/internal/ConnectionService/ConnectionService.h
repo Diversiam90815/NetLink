@@ -9,6 +9,8 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
+#include <map>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -69,6 +71,8 @@ struct ConnectionRequest
 	std::chrono::steady_clock::time_point requestTime;
 	std::chrono::steady_clock::time_point lastActivityTime;
 
+	int									  dataPort{0}; // TCP port announced by the acceptor (remote.port is the signaling port)
+
 	bool								  localReadyFlag{false};
 	bool								  remoteReadyFlag{false};
 
@@ -81,13 +85,14 @@ struct ConnectionRequest
 class ConnectionService
 {
 public:
-	ConnectionService(asio::io_context &ioContext, SignalingService &signaling, ITransportFactory &transportFactory);
+	ConnectionService(SignalingService &signaling, ITransportFactory &transportFactory);
 	~ConnectionService();
 
 	// Configuration
 	void							 setCallbacks(ConnectionServiceCallbacks cb) { mCallbacks = std::move(cb); }
 	void							 setConfig(const ConnectionConfig &config);
-	void							 setLocalIP(const std::string &ip) { mLocalIP = ip; }
+	void							 setLocalIP(const net::IPv4Address &ip);
+	void							 setTransportFactory(ITransportFactory &transportFactory);
 
 	// Connection management
 	bool							 initiateConnection(const std::string &computerName);
@@ -109,6 +114,11 @@ public:
 	bool							 answerInvitation(const std::string &computerName, const bool connectionAccepted, const std::string &reason = "");
 	bool							 sendConnectionReadyFlag(const std::string &computerName, const bool flag);
 
+	// Signals from the remote (thread-safe, wired to SignalingService by the owner)
+	void							 onDisconnectReceived(const std::string &computerName);
+	void							 onReadyFlagReceived(const std::string &computerName);
+	void							 onDataPortReceived(const std::string &computerName, int dataPort);
+
 	// Receiving helper
 	void							 onReceivedInvitation(const std::string &computerName);
 	void							 onReceivedAnswerToInvite(const std::string &computerName, const bool connectionAccepted, const std::string &reason);
@@ -116,6 +126,9 @@ public:
 
 	// Peer validated
 	void							 onPeerValidated(const ValidationResult &peerValidation);
+
+	// The established data transport was lost (remote closed, reset, protocol error)
+	void							 onTransportDisconnected(const std::string &reason);
 
 private:
 	// State management
@@ -129,24 +142,31 @@ private:
 	// Define role
 	bool							 determineLocalSessionRole();
 
-	// Timeout expiry handler
+	// Timeouts (caller must hold mConnectingMutex). Expiry is handled on the task queue.
+	void							 armTimeout(const TimeoutKey &key, int timeoutMs);
+	void							 disarmTimeouts(const std::function<bool(const TimeoutKey &)> &matches);
+	void							 disarmAllTimeouts();
 	void							 onTimeout(const TimeoutKey &key);
 
+	// Runs on the task queue once the transport produced a session
+	void							 onTransportEstablished(const ISession::pointer &session);
+
 	// Dependencies
-	asio::io_context				&mIoContext;
 	SignalingService				&mSignaling;
-	ITransportFactory				&mTransportFactory;
+	ITransportFactory				*mTransportFactory;
 
 	// Configuration and callbacks
 	ConnectionConfig				 mConfig;
 	ConnectionServiceCallbacks		 mCallbacks;
-	std::string						 mLocalIP{};
+	net::IPv4Address				 mLocalIP{};
 
 	TaskQueue						 mTaskQueue;
 	ValidatedPeerRegistry			 mValidatedPeers;
 	ConnectionRetryPolicy			 mRetryPolicy;
 	ReadySyncTracker				 mReadySync;
 	TimeoutService					 mTimeoutService;
+	std::map<TimeoutKey, uint64_t>	 mArmedTimeouts; // generation per armed timeout, guarded by mConnectingMutex
+	uint64_t						 mTimeoutGeneration{0};
 
 	// State
 	std::atomic<bool>				 mConnected{false};

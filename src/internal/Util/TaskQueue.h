@@ -1,10 +1,7 @@
 /*
   ==============================================================================
 	Module:         TaskQueue
-	Description:    Single-threaded, serial FIFO task queue used to marshal
-					 callbacks off their originating thread (e.g. signaling/IO)
-					 onto a dedicated worker thread, guaranteeing in-order,
-					 non-reentrant execution.
+	Description:    Single-threaded, serial FIFO task queue
   ==============================================================================
 */
 
@@ -12,10 +9,13 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <exception>
 #include <functional>
 #include <mutex>
 #include <queue>
 #include <thread>
+
+#include "NetLinkLog.h"
 
 
 class TaskQueue
@@ -90,7 +90,18 @@ private:
 				mQueue.pop();
 			}
 
-			task();
+			try
+			{
+				task();
+			}
+			catch (const std::exception &e)
+			{
+				NETLINK_LOG_ERROR("Task threw an exception, ignoring it: {}", e.what());
+			}
+			catch (...)
+			{
+				NETLINK_LOG_ERROR("Task threw an unknown exception, ignoring it");
+			}
 		}
 	}
 

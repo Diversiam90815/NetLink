@@ -4,7 +4,9 @@
 	Description:    Checking if the peer's and our secret matches
   ==============================================================================
 */
+
 #include "SecretCompatibilityCheck.h"
+
 
 netlink::SecretCompatibilityCheck::SecretCompatibilityCheck(std::string localSecret) : mLocalSecret(std::move(localSecret)) {}
 

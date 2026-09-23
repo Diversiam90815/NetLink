@@ -57,6 +57,21 @@ struct Message
 	std::vector<uint8_t> data{};
 };
 
+
+// Delivery guarantee requested for a message.
+enum class DeliveryMode : uint8_t
+{
+	ReliableOrdered,	 // Delivered exactly once, in send order
+	UnreliableSequenced, // May be dropped; stale messages are discarded
+};
+
+
+// Transport used for the data connection once two peers agreed to connect.
+enum class TransportKind : uint8_t
+{
+	Tcp,
+};
+
 enum class ConnectionState
 {
 	None,
@@ -80,8 +95,12 @@ struct ConnectionEvent
 
 struct NetLinkCallbacks
 {
-	// A remote endpoint was discovered
+	// A compatible remote was discovered and validated (matching secret): connectTo() can be called
 	std::function<void(const Endpoint &remote)>		   onRemoteDiscovered;
+
+	// A previously discovered remote stopped announcing and is no longer reachable.
+	// Not raised for the peer of an active connection, which may legitimately go quiet.
+	std::function<void(const Endpoint &remote)>		   onRemoteLost;
 
 	// Connected state changed (connected, disconnected, error, etc.)
 	std::function<void(const ConnectionEvent)>		   onConnectionChanged;
@@ -89,7 +108,7 @@ struct NetLinkCallbacks
 	// An inbound message was received from the remote peer
 	std::function<void(const Message &message)>		   onMessageReceived;
 
-	// A network adapter change was detected
+	// The active network adapter changed (selected automatically in init() or via setActiveAdapter())
 	std::function<void(const NetworkAdapter &adapter)> onNetworkAdapterChanged;
 };
 
@@ -98,10 +117,12 @@ struct NetLinkCallbacks
 
 struct NetLinkConfig
 {
-	std::string	   localDisplayName{};
-	int			   discoveryPort{5555};
-	std::string	   broadcastAddress{"255.255.255.255"};
-	std::string	   secret{"NetLink"};
+	std::string	  localDisplayName{};
+	int			  discoveryPort{5555};
+	std::string	  broadcastAddress{"255.255.255.255"};
+	std::string	  secret{"NetLink"};
+	TransportKind transport{TransportKind::Tcp};
+	std::string	  applicationVersion{}; // Two peers are compatible when the major and minor components match; patch and build number are ignored
 };
 
 
@@ -113,19 +134,21 @@ public:
 	NetLink();
 	~NetLink();
 
-	// Non-copyable, movable
-	NetLink(const NetLink &)			= delete;
-	NetLink &operator=(const NetLink &) = delete;
-	NetLink(NetLink &&) noexcept;
-	NetLink					   &operator=(NetLink &&) noexcept;
+	// Non-copyable and non-movable
+	NetLink(const NetLink &)						  = delete;
+	NetLink &operator=(const NetLink &)				  = delete;
+	NetLink(NetLink &&)								  = delete;
+	NetLink					   &operator=(NetLink &&) = delete;
 
 	// Register all callbacks. Call before init()
+	// Callbacks run one at a time on NetLink's event thread, never while internal locks are held:
+	// calling back into NetLink from a callback is safe (except destroying the NetLink instance).
 	void						configure(const NetLinkConfig &config, const NetLinkCallbacks &callbacks);
 
-	// Initialize networking (socket, adapter enumeration,..)
+	// Initialize networking (adapter enumeration, sockets). Selects the preferred adapter if none is active yet.
 	bool						init();
 
-	// Tear down everything. Safe to call multiple times
+	// Tear down everything (notifies a connected remote first). Safe to call multiple times
 	void						shutdown();
 
 
@@ -137,7 +160,7 @@ public:
 	// Stop active discovery
 	void						stopDiscovery();
 
-	// Currently validated remotes (snapshot)
+	// Currently validated, compatible remotes (snapshot)
 	std::vector<Endpoint>		getPotentialEndpoints();
 
 
@@ -159,10 +182,10 @@ public:
 	// -- Messaging -----------------------------------
 
 	// Send a message to the connected peer
-	bool						send(const Message &message);
+	bool						send(const Message &message, DeliveryMode mode = DeliveryMode::ReliableOrdered);
 
 	// Send a typed message with raw bytes
-	bool						send(uint32_t type, const std::vector<uint8_t> &payload);
+	bool						send(uint32_t type, const std::vector<uint8_t> &payload, DeliveryMode mode = DeliveryMode::ReliableOrdered);
 
 
 	// -- Network adapters -------------------------------

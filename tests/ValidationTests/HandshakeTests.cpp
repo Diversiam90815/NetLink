@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include "TestIp.h"
 #include "PeerValidation/HandshakeTracker.h"
 
 using namespace netlink;
@@ -8,9 +9,9 @@ using namespace netlink;
 namespace ValidationTests
 {
 
-static DiscoveryEndpoint makeEndpoint(const std::string &name, const std::string &ip = "10.0.0.1", int port = 5000)
+static DiscoveryEndpoint makeEndpoint(const std::string &name, std::string_view ip = "10.0.0.1", int port = 5000)
 {
-	return DiscoveryEndpoint{ip, port, name};
+	return DiscoveryEndpoint{ipv4(ip), port, name};
 }
 
 

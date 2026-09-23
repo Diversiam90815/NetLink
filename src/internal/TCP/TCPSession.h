@@ -1,102 +1,57 @@
 /*
   ==============================================================================
 	Module:         TCPSession
-	Description:    Managing the socket and session used for the multiplayer mode
+	Description:    Message based session on top of a connected TCP stream
   ==============================================================================
 */
 
 #pragma once
 
-#include <asio.hpp>
-#include <vector>
+#include <atomic>
+#include <memory>
+#include <thread>
 
 #include "Transport/TransportInterfaces.h"
+#include "Socket/TcpStream.h"
 
 
-using asio::ip::tcp;
-
-/**
- * @brief	Represents the state of an asynchronous read operation currently in progress.
- */
-struct AsyncReadState
+namespace netlink
 {
-	netlink::InternalMessage messageType;
-	size_t					 dataLength = 0;
-};
 
-
-/**
- * @brief	Concrete TCP session implementing message-based async read/write abstraction.
- *
- * Life-cycle:
- *  - Created via static create() helpers (shared_ptr managed).
- *  - startReadAsync() begins message framing loop; stopReadAsync() cancels it.
- *  - sendMessage() serializes and dispatches a message buffer.
- *
- * Thread-safety: Public methods intended to be invoked from owning I/O thread;
- * minimal external synchronization assumed.
- */
-class TCPSession : public ISession, public std::enable_shared_from_this<TCPSession>
+class TCPSession final : public ISession
 {
 public:
-	~TCPSession();
+	explicit TCPSession(net::TcpStream stream);
+	~TCPSession() override;
+	TCPSession(const TCPSession &)				   = delete;
+	TCPSession		&operator=(const TCPSession &) = delete;
 
-	typedef std::shared_ptr<TCPSession> pointer;
+	bool			 isConnected() const override;
 
-	/**
-	 * @brief	Factory: allocate session owning its own socket (not yet connected).
-	 */
-	static pointer						create(asio::io_context &io_context) { return pointer(new TCPSession(io_context)); }
+	bool			 sendMessage(const InternalMessage &message, DeliveryMode mode) override;
 
-	/**
-	 * @brief	Factory: wrap an already accepted or connected socket.
-	 */
-	static pointer						create(tcp::socket socket) { return pointer(new TCPSession(std::move(socket))); }
+	void			 startReadAsync(MessageReceivedCallback onMessage, DisconnectedCallback onDisconnected) override;
+	void			 stopReadAsync() override;
 
-	/**
-	 * @brief	Access underlying socket (for low-level operations).
-	 */
-	tcp::socket						   &socket();
+	int				 getBoundPort() const override;
+	net::IPv4Address getRemoteAddress() const override;
+	int				 getRemotePort() const override;
 
-	int									getBoundPort() const override { return mBoundPort; }
-	bool								isConnected() const override;
-
-	/**
-	 * @brief	Serialize and send a multiplayer message (may queue internally).
-	 * @return	true if dispatch initiated.
-	 */
-	bool								sendMessage(netlink::InternalMessage &message) override;
-
-	/**
-	 * @brief	Start async read loop delivering complete messages to callback.
-	 */
-	void								startReadAsync(MessageReceivedCallback callback) override;
-
-	/**
-	 * @brief	Stop current async read loop (safe if not active).
-	 */
-	void								stopReadAsync() override;
-
+	void			 close() override;
 
 private:
-	explicit TCPSession(asio::io_context &ioContext);
-	explicit TCPSession(tcp::socket &&socket);
+	// Everything the read thread touches
+	struct State;
 
-	/**
-	 * @brief	Internal continuation-based async read dispatcher handling headers and payload.
-	 */
-	void					readMessageAsync();
+	static void			   readLoop(const std::shared_ptr<State>			 &state,
+									const std::shared_ptr<std::atomic<bool>> &stopFlag,
+									const MessageReceivedCallback			 &onMessage,
+									const DisconnectedCallback				 &onDisconnected);
 
+	// Requests the read loop to stop and hands out its thread for joining
+	std::thread			   requestReadStop();
 
-	tcp::socket				mSocket;
-
-	uint8_t				   *mReceiveBuffer = nullptr;
-	uint8_t				   *mSendBuffer	   = nullptr;
-	AsyncReadState			mReadState;
-
-	MessageReceivedCallback mMessageReceivedCallback;
-
-	bool					mAsyncReadActive{false};
-
-	int						mBoundPort{0};
+	std::shared_ptr<State> mState;
 };
+
+} // namespace netlink

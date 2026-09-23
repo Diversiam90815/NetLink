@@ -7,32 +7,38 @@
 
 #pragma once
 
-#include <asio.hpp>
-#include <functional>
-#include <string>
 #include <atomic>
-#include <array>
+#include <functional>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <vector>
 
 #include "SignalPacket.h"
 #include "ThreadBase.h"
 #include "PeerValidation/PeerValidationService.h"
+#include "Socket/IDatagramSocket.h"
 
-
-using asio::ip::udp;
 
 namespace netlink
 {
 
-struct SignalingCallbacks
+// Connection lifecycle signals (consumed by ConnectionService)
+struct SignalingConnectionCallbacks
 {
-	std::function<void(const std::string &computerName)>							 onConnectRequested;
-	std::function<void(const std::string &computerName, bool accepted)>				 onConnectRequestAnswered;
-	std::function<void(const std::string &computerName)>							 onDisconnectReceived;
-	std::function<void(const std::string &computerName)>							 onReadyFlagReceived;
-	std::function<void(const std::string &computerName, int dataPort)>				 onDataPortReceived;
+	std::function<void(const std::string &computerName)>										   onConnectRequested;
+	std::function<void(const std::string &computerName, bool accepted, const std::string &reason)> onConnectRequestAnswered;
+	std::function<void(const std::string &computerName)>										   onDisconnectReceived;
+	std::function<void(const std::string &computerName)>										   onReadyFlagReceived;
+	std::function<void(const std::string &computerName, int dataPort)>							   onDataPortReceived;
+};
 
-	// Validation
-	std::function<void(const std::string &computerName, uint8_t request)>			 onValidationRequestReceived;
+
+// Peer validation signals (consumed by PeerValidationService)
+struct SignalingValidationCallbacks
+{
+	std::function<void(const std::string &computerName, RemoteRequest request)>		 onValidationRequestReceived;
 	std::function<void(const std::string &computerName, const std::string &secret)>	 onSecretResponseReceived;
 	std::function<void(const std::string &computerName, const std::string &version)> onVersionResponseReceived;
 	std::function<void(const std::string &computerName)>							 onValidationHandshakeReceived;
@@ -43,36 +49,46 @@ using SocketBoundCallback = std::function<void(int boundPort)>;
 
 struct PeerEndpoint
 {
-	std::string IPv4{};
-	int			signalingPort{0};
+	net::IPv4Address IPv4{};
+	int				 signalingPort{0};
 
-	bool		isValid() const { return !IPv4.empty() && signalingPort != 0; }
+	bool			 isValid() const { return !IPv4.isUnspecified() && signalingPort != 0; }
 };
 
 
-class SignalingService : public ThreadBase
+class SignalingService : private ThreadBase
 {
 public:
-	explicit SignalingService(asio::io_context &ioContext);
-	~SignalingService();
+	explicit SignalingService(net::DatagramSocketFactory socketFactory = {});
+	~SignalingService() override;
+	SignalingService(const SignalingService &)			  = delete;
+	SignalingService &operator=(const SignalingService &) = delete;
 
-	bool init(const std::string &localComputerName);
-	void deinit();
-	void setLocalIPv4(const std::string &localIPv4);
+	bool			  init(const std::string &localComputerName);
+	void			  deinit();
 
-	int	 getBoundPort() const { return mBoundPort; }
+	// Binds the signaling socket to the adapter address
+	void			  setLocalIPv4(const net::IPv4Address &localIPv4);
 
-	void setCallbacks(SignalingCallbacks cb) { mCallbacks = std::move(cb); }
+	// Receive loop
+	using ThreadBase::start;
+	using ThreadBase::stop;
+
+	int	 getBoundPort() const { return mBoundPort.load(); }
+
+	// Set before start(). Invoked on the signaling thread.
+	void setConnectionCallbacks(SignalingConnectionCallbacks cb) { mConnectionCallbacks = std::move(cb); }
+	void setValidationCallbacks(SignalingValidationCallbacks cb) { mValidationCallbacks = std::move(cb); }
 	void setOnSocketBound(SocketBoundCallback cb) { mOnSocketBound = std::move(cb); }
 
 	// Peer registry
-	void registerPeer(const std::string &displayName, const std::string &ipv4, const int signalingPort);
+	void registerPeer(const std::string &displayName, const net::IPv4Address &ipv4, const int signalingPort);
 	void unregisterPeer(const std::string &displayName);
 
 	void sendConnectRequest(const std::string &computerName);
-	void sendConnectAnswer(const std::string &computerName, bool requestAccepted);
+	void sendConnectAnswer(const std::string &computerName, bool requestAccepted, const std::string &reason = {});
 	void sendDisconnect(const std::string &computerName);
-	void sendReadyFlag(const std::string &computerName);
+	void sendReadyFlag(const std::string &computerName, bool ready = true);
 	void sendDataPort(const std::string &computerName, int dataPort);
 
 	// Validation signaling (called via PeerValidationSendCallbacks)
@@ -82,32 +98,35 @@ public:
 	void sendValidationHandshake(const std::string &computerName);
 
 private:
-	PeerEndpoint						resolvePeer(const std::string &computerName) const;
+	PeerEndpoint						  resolvePeer(const std::string &computerName) const;
 
-	void								run() override;
-	void								receiveAsync();
-	void								handleReceive(const asio::error_code &error, size_t bytesReceived);
-	void								routePacket(const SignalPacket &packet);
-	void								sendPacket(const PeerEndpoint &endpoint, const SignalPacket &packet);
+	void								  run() override;
+	void								  sendPacket(const PeerEndpoint &endpoint, const SignalPacket &packet);
+	void								  receivePackage();
+	void								  routePacket(const SignalPacket &packet);
 
-	SignalPacket						makeEnvelope(SignalType type) const;
+	SignalPacket						  makeEnvelope(SignalType type) const;
+
+	std::shared_ptr<net::IDatagramSocket> socket() const;
 
 
-	asio::io_context				   *mIoContext{nullptr};
-	udp::socket							mSocket;
-	udp::endpoint						mSenderEndpoint;
-	std::array<char, 1024>				mRecvBuffer{};
+	net::DatagramSocketFactory			  mSocketFactory;
 
-	std::string							mLocalComputerName;
-	std::string							mLocalIPv4;
-	int									mBoundPort{0};
+	mutable std::mutex					  mSocketMutex;
+	std::shared_ptr<net::IDatagramSocket> mSocket;
+	std::string							  mLocalComputerName;
+	net::IPv4Address					  mLocalIPv4;
+	std::atomic<int>					  mBoundPort{0};
 
-	std::atomic<bool>					mInitialized{false};
-	SignalingCallbacks					mCallbacks;
-	SocketBoundCallback					mOnSocketBound;
+	std::vector<uint8_t>				  mReceiveBuffer; // signaling thread only
 
-	std::map<std::string, PeerEndpoint> mPeerRegistry; // key = displayName
-	mutable std::mutex					mPeerRegistryMutex;
+	std::atomic<bool>					  mInitialized{false};
+	SignalingConnectionCallbacks		  mConnectionCallbacks;
+	SignalingValidationCallbacks		  mValidationCallbacks;
+	SocketBoundCallback					  mOnSocketBound;
+
+	std::map<std::string, PeerEndpoint>	  mPeerRegistry; // key = displayName
+	mutable std::mutex					  mPeerRegistryMutex;
 };
 
 } // namespace netlink

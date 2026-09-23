@@ -1,7 +1,9 @@
 #include <gtest/gtest.h>
+
 #include <chrono>
 #include <thread>
 
+#include "TestIp.h"
 #include "PeerValidation/PendingValidationStore.h"
 
 using namespace netlink;
@@ -11,9 +13,9 @@ using namespace std::chrono_literals;
 namespace ValidationTests
 {
 
-static DiscoveryEndpoint makeEndpoint(const std::string &name, const std::string &ip = "10.0.0.1", int port = 5000)
+static DiscoveryEndpoint makeEndpoint(const std::string &name, std::string_view ip = "10.0.0.1", int port = 5000)
 {
-	return DiscoveryEndpoint{ip, port, name};
+	return DiscoveryEndpoint{ipv4(ip), port, name};
 }
 
 
@@ -34,7 +36,7 @@ TEST(PendingValidationStore, Add_MakesEntryRetrievableWithCorrectFields)
 	auto entry = store.get("pc-a");
 	ASSERT_TRUE(entry.has_value()) << "An added entry must be retrievable via get()";
 	EXPECT_EQ(entry->computerName, "pc-a");
-	EXPECT_EQ(entry->IPv4, "10.0.0.5");
+	EXPECT_EQ(entry->IPv4, ipv4("10.0.0.5"));
 	EXPECT_EQ(entry->remoteEndpoint.port, 6000);
 	EXPECT_GE(entry->requestTime, before) << "requestTime must be stamped at (or after) the moment add() was called";
 	EXPECT_FALSE(entry->timedout) << "A freshly added entry must not be marked as timed out";
@@ -50,7 +52,7 @@ TEST(PendingValidationStore, Add_Twice_OverwritesPreviousEntry)
 
 	auto entry = store.get("pc-b");
 	ASSERT_TRUE(entry.has_value());
-	EXPECT_EQ(entry->IPv4, "10.0.0.2") << "Adding the same computer name again must overwrite the prior pending entry";
+	EXPECT_EQ(entry->IPv4, ipv4("10.0.0.2")) << "Adding the same computer name again must overwrite the prior pending entry";
 }
 
 

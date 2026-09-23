@@ -6,11 +6,14 @@ set(Test_Directory ${CMAKE_CURRENT_SOURCE_DIR})
 set(Discovery_Tests
     ${Test_Directory}/DiscoveryTests/EndpointTests.cpp 
     ${Test_Directory}/DiscoveryTests/DiscoveryServiceTests.cpp
+    ${Test_Directory}/DiscoveryTests/RegistryTests.cpp
 )
 
 set(Communication_Tests
     ${Test_Directory}/CommunicationTests/RemoteCommunicationTests.cpp
     ${Test_Directory}/CommunicationTests/SignalPacketTests.cpp
+    ${Test_Directory}/CommunicationTests/SignalingServiceTests.cpp
+    ${Test_Directory}/CommunicationTests/MessageFramerTests.cpp
 )
 
 set(Connection_Tests
@@ -30,8 +33,25 @@ set(Utils_Tests
     ${Test_Directory}/UtilsTests/TimeoutServiceTests.cpp
 )
 
+set(Socket_Tests
+    ${Test_Directory}/SocketTests/IPv4AddressTests.cpp
+    ${Test_Directory}/SocketTests/UdpSocketTests.cpp
+    ${Test_Directory}/SocketTests/TcpSocketTests.cpp
+    ${Test_Directory}/SocketTests/FakeDatagramTests.cpp
+)
+
 set(TCP_Tests
     ${Test_Directory}/TCPTests/TCPTransportTests.cpp
+)
+
+set(Integration_Tests
+    ${Test_Directory}/IntegrationTests/NetLinkCoreTests.cpp
+)
+
+set(Test_Fakes
+    ${Test_Directory}/Fakes/TestIp.h
+    ${Test_Directory}/Fakes/FakeDatagramNetwork.h
+    ${Test_Directory}/Fakes/LossyDatagramSocket.h
 )
 
 set(Validation_Tests
@@ -51,11 +71,13 @@ set(All_Tests
     ${Network_Tests}
     ${Utils_Tests}
     ${Validation_Tests}
+    ${Socket_Tests}
     ${TCP_Tests}
+    ${Integration_Tests}
 )
 
 
-add_executable(NetLinkTests ${All_Tests})
+add_executable(NetLinkTests ${All_Tests} ${Test_Fakes})
 
 
 target_link_libraries(NetLinkTests PRIVATE
@@ -63,15 +85,22 @@ target_link_libraries(NetLinkTests PRIVATE
     nlohmann_json::nlohmann_json
 )
 
+if(MSVC)
+    target_compile_options(NetLinkTests PRIVATE /W4)
+else()
+    target_compile_options(NetLinkTests PRIVATE -Wall -Wextra)
+endif()
+
 target_include_directories(NetLinkTests PRIVATE
-    ${CMAKE_SOURCE_DIR}/src/internal
-    ${CMAKE_SOURCE_DIR}/src/internal/Discovery
-    ${CMAKE_SOURCE_DIR}/src/internal/PeerValidation
-    ${CMAKE_SOURCE_DIR}/src/internal/PeerValidation/Checks
-    ${CMAKE_SOURCE_DIR}/src/internal/Util
-    ${asio_SOURCE_DIR}/asio/include
+    ${PROJECT_BINARY_DIR}/generated
+    ${PROJECT_SOURCE_DIR}/src/internal
+    ${PROJECT_SOURCE_DIR}/src/internal/Discovery
+    ${PROJECT_SOURCE_DIR}/src/internal/PeerValidation
+    ${PROJECT_SOURCE_DIR}/src/internal/PeerValidation/Checks
+    ${PROJECT_SOURCE_DIR}/src/internal/Util
+    ${Test_Directory}/Fakes
 )
 
 AddTests(NetLinkTests)
 
-source_group(TREE ${Test_Directory} FILES ${All_Tests})
+source_group(TREE ${Test_Directory} FILES ${All_Tests} ${Test_Fakes})

@@ -1,59 +1,48 @@
 /*
   ==============================================================================
 	Module:         TCPServer
-	Description:    Server implementation used for the multiplayer mode
+	Description:    Accepts inbound TCP connections and wraps them in TCPSessions
   ==============================================================================
 */
 
-
 #pragma once
 
-#include <asio.hpp>
+#include <atomic>
+#include <memory>
+#include <mutex>
+#include <thread>
 
 #include "Transport/TransportInterfaces.h"
-#include "TCPSession.h"
 
 
-using asio::ip::tcp;
+namespace netlink
+{
 
-
-/**
- * @brief	Implements a TCP server that listens for and accepts incoming connections,
- *			creating TCPSession instances for each accepted socket.
- */
-class TCPServer : public IServer
+class TCPServer final : public IServer
 {
 public:
-	TCPServer(asio::io_context &ioContext);
-	~TCPServer();
+	TCPServer() = default;
+	~TCPServer() override;
+	TCPServer(const TCPServer &)			= delete;
+	TCPServer &operator=(const TCPServer &) = delete;
 
-	/**
-	 * @brief	Begin asynchronous accept loop. Each accepted connection invokes session handler.
-	 */
-	void startAccept() override;
+	void	   setSessionHandler(SessionHandler handler) override;
 
-	int	 getBoundPort() const override;
+	bool	   start(const net::IPv4Address &localAddress) override;
+	void	   stop() override;
 
-	/**
-	 * @brief	Register callback for accepted session creation.
-	 */
-	void setSessionHandler(SessionHandler handler) override;
-
-	/**
-	 * @brief	Respond to a pending connection request (e.g., handshake).
-	 * @param	accepted -> True to allow session progression, false to close.
-	 */
-	void respondToConnectionRequest(bool accepted) override;
-
+	int		   getBoundPort() const override { return mBoundPort.load(); }
 
 private:
-	asio::io_context		   &mIoContext;
+	struct AcceptState;
 
-	tcp::acceptor				mAcceptor;
+	static void					 acceptLoop(const std::shared_ptr<AcceptState> &state);
 
-	int							mBoundPort{0};
-
-	std::shared_ptr<TCPSession> mPendingSession;
-
-	SessionHandler				mSessionHandler;
+	std::mutex					 mMutex;
+	std::shared_ptr<AcceptState> mState;
+	std::thread					 mThread;
+	SessionHandler				 mSessionHandler;
+	std::atomic<int>			 mBoundPort{0};
 };
+
+} // namespace netlink
