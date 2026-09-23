@@ -31,10 +31,16 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang-tidy ninja-build jq libnl-genl-3-dev libnl-3-dev
+          sudo apt-get install -y clang clang-tidy libc++-dev libc++abi-dev ninja-build jq libnl-genl-3-dev libnl-3-dev
 
       - name: Configure
-        run: cmake -S . -B build -G Ninja -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DNETLINK_BUILD_TESTS=OFF -DNETLINK_ENABLE_LOGGING=ON
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_CXX_COMPILER=clang++
+          -DCMAKE_CXX_FLAGS=-stdlib=libc++
+          -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+          -DNETLINK_BUILD_TESTS=OFF
+          -DNETLINK_ENABLE_LOGGING=ON
 
       - name: Run clang-tidy
         run: |
