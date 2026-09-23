@@ -39,7 +39,7 @@ jobs:
       - name: Run clang-tidy
         run: |
           status=0
-          for f in $(jq -r '.[].file' build/compile_commands.json | grep -v '/_deps/'); do
+          for f in $(jq -r '.[].file' build/compile_commands.json | grep -v -e '/_deps/' -e '/\.cpm-cache/'); do
             echo "::group::clang-tidy $f"
             if ! clang-tidy -p build "$f"; then
               status=1
