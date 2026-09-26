@@ -37,16 +37,18 @@ struct MessageKey
 
 
 /*
- Packet head decoding:
+ Packet header decoding:
 
-					0	u16		magic 0x4E4C ("NL")
-					2	u8		version
-					3	u8		flags
-					4	u32		srcIncarnation
-					8	u32		dstIncarnation (0 = unknown)
-					12	u64		seq (message key) (20 bytes)
-[flags.Fragmented]	20	u16		fragIndex
-					22	u16		fragCount (24 bytes)
+	0   u16   magic (0x4E4C = "NL")
+	2   u8    version
+	3   u8    flags
+	4   u32   srcIncarnation
+	8   u32   dstIncarnation   (0 = sender doesn't know the receiver's incarnation yet)
+	12  u64   seq              → offset 12 + 8 bytes = 20 (matches BaseHeaderSize)
+
+	[only if flags.isFragmented()]
+	20  u16   fragIndex
+	22  u16   fragCount        → 20 + 4 bytes = 24 (matches BaseHeaderSize + FragmentExtensionSize)
  */
 struct PacketHeader
 {
@@ -88,7 +90,7 @@ inline std::vector<uint8_t> encodePacket(const PacketHeader &header, std::span<c
 	}
 
 	if (!body.empty())
-		std::copy(body.begin(), body.end(), datagram.begin() + static_cast<std::ptrdiff_t>(header.encodedSize()));
+		std::ranges::copy(body, datagram.begin() + static_cast<std::ptrdiff_t>(header.encodedSize()));
 
 	return datagram;
 }
