@@ -37,7 +37,7 @@ static DiscoveryConfig makeConfig(const std::string &name = "pc-a", std::string_
 	cfg.displayName		 = name;
 	cfg.localIPv4		 = ipv4(ip);
 	cfg.discoveryPort	 = discoveryPort;
-	cfg.signalingPort	 = sigPort;
+	cfg.channelPort		 = sigPort;
 	cfg.broadcastAddress = ipv4("127.0.0.1"); // loopback avoids real broadcast during tests
 	return cfg;
 }
@@ -314,12 +314,12 @@ TEST(DiscoveryService, TwoServices_DiscoverEachOtherOverLoopback)
 class FakeNetworkDiscoveryTest : public ::testing::Test
 {
 protected:
-	static DiscoveryConfig makeLanConfig(const std::string &name, std::string_view ip, int signalingPort)
+	static DiscoveryConfig makeLanConfig(const std::string &name, std::string_view ip, int channelPort)
 	{
 		DiscoveryConfig cfg;
 		cfg.displayName		 = name;
 		cfg.localIPv4		 = ipv4(ip);
-		cfg.signalingPort	 = signalingPort;
+		cfg.channelPort		 = channelPort;
 		cfg.discoveryPort	 = 5555;
 		cfg.broadcastAddress = ipv4(FakeNet::BroadcastAddress);
 		return cfg;
@@ -373,7 +373,7 @@ TEST_F(FakeNetworkDiscoveryTest, TwoHosts_DiscoverEachOther)
 	const auto seenByA = foundByA.snapshot();
 	EXPECT_EQ(seenByA[0].displayName, "pc-b");
 	EXPECT_EQ(seenByA[0].IPAddress, ipv4("10.0.0.2"));
-	EXPECT_EQ(seenByA[0].port, 6002) << "The announced port is the signaling port";
+	EXPECT_EQ(seenByA[0].port, 6002) << "The announced port is the channel port";
 }
 
 
@@ -399,7 +399,7 @@ TEST_F(FakeNetworkDiscoveryTest, OwnAnnouncement_IsIgnored_AndRepeatsDoNotRetrig
 }
 
 
-TEST_F(FakeNetworkDiscoveryTest, ChangedSignalingPort_IsReannouncedAndReported)
+TEST_F(FakeNetworkDiscoveryTest, ChangedChannelPort_IsReannouncedAndReported)
 {
 	svcA.setOnRemoteFound([this](const DiscoveryEndpoint &ep) { foundByA.add(ep); });
 
@@ -410,7 +410,7 @@ TEST_F(FakeNetworkDiscoveryTest, ChangedSignalingPort_IsReannouncedAndReported)
 
 	ASSERT_TRUE(waitUntil([this] { return foundByA.count() == 1; }, 3s));
 
-	// pc-b rebinds its signaling socket (e.g. adapter change): no socket rebind, but an immediate re-announcement
+	// pc-b rebinds its channel socket (e.g. adapter change): no socket rebind, but an immediate re-announcement
 	ASSERT_TRUE(svcB.init(makeLanConfig("pc-b", "10.0.0.2", 7002)));
 
 	ASSERT_TRUE(waitUntil([this] { return foundByA.count() == 2; }, 3s)) << "An updated remote must be reported again";

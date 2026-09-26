@@ -9,10 +9,20 @@ set(Discovery_Tests
     ${Test_Directory}/DiscoveryTests/RegistryTests.cpp
 )
 
+set(Channel_Tests
+    ${Test_Directory}/ChannelTests/PacketFlagsTests.cpp
+    ${Test_Directory}/ChannelTests/PacketCodecTests.cpp
+    ${Test_Directory}/ChannelTests/BoundedQueueTests.cpp
+    ${Test_Directory}/ChannelTests/SequenceBufferTests.cpp
+    ${Test_Directory}/ChannelTests/RttEstimatorTests.cpp
+    ${Test_Directory}/ChannelTests/FragmentationServiceTests.cpp
+    ${Test_Directory}/ChannelTests/HeartbeatServiceTests.cpp
+    ${Test_Directory}/ChannelTests/ReliableLinkTests.cpp
+    ${Test_Directory}/ChannelTests/SignalPacketTests.cpp
+    ${Test_Directory}/ChannelTests/PeerChannelTests.cpp
 )
 
 set(Connection_Tests
-    ${Test_Directory}/ConnectionTests/RetryPolicyTests.cpp
     ${Test_Directory}/ConnectionTests/ReadySyncTrackerTests.cpp
     ${Test_Directory}/ConnectionTests/ConnectionServiceTests.cpp
 )
@@ -55,6 +65,7 @@ set(Validation_Tests
 
 set(All_Tests
     ${Discovery_Tests}
+    ${Channel_Tests}
     ${Connection_Tests}
     ${Network_Tests}
     ${Utils_Tests}
