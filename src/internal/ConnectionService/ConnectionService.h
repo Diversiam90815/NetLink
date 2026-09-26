@@ -17,16 +17,12 @@
 #include <string>
 
 #include "ConnectionPhase.h"
-#include "RoleNegotiation.h"
-#include "ConnectionRetryPolicy.h"
 #include "ReadySyncTracker.h"
+#include "Channel/PeerChannel.h"
 #include "PeerValidation/ValidationResult.h"
 #include "PeerValidation/ValidatedPeerRegistry.h"
 #include "Discovery/DiscoveryEndpoint.h"
-#include "Signaling/SignalingService.h"
 #include "TimeoutService/TimeoutService.h"
-#include "Transport/TransportFactory.h"
-#include "Transport/TransportInterfaces.h"
 #include "Util/TaskQueue.h"
 
 
@@ -41,21 +37,17 @@ struct ConnectionServiceCallbacks
 
 namespace ConnectionTimeouts
 {
-constexpr const char *Connection = "connection";
-constexpr const char *Invitation = "invitation";
-constexpr const char *ReadyFlag	 = "ready_flag";
+constexpr auto Invitation = "invitation";
+constexpr auto ReadyFlag  = "ready_flag";
 } // namespace ConnectionTimeouts
 
 
 struct ConnectionConfig
 {
-	int						  maxConnectionRetries{3};
-	std::chrono::milliseconds retryDelay{300};
-	bool					  autoAcceptConnection{false}; // If enabled, an incoming connection is automatically enabled if valid
+	bool autoAcceptConnection{false}; // If enabled, an incoming connection is automatically enabled if valid
 
-	int						  invitationTimeoutMs{5000};
-	int						  connectionTimeoutMs{10000};
-	int						  readyFlagTimeoutMs{3000};
+	int	 invitationTimeoutMs{5000};
+	int	 readyFlagTimeoutMs{5000};	  // from accepting until the remote's ready flag arrived
 };
 
 
@@ -66,33 +58,25 @@ struct ConnectionRequest
 
 	DiscoveryEndpoint					  remote{};
 	bool								  isInitiator{false};
-	SessionRole							  localRole;
 
 	std::chrono::steady_clock::time_point requestTime;
 	std::chrono::steady_clock::time_point lastActivityTime;
 
-	int									  dataPort{0}; // TCP port announced by the acceptor (remote.port is the signaling port)
-
 	bool								  localReadyFlag{false};
 	bool								  remoteReadyFlag{false};
-
-	ISession::pointer					  session{};
-	std::unique_ptr<IServer>			  server;
-	std::unique_ptr<IClient>			  client;
 };
 
 
 class ConnectionService
 {
 public:
-	ConnectionService(SignalingService &signaling, ITransportFactory &transportFactory);
+	explicit ConnectionService(PeerChannel &channel);
 	~ConnectionService();
 
 	// Configuration
 	void							 setCallbacks(ConnectionServiceCallbacks cb) { mCallbacks = std::move(cb); }
 	void							 setConfig(const ConnectionConfig &config);
 	void							 setLocalIP(const net::IPv4Address &ip);
-	void							 setTransportFactory(ITransportFactory &transportFactory);
 
 	// Connection management
 	bool							 initiateConnection(const std::string &computerName);
@@ -109,15 +93,14 @@ public:
 	ConnectionStateInternal			 getConnectionState() const;
 
 	// Sending helper
-	bool							 sendConnectionInvitation(const std::string &computerName);
-	bool							 sendDisconnectMessage(const std::string &computerName);
-	bool							 answerInvitation(const std::string &computerName, const bool connectionAccepted, const std::string &reason = "");
-	bool							 sendConnectionReadyFlag(const std::string &computerName, const bool flag);
+	bool							 sendConnectionInvitation(const std::string &computerName) const;
+	bool							 sendDisconnectMessage(const std::string &computerName) const;
+	bool							 answerInvitation(const std::string &computerName, const bool connectionAccepted, const std::string &reason = "") const;
+	bool							 sendConnectionReadyFlag(const std::string &computerName, const bool flag) const;
 
-	// Signals from the remote (thread-safe, wired to SignalingService by the owner)
+	// Signals from the remote (thread-safe, wired to PeerChannel by the owner)
 	void							 onDisconnectReceived(const std::string &computerName);
 	void							 onReadyFlagReceived(const std::string &computerName);
-	void							 onDataPortReceived(const std::string &computerName, int dataPort);
 
 	// Receiving helper
 	void							 onReceivedInvitation(const std::string &computerName);
@@ -127,20 +110,20 @@ public:
 	// Peer validated
 	void							 onPeerValidated(const ValidationResult &peerValidation);
 
-	// The established data transport was lost (remote closed, reset, protocol error)
-	void							 onTransportDisconnected(const std::string &reason);
+	// The peer channel lost the remote (unacknowledged messages, silence, restart)
+	void							 onPeerLost(const std::string &computerName, const std::string &reason);
 
 private:
 	// State management
 	void							 clearCurrentConnection();
 
 	// Helper methods
-	bool							 retryConnection();
-	void							 notifyStatus(ConnectionStatusUpdate::Type type, const std::string &message = "", bool success = true);
-	void							 notifyStatus(ConnectionStatusUpdate update);
+	void							 notifyStatus(ConnectionStatusUpdate::Type type, const std::string &message = "", bool success = true) const;
+	void							 notifyStatus(ConnectionStatusUpdate update) const;
 
-	// Define role
-	bool							 determineLocalSessionRole();
+	// Both sides after the invitation was accepted: announce readiness, complete once the remote is ready too
+	bool							 openSession();
+	void							 completeSessionIfReady();
 
 	// Timeouts (caller must hold mConnectingMutex). Expiry is handled on the task queue.
 	void							 armTimeout(const TimeoutKey &key, int timeoutMs);
@@ -148,12 +131,8 @@ private:
 	void							 disarmAllTimeouts();
 	void							 onTimeout(const TimeoutKey &key);
 
-	// Runs on the task queue once the transport produced a session
-	void							 onTransportEstablished(const ISession::pointer &session);
-
 	// Dependencies
-	SignalingService				&mSignaling;
-	ITransportFactory				*mTransportFactory;
+	PeerChannel						&mChannel;
 
 	// Configuration and callbacks
 	ConnectionConfig				 mConfig;
@@ -162,7 +141,6 @@ private:
 
 	TaskQueue						 mTaskQueue;
 	ValidatedPeerRegistry			 mValidatedPeers;
-	ConnectionRetryPolicy			 mRetryPolicy;
 	ReadySyncTracker				 mReadySync;
 	TimeoutService					 mTimeoutService;
 	std::map<TimeoutKey, uint64_t>	 mArmedTimeouts; // generation per armed timeout, guarded by mConnectingMutex

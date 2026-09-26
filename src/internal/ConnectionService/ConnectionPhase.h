@@ -7,8 +7,10 @@
 
 #pragma once
 
+#include <chrono>
+#include <string>
+
 #include "Discovery/DiscoveryEndpoint.h"
-#include "Transport/TransportInterfaces.h"
 
 
 namespace netlink
@@ -16,17 +18,16 @@ namespace netlink
 
 enum class ConnectionStateInternal
 {
-	Idle,				   // No connection
-	Initiated,			   // Started connection flow
-	InvitationSent,		   // we sent invitation
-	InvitationReceived,	   // we received invitation
-	Accepted,			   // Invitation accepted
-	Declined,			   // Invitation declined
-	EstablishingTransport, // determining local session role
-	AwaitingReadyFlag,	   // waiting for remote to be ready
-	Connected,			   // Connection established
-	Failed,				   // connection failed
-	Disconnecting,		   // Teardown in progress
+	Idle,				// No connection
+	Initiated,			// Started connection flow
+	InvitationSent,		// we sent invitation
+	InvitationReceived, // we received invitation
+	Accepted,			// Invitation accepted
+	Declined,			// Invitation declined
+	AwaitingReadyFlag,	// invitation accepted, waiting for the remote's ready flag
+	Connected,			// Connection established
+	Failed,				// connection failed
+	Disconnecting,		// Teardown in progress
 };
 
 
@@ -51,7 +52,6 @@ struct ConnectionStatusUpdate
 	DiscoveryEndpoint					  endpoint;
 	std::string							  message;
 	bool								  success{true};
-	ISession::pointer					  session{};   // populated for Type::Established only
 
 	// Timing info
 	std::chrono::steady_clock::time_point timestamp;

@@ -10,7 +10,7 @@
 #include "NetLinkLog.h"
 
 
-netlink::ConnectionService::ConnectionService(SignalingService &signaling, ITransportFactory &transportFactory) : mSignaling(signaling), mTransportFactory(&transportFactory)
+netlink::ConnectionService::ConnectionService(PeerChannel &channel) : mChannel(channel)
 {
 	mTaskQueue.start();
 }
@@ -53,22 +53,9 @@ void netlink::ConnectionService::onReadyFlagReceived(const std::string &computer
 }
 
 
-void netlink::ConnectionService::onDataPortReceived(const std::string &computerName, int dataPort)
-{
-	std::lock_guard<std::mutex> lock(mConnectingMutex);
-
-	if (!mCurrentRequest.has_value() || mCurrentRequest->remote.displayName != computerName)
-		return;
-
-	NETLINK_LOG_INFO("Received data port {} from {}", dataPort, computerName);
-	mCurrentRequest->dataPort = dataPort;
-}
-
-
 netlink::ConnectionService::~ConnectionService()
 {
 	{
-		// Tear down timeouts and transports first: their threads post into the task queue
 		std::lock_guard<std::mutex> lock(mConnectingMutex);
 		disarmAllTimeouts();
 		mCurrentRequest.reset();
@@ -81,7 +68,6 @@ netlink::ConnectionService::~ConnectionService()
 void netlink::ConnectionService::setConfig(const ConnectionConfig &config)
 {
 	mConfig = config;
-	mRetryPolicy.setMaxRetries(mConfig.maxConnectionRetries);
 }
 
 
@@ -104,7 +90,7 @@ bool netlink::ConnectionService::initiateConnection(const std::string &computerN
 	NETLINK_LOG_INFO("Initiating connection to: {}", computerName);
 
 	// Get validation result
-	auto validationResult = mValidatedPeers.get(computerName);
+	const auto validationResult = mValidatedPeers.get(computerName);
 	if (!validationResult.has_value())
 	{
 		NETLINK_LOG_ERROR("No validation result for: {}", computerName);
@@ -129,7 +115,6 @@ bool netlink::ConnectionService::initiateConnection(const std::string &computerN
 
 	mCurrentRequest			 = std::move(request);
 	mConnecting.store(true);
-	mRetryPolicy.reset();
 
 	// send invitation
 	notifyStatus(ConnectionStatusUpdate::Type::Initiated, "Connection initiated to " + computerName);
@@ -148,7 +133,7 @@ bool netlink::ConnectionService::initiateConnection(const std::string &computerN
 	mCurrentRequest->state = ConnectionStateInternal::InvitationSent;
 
 	// Start timeout waiting for remote to respond to our invitation
-	armTimeout({ConnectionTimeouts::Invitation, computerName}, mConfig.invitationTimeoutMs);
+	armTimeout({.category = ConnectionTimeouts::Invitation, .identifier = computerName}, mConfig.invitationTimeoutMs);
 
 	NETLINK_LOG_INFO("Connection invitation sent to {}", computerName);
 	return true;
@@ -179,8 +164,8 @@ bool netlink::ConnectionService::acceptIncomingConnection(const std::string &com
 
 	NETLINK_LOG_INFO("Accepting invitation from {}", computerName);
 
-	// Start connection timeout
-	armTimeout({ConnectionTimeouts::Connection, computerName}, mConfig.connectionTimeoutMs);
+	// The pending invitation is answered now
+	disarmTimeouts([&computerName](const TimeoutKey &key) { return key == TimeoutKey{.category = ConnectionTimeouts::Invitation, .identifier = computerName}; });
 
 	// send acceptance
 	notifyStatus(ConnectionStatusUpdate::Type::Accepted, "Invitation from " + computerName + " accepted");
@@ -193,12 +178,11 @@ bool netlink::ConnectionService::acceptIncomingConnection(const std::string &com
 		return false;
 	}
 
-	mCurrentRequest->state = ConnectionStateInternal::EstablishingTransport;
-
-	if (!determineLocalSessionRole())
+	// The answer is queued before the ready flag, and the channel delivers both in order
+	if (!openSession())
 	{
-		NETLINK_LOG_ERROR("Failed to start transport role establishing");
-		notifyStatus(ConnectionStatusUpdate::Type::Failed, "Failed to start transport role establishing", false);
+		NETLINK_LOG_ERROR("Failed to open the session with {}", computerName);
+		notifyStatus(ConnectionStatusUpdate::Type::Failed, "Failed to open the session", false);
 		clearCurrentConnection();
 		return false;
 	}
@@ -219,7 +203,9 @@ bool netlink::ConnectionService::declineIncomingConnection(const std::string &co
 
 	NETLINK_LOG_INFO("Declining connection from {}: {}", computerName, reason.empty() ? "No reason given." : reason);
 
-	answerInvitation(computerName, false, reason);
+	if (const bool result = answerInvitation(computerName, false, reason); !result)
+		NETLINK_LOG_ERROR("Connection decline could not be sent!");
+
 	notifyStatus(ConnectionStatusUpdate::Type::Declined, reason);
 
 	clearCurrentConnection();
@@ -243,7 +229,7 @@ bool netlink::ConnectionService::closeConnection(const std::string &computerName
 	if (computerName.empty())
 		remote = mCurrentRequest->remote.displayName;
 
-	// validate remote's name unless empty (alwas force close if left empty)
+	// validate remote's name unless empty (always force close if left empty)
 	if (!computerName.empty() && mCurrentRequest->remote.displayName != computerName)
 	{
 		NETLINK_LOG_WARNING("Connection close missmatch: request: {}, current: {}", computerName, mCurrentRequest->remote.displayName);
@@ -270,7 +256,8 @@ bool netlink::ConnectionService::closeConnection(const std::string &computerName
 
 	notifyStatus(ConnectionStatusUpdate::Type::Closing, "Closing connection");
 
-	sendDisconnectMessage(remote);
+	if (const bool result = sendDisconnectMessage(remote); !result)
+		NETLINK_LOG_DEBUG("Connection disconnect message could no t be sent!");
 
 	notifyStatus(ConnectionStatusUpdate::Type::Closed, "Connection closed");
 	clearCurrentConnection();
@@ -308,11 +295,9 @@ netlink::ConnectionStateInternal netlink::ConnectionService::getConnectionState(
 }
 
 
-bool netlink::ConnectionService::sendConnectionInvitation(const std::string &computerName)
+bool netlink::ConnectionService::sendConnectionInvitation(const std::string &computerName) const
 {
-	auto result = mValidatedPeers.get(computerName);
-
-	if (!result.has_value())
+	if (const auto result = mValidatedPeers.get(computerName); !result.has_value())
 	{
 		NETLINK_LOG_ERROR("No valid result for {}", computerName);
 		return false;
@@ -320,57 +305,43 @@ bool netlink::ConnectionService::sendConnectionInvitation(const std::string &com
 
 	NETLINK_LOG_DEBUG("Sending connect request to {}", computerName);
 
-	mSignaling.sendConnectRequest(computerName);
-
-	return true;
+	return mChannel.sendConnectRequest(computerName);
 }
 
 
-bool netlink::ConnectionService::sendDisconnectMessage(const std::string &computerName)
+bool netlink::ConnectionService::sendDisconnectMessage(const std::string &computerName) const
 {
-	auto result = mValidatedPeers.get(computerName);
-
-	if (!result.has_value())
+	if (const auto result = mValidatedPeers.get(computerName); !result.has_value())
 	{
 		NETLINK_LOG_WARNING("sendDisconnectMessage: no validation result for {}", computerName);
 		return false;
 	}
 
-	mSignaling.sendDisconnect(computerName);
-
-	return true;
+	return mChannel.sendDisconnect(computerName);
 }
 
 
-bool netlink::ConnectionService::answerInvitation(const std::string &computerName, const bool connectionAccepted, const std::string &reason)
+bool netlink::ConnectionService::answerInvitation(const std::string &computerName, const bool connectionAccepted, const std::string &reason) const
 {
-	auto result = mValidatedPeers.get(computerName);
-
-	if (!result.has_value())
+	if (const auto result = mValidatedPeers.get(computerName); !result.has_value())
 	{
 		NETLINK_LOG_ERROR("answerInvitation: no validation result for {}", computerName);
 		return false;
 	}
 
-	mSignaling.sendConnectAnswer(computerName, connectionAccepted, reason);
-
-	return true;
+	return mChannel.sendConnectAnswer(computerName, connectionAccepted, reason);
 }
 
 
-bool netlink::ConnectionService::sendConnectionReadyFlag(const std::string &computerName, const bool flag)
+bool netlink::ConnectionService::sendConnectionReadyFlag(const std::string &computerName, const bool flag) const
 {
-	auto result = mValidatedPeers.get(computerName);
-
-	if (!result.has_value())
+	if (const auto result = mValidatedPeers.get(computerName); !result.has_value())
 	{
 		NETLINK_LOG_ERROR("sendConnectionReadyFlag: no validation result for {}", computerName);
 		return false;
 	}
 
-	mSignaling.sendReadyFlag(computerName, flag);
-
-	return true;
+	return mChannel.sendReadyFlag(computerName, flag);
 }
 
 
@@ -381,15 +352,17 @@ void netlink::ConnectionService::onReceivedInvitation(const std::string &compute
 	if (isConnected() || isConnecting())
 	{
 		NETLINK_LOG_WARNING("Received invitation from {} but already busy. We are declining..", computerName);
-		answerInvitation(computerName, false, "Already in a connection");
+		if (const bool result = answerInvitation(computerName, false, "Already in a connection"); !result)
+			NETLINK_LOG_ERROR("Could not decline invite!");
 		return;
 	}
 
-	auto validationResult = mValidatedPeers.get(computerName);
+	const auto validationResult = mValidatedPeers.get(computerName);
 	if (!validationResult.has_value() || !validationResult->canConnect)
 	{
 		NETLINK_LOG_WARNING("Received invitation from unvalidated peer {}. Declining..", computerName);
-		answerInvitation(computerName, false, "Peer not validated");
+		if (const bool result = answerInvitation(computerName, false, "Peer not validated"); !result)
+			NETLINK_LOG_ERROR("Could not decline invite!");
 		return;
 	}
 
@@ -416,13 +389,12 @@ void netlink::ConnectionService::onReceivedInvitation(const std::string &compute
 	// Ask the app (exactly once) and start a timeout in case it never responds
 	notifyStatus(ConnectionStatusUpdate::Type::InvitationReceived, "Invitation from " + computerName);
 
-	armTimeout({ConnectionTimeouts::Invitation, computerName}, mConfig.invitationTimeoutMs);
+	armTimeout({.category = ConnectionTimeouts::Invitation, .identifier = computerName}, mConfig.invitationTimeoutMs);
 }
 
 
 void netlink::ConnectionService::onReceivedAnswerToInvite(const std::string &computerName, const bool connectionAccepted, const std::string &reason)
 {
-
 	std::lock_guard<std::mutex> lock(mConnectingMutex);
 
 	if (!mCurrentRequest.has_value())
@@ -438,7 +410,7 @@ void netlink::ConnectionService::onReceivedAnswerToInvite(const std::string &com
 	}
 
 	// cancel invitation timeout
-	disarmTimeouts([&computerName](const TimeoutKey &key) { return key == TimeoutKey{ConnectionTimeouts::Invitation, computerName}; });
+	disarmTimeouts([&computerName](const TimeoutKey &key) { return key == TimeoutKey{.category = ConnectionTimeouts::Invitation, .identifier = computerName}; });
 
 	if (connectionAccepted)
 	{
@@ -449,14 +421,10 @@ void netlink::ConnectionService::onReceivedAnswerToInvite(const std::string &com
 
 		notifyStatus(ConnectionStatusUpdate::Type::Accepted, "Connection accepted by " + computerName);
 
-		// start connection timeout
-		armTimeout({ConnectionTimeouts::Connection, computerName}, mConfig.connectionTimeoutMs);
-
-		// start role negotiation
-		if (!determineLocalSessionRole())
+		if (!openSession())
 		{
-			NETLINK_LOG_ERROR("Failed to start role negotiation!");
-			notifyStatus(ConnectionStatusUpdate::Type::Failed, "Session role negotiation failed", false);
+			NETLINK_LOG_ERROR("Failed to open the session with {}", computerName);
+			notifyStatus(ConnectionStatusUpdate::Type::Failed, "Failed to open the session", false);
 			clearCurrentConnection();
 		}
 	}
@@ -476,29 +444,19 @@ void netlink::ConnectionService::onReceivedConnectionReadyFlag(const std::string
 {
 	// Caller must hold mConnectingMutex
 
-	if (!mCurrentRequest.has_value())
+	if (!mCurrentRequest.has_value() || mCurrentRequest->remote.displayName != computerName)
 	{
-		NETLINK_LOG_WARNING("Received ready flag but no active request");
+		NETLINK_LOG_WARNING("Received ready flag from {} but no matching request", computerName);
 		return;
 	}
 
 	NETLINK_LOG_INFO("Received ready flag from {}", computerName);
 
-	disarmTimeouts([&computerName](const TimeoutKey &key) { return key == TimeoutKey{ConnectionTimeouts::ReadyFlag, computerName}; });
 	mReadySync.setRemoteReady();
+	mCurrentRequest->remoteReadyFlag = true;
 
-	// If we are the Connector, the Acceptor's data port arrived before its ready flag
-	if (mCurrentRequest->localRole == SessionRole::Connector && mCurrentRequest->client)
-	{
-		if (mCurrentRequest->dataPort == 0)
-		{
-			NETLINK_LOG_ERROR("Connector: ready flag from {} without data port", computerName);
-			return;
-		}
-
-		NETLINK_LOG_INFO("Connector: connecting to {}:{}", mCurrentRequest->remote.IPAddress.toString(), mCurrentRequest->dataPort);
-		mCurrentRequest->client->connect(mLocalIP, mCurrentRequest->remote.IPAddress, static_cast<unsigned short>(mCurrentRequest->dataPort));
-	}
+	// Arriving before our own session opened, it completes in openSession()
+	completeSessionIfReady();
 }
 
 
@@ -516,38 +474,12 @@ void netlink::ConnectionService::clearCurrentConnection()
 	mCurrentRequest.reset();
 	mConnected.store(false);
 	mConnecting.store(false);
-	mRetryPolicy.reset();
 	disarmAllTimeouts();
 	mReadySync.reset();
 }
 
 
-bool netlink::ConnectionService::retryConnection()
-{
-	if (!mCurrentRequest.has_value())
-		return false;
-
-	if (!mRetryPolicy.recordAttempt())
-	{
-		NETLINK_LOG_WARNING("Max connection retried ({}) reached!", mConfig.maxConnectionRetries);
-
-		notifyStatus(ConnectionStatusUpdate::Type::Failed, "Max retries reached", false);
-		return false;
-	}
-
-	NETLINK_LOG_INFO("Retrying connection (attempt {}/{})", mRetryPolicy.attempts(), mConfig.maxConnectionRetries);
-
-	// Re-establish transport layer
-	mCurrentRequest->server.reset();
-	mCurrentRequest->client.reset();
-	mCurrentRequest->state = ConnectionStateInternal::EstablishingTransport;
-	mReadySync.reset();
-
-	return determineLocalSessionRole();
-}
-
-
-void netlink::ConnectionService::notifyStatus(ConnectionStatusUpdate::Type type, const std::string &message, bool success)
+void netlink::ConnectionService::notifyStatus(const ConnectionStatusUpdate::Type type, const std::string &message, const bool success) const
 {
 	ConnectionStatusUpdate update;
 	update.type	   = type;
@@ -557,7 +489,7 @@ void netlink::ConnectionService::notifyStatus(ConnectionStatusUpdate::Type type,
 }
 
 
-void netlink::ConnectionService::notifyStatus(ConnectionStatusUpdate update)
+void netlink::ConnectionService::notifyStatus(ConnectionStatusUpdate update) const
 {
 	update.timestamp = std::chrono::steady_clock::now();
 
@@ -575,159 +507,73 @@ void netlink::ConnectionService::notifyStatus(ConnectionStatusUpdate update)
 }
 
 
-bool netlink::ConnectionService::determineLocalSessionRole()
+bool netlink::ConnectionService::openSession()
 {
-	// Caller must hold mutex
+	// Caller must hold mConnectingMutex
 
 	if (!mCurrentRequest.has_value())
 		return false;
 
-	const net::IPv4Address &remoteIP = mCurrentRequest->remote.IPAddress;
-	SessionRole				role	 = determineRole(mLocalIP, remoteIP);
-	mCurrentRequest->localRole		 = role;
+	const std::string remote = mCurrentRequest->remote.displayName;
 
-	NETLINK_LOG_INFO("Session role for {}: {}", remoteIP.toString(), role == SessionRole::Acceptor ? "Acceptor" : "Connector");
+	mCurrentRequest->state	 = ConnectionStateInternal::AwaitingReadyFlag;
+	notifyStatus(ConnectionStatusUpdate::Type::Establishing, "Establishing session with " + remote);
 
-	if (role == SessionRole::Acceptor)
-	{
-		auto server = mTransportFactory->createServer();
-
-		// Transport callbacks run on transport threads
-		server->setSessionHandler([this](ISession::pointer session) { mTaskQueue.post([this, session]() { onTransportEstablished(session); }); });
-
-		if (!server->start(mLocalIP))
-		{
-			NETLINK_LOG_ERROR("Acceptor: failed to listen on {}", mLocalIP.toString());
-			return false;
-		}
-
-		int boundPort = server->getBoundPort();
-		NETLINK_LOG_INFO("Acceptor: Listening on port {}", boundPort);
-
-		mCurrentRequest->server = std::move(server);
-
-		// communicate bound port
-		mSignaling.sendDataPort(mCurrentRequest->remote.displayName, boundPort);
-
-		sendConnectionReadyFlag(mCurrentRequest->remote.displayName, true);
-
-		armTimeout({ConnectionTimeouts::ReadyFlag, mCurrentRequest->remote.displayName}, mConfig.readyFlagTimeoutMs);
-	}
-	else if (role == SessionRole::Connector)
-	{
-		auto client = mTransportFactory->createClient();
-
-		client->setConnectHandler([this](ISession::pointer session) { mTaskQueue.post([this, session]() { onTransportEstablished(session); }); });
-
-		client->setConnectTimeoutHandler(
-			[this]()
-			{
-				NETLINK_LOG_ERROR("TCP connection attempt timed out or was refused");
-				mTaskQueue.post(
-					[this]()
-					{
-						std::lock_guard<std::mutex> lock(mConnectingMutex);
-						notifyStatus(ConnectionStatusUpdate::Type::Failed, "TCP connection timed out or refused", false);
-						clearCurrentConnection();
-					});
-			});
-
-		mCurrentRequest->client = std::move(client);
-
-		sendConnectionReadyFlag(mCurrentRequest->remote.displayName, true);
-
-		// If the acceptor's dataport + readyflag already arrived before we got here, connect now
-		if (mReadySync.isRemoteReady() && mCurrentRequest->dataPort != 0)
-		{
-			NETLINK_LOG_INFO("Connector: remote already ready, connecting immediately to {}:{}", mCurrentRequest->remote.IPAddress.toString(), mCurrentRequest->dataPort);
-			mCurrentRequest->client->connect(mLocalIP, mCurrentRequest->remote.IPAddress, static_cast<unsigned short>(mCurrentRequest->dataPort));
-		}
-		else
-		{
-			// Wait for ReadyFlag from Acceptor (handled in onReceivedConnectionReadyFlag)
-			armTimeout({ConnectionTimeouts::ReadyFlag, mCurrentRequest->remote.displayName}, mConfig.readyFlagTimeoutMs);
-		}
-	}
-	else
-	{
-		NETLINK_LOG_WARNING("Unknwon session role determined..");
+	if (!sendConnectionReadyFlag(remote, true))
 		return false;
-	}
 
+	mReadySync.setLocalReady();
+	mCurrentRequest->localReadyFlag = true;
+
+	armTimeout({.category = ConnectionTimeouts::ReadyFlag, .identifier = remote}, mConfig.readyFlagTimeoutMs);
+
+	completeSessionIfReady();
 	return true;
 }
 
 
-void netlink::ConnectionService::onTransportEstablished(const ISession::pointer &session)
+void netlink::ConnectionService::completeSessionIfReady()
 {
-	std::lock_guard<std::mutex> lock(mConnectingMutex);
+	// Caller must hold mConnectingMutex
 
-	if (!session)
+	if (!mCurrentRequest.has_value() || mConnected.load() || mCurrentRequest->state != ConnectionStateInternal::AwaitingReadyFlag || !mReadySync.bothReady())
 		return;
 
-	if (!mCurrentRequest.has_value() || mConnected.load())
-	{
-		NETLINK_LOG_WARNING("Transport: dropping session from {}, no connection expected", session->getRemoteAddress().toString());
-		session->close();
-		return;
-	}
+	NETLINK_LOG_INFO("Session with {} established", mCurrentRequest->remote.displayName);
 
-	// Anybody on the network can connect to the listening port: only accept the peer we negotiated with
-	if (session->getRemoteAddress() != mCurrentRequest->remote.IPAddress)
-	{
-		NETLINK_LOG_WARNING("Transport: rejecting session from {}, expected {}", session->getRemoteAddress().toString(), mCurrentRequest->remote.IPAddress.toString());
-		session->close();
-		return;
-	}
-
-	NETLINK_LOG_INFO("Transport: session with {} established", session->getRemoteAddress().toString());
-
-	// One peer per connection: stop accepting further inbound connections
-	if (mCurrentRequest->server)
-		mCurrentRequest->server->stop();
-
-	mCurrentRequest->session = session;
-	mCurrentRequest->state	 = ConnectionStateInternal::Connected;
-	mReadySync.setLocalReady();
+	mCurrentRequest->state = ConnectionStateInternal::Connected;
 	mConnected.store(true);
 	mConnecting.store(false);
 
 	disarmAllTimeouts();
 
-	ConnectionStatusUpdate update;
-	update.type	   = ConnectionStatusUpdate::Type::Established;
-	update.session = session;
-	update.success = true;
-	notifyStatus(std::move(update));
+	notifyStatus(ConnectionStatusUpdate::Type::Established, "Connected to " + mCurrentRequest->remote.displayName);
 }
 
 
-void netlink::ConnectionService::onTransportDisconnected(const std::string &reason)
+void netlink::ConnectionService::onPeerLost(const std::string &computerName, const std::string &reason)
 {
 	mTaskQueue.post(
-		[this, reason]()
+		[this, computerName, reason]()
 		{
 			std::lock_guard<std::mutex> lock(mConnectingMutex);
 
-			if (!mConnected.load())
+			if (!mCurrentRequest.has_value() || mCurrentRequest->remote.displayName != computerName)
 				return;
 
-			NETLINK_LOG_WARNING("Transport: connection lost: {}", reason);
+			NETLINK_LOG_WARNING("Lost {}: {}", computerName, reason);
 
-			notifyStatus(ConnectionStatusUpdate::Type::Closed, "Connection lost: " + reason, false);
+			if (mConnected.load())
+				notifyStatus(ConnectionStatusUpdate::Type::Closed, "Connection lost: " + reason, false);
+			else
+				notifyStatus(ConnectionStatusUpdate::Type::Failed, "Connection to " + computerName + " failed: " + reason, false);
+
 			clearCurrentConnection();
 		});
 }
 
 
-void netlink::ConnectionService::setTransportFactory(ITransportFactory &transportFactory)
-{
-	std::lock_guard<std::mutex> lock(mConnectingMutex);
-	mTransportFactory = &transportFactory;
-}
-
-
-void netlink::ConnectionService::armTimeout(const TimeoutKey &key, int timeoutMs)
+void netlink::ConnectionService::armTimeout(const TimeoutKey &key, const int timeoutMs)
 {
 	// Caller must hold mConnectingMutex
 	const uint64_t generation = ++mTimeoutGeneration;
@@ -743,7 +589,7 @@ void netlink::ConnectionService::armTimeout(const TimeoutKey &key, int timeoutMs
 											 std::lock_guard<std::mutex> lock(mConnectingMutex);
 
 											 // Ignore a timeout that was cancelled or restarted while this task was queued
-											 auto						 it = mArmedTimeouts.find(expired);
+											 const auto					 it = mArmedTimeouts.find(expired);
 											 if (it == mArmedTimeouts.end() || it->second != generation)
 												 return;
 
@@ -782,13 +628,7 @@ void netlink::ConnectionService::onTimeout(const TimeoutKey &key)
 {
 	// Caller must hold mConnectingMutex
 
-	if (key.category == ConnectionTimeouts::Connection)
-	{
-		NETLINK_LOG_WARNING("Connection timed out for {}", key.identifier);
-		notifyStatus(ConnectionStatusUpdate::Type::Failed, "Connection timed out for " + key.identifier, false);
-		clearCurrentConnection();
-	}
-	else if (key.category == ConnectionTimeouts::Invitation)
+	if (key.category == ConnectionTimeouts::Invitation)
 	{
 		NETLINK_LOG_WARNING("Invitation timed out for {}", key.identifier);
 		notifyStatus(ConnectionStatusUpdate::Type::Failed, "Invitation timed out for " + key.identifier, false);
@@ -797,10 +637,7 @@ void netlink::ConnectionService::onTimeout(const TimeoutKey &key)
 	else if (key.category == ConnectionTimeouts::ReadyFlag)
 	{
 		NETLINK_LOG_WARNING("Ready flag timed out for {}", key.identifier);
-		if (!retryConnection())
-		{
-			notifyStatus(ConnectionStatusUpdate::Type::Failed, "Remote " + key.identifier + " did not get ready", false);
-			clearCurrentConnection();
-		}
+		notifyStatus(ConnectionStatusUpdate::Type::Failed, "Remote " + key.identifier + " did not get ready", false);
+		clearCurrentConnection();
 	}
 }
