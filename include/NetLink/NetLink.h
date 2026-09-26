@@ -61,16 +61,18 @@ struct Message
 // Delivery guarantee requested for a message.
 enum class DeliveryMode : uint8_t
 {
-	ReliableOrdered,	 // Delivered exactly once, in send order
-	UnreliableSequenced, // May be dropped; stale messages are discarded
+	ReliableOrdered,	 // Acknowledged and retransmitted until it arrives. Up to 16 MiB, larger messages are fragmented.
+	UnreliableSequenced, // Without acknowledgement: message may be dropped. Must fit into a single datagram (about 1.1 KB)
 };
 
 
-// Transport used for the data connection once two peers agreed to connect.
-enum class TransportKind : uint8_t
+// What happens when the queue of reliable messages waiting to be sent is full.
+enum class OverflowPolicy : uint8_t
 {
-	Tcp,
+	DropNewest, // The new message is refused: send() returns false (backpressure)
+	DropOldest, // The oldest message that was not sent yet is discarded to make room
 };
+
 
 enum class ConnectionState
 {
@@ -82,6 +84,7 @@ enum class ConnectionState
 	Disconnected,
 	Error,
 };
+
 
 struct ConnectionEvent
 {
@@ -117,12 +120,15 @@ struct NetLinkCallbacks
 
 struct NetLinkConfig
 {
-	std::string	  localDisplayName{};
-	int			  discoveryPort{5555};
-	std::string	  broadcastAddress{"255.255.255.255"};
-	std::string	  secret{"NetLink"};
-	TransportKind transport{TransportKind::Tcp};
-	std::string	  applicationVersion{}; // Two peers are compatible when the major and minor components match; patch and build number are ignored
+	std::string	   localDisplayName{};
+	int			   discoveryPort{5555};
+	std::string	   broadcastAddress{"255.255.255.255"};
+	std::string	   secret{"NetLink"};
+	std::string	   applicationVersion{}; // Two peers are compatible when the major and minor components match; patch and build number are ignored
+
+	// Reliable messages that may wait for room in the send window, and what happens once that many are waiting
+	size_t		   sendQueueCapacity{1024};
+	OverflowPolicy sendQueueOverflow{OverflowPolicy::DropNewest};
 };
 
 
@@ -143,37 +149,37 @@ public:
 	// Register all callbacks. Call before init()
 	// Callbacks run one at a time on NetLink's event thread, never while internal locks are held:
 	// calling back into NetLink from a callback is safe (except destroying the NetLink instance).
-	void						configure(const NetLinkConfig &config, const NetLinkCallbacks &callbacks);
+	void						configure(const NetLinkConfig &config, const NetLinkCallbacks &callbacks) const;
 
 	// Initialize networking (adapter enumeration, sockets). Selects the preferred adapter if none is active yet.
-	bool						init();
+	bool						init() const;
 
 	// Tear down everything (notifies a connected remote first). Safe to call multiple times
-	void						shutdown();
+	void						shutdown() const;
 
 
 	// -- Discovery --------------------------
 
 	// Start broadcasting as a host or searching for hosts
-	bool						startDiscovery();
+	bool						startDiscovery() const;
 
 	// Stop active discovery
-	void						stopDiscovery();
+	void						stopDiscovery() const;
 
 	// Currently validated, compatible remotes (snapshot)
-	std::vector<Endpoint>		getPotentialEndpoints();
+	std::vector<Endpoint>		getPotentialEndpoints() const;
 
 
 	// -- Connection ------------------------------
 
 	// Client: connect to a discovered endpoint
-	bool						connectTo(const Endpoint &remote);
+	bool						connectTo(const Endpoint &remote) const;
 
 	// Accept or reject a pending inbound connection (host side)
-	void						respondToConnection(bool accepted);
+	void						respondToConnection(bool accepted) const;
 
 	// Disconnect active session
-	void						disconnect();
+	void						disconnect() const;
 
 	// Current connection state
 	ConnectionState				getConnectionState() const;
@@ -181,20 +187,21 @@ public:
 
 	// -- Messaging -----------------------------------
 
-	// Send a message to the connected peer
-	bool						send(const Message &message, DeliveryMode mode = DeliveryMode::ReliableOrdered);
+	// Send a message to the connected peer. Returns false when not connected, when an unreliable message does not fit into
+	// one datagram, or when the send queue is full under OverflowPolicy::DropNewest.
+	bool						send(const Message &message, DeliveryMode mode = DeliveryMode::ReliableOrdered) const;
 
 	// Send a typed message with raw bytes
-	bool						send(uint32_t type, const std::vector<uint8_t> &payload, DeliveryMode mode = DeliveryMode::ReliableOrdered);
+	bool						send(uint32_t type, const std::vector<uint8_t> &payload, DeliveryMode mode = DeliveryMode::ReliableOrdered) const;
 
 
 	// -- Network adapters -------------------------------
 
 	// Available adapters on the system
-	std::vector<NetworkAdapter> getAvailableAdapters();
+	std::vector<NetworkAdapter> getAvailableAdapters() const;
 
 	// Switch active adapter by ID
-	bool						setActiveAdapter(const int &adapterID);
+	bool						setActiveAdapter(const int &adapterID) const;
 
 	// Get the ID of the currently active adapter (0 if none)
 	int							getActiveAdapterID() const;
