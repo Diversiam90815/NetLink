@@ -26,24 +26,14 @@ inline constexpr size_t	  BaseHeaderSize		= 20;
 inline constexpr size_t	  FragmentExtensionSize = 4;
 
 
-// Uniquely identifies a reliable message (fragment) sent by one incarnation of a peer
-struct MessageKey
-{
-	uint32_t incarnation{0};
-	uint64_t seq{0};
-
-	bool	 operator==(const MessageKey &other) const = default;
-};
-
-
 /*
  Packet header decoding:
 
 	0   u16   magic (0x4E4C = "NL")
 	2   u8    version
 	3   u8    flags
-	4   u32   srcIncarnation
-	8   u32   dstIncarnation   (0 = sender doesn't know the receiver's incarnation yet)
+	4   u32   srcStreamID
+	8   u32   dstStreamID       (0 = sender doesn't know the receiver's stream ID yet)
 	12  u64   seq              → offset 12 + 8 bytes = 20 (matches BaseHeaderSize)
 
 	[only if flags.isFragmented()]
@@ -53,14 +43,13 @@ struct MessageKey
 struct PacketHeader
 {
 	PacketFlags flags{};
-	uint32_t	srcIncarnation{0};
-	uint32_t	dstIncarnation{0}; // 0 while the sender does not know the receiver yet
-	uint64_t	seq{0};			   // acknowledged seq for DataAck / AckAck
-	uint16_t	fragIndex{0};	   // only on the wire when flags.isFragmented()
+	uint32_t	srcStreamID{0}; // random ID of the sender's current stream; changes when that stream restarts
+	uint32_t	dstStreamID{0}; // 0 while the sender does not know the receiver yet
+	uint64_t	seq{0};			// acknowledged seq for DataAck / AckAck
+	uint16_t	fragIndex{0};	// only on the wire when flags.isFragmented()
 	uint16_t	fragCount{0};
 
 	size_t		encodedSize() const { return BaseHeaderSize + (flags.isFragmented() ? FragmentExtensionSize : 0); }
-	MessageKey	key() const { return {srcIncarnation, seq}; }
 };
 
 
@@ -79,8 +68,8 @@ inline std::vector<uint8_t> encodePacket(const PacketHeader &header, std::span<c
 	writeUint16(out, ProtocolMagic);
 	out[2] = ProtocolVersion;
 	out[3] = header.flags.raw();
-	writeUint32(out + 4, header.srcIncarnation);
-	writeUint32(out + 8, header.dstIncarnation);
+	writeUint32(out + 4, header.srcStreamID);
+	writeUint32(out + 8, header.dstStreamID);
 	writeUint64(out + 12, header.seq);
 
 	if (header.flags.isFragmented())
@@ -113,12 +102,12 @@ inline std::optional<DecodedPacket> decodePacket(const std::span<const uint8_t> 
 	if (!packet.header.flags.isValid())
 		return std::nullopt;
 
-	packet.header.srcIncarnation = readUint32(in + 4);
-	packet.header.dstIncarnation = readUint32(in + 8);
-	packet.header.seq			 = readUint64(in + 12);
+	packet.header.srcStreamID = readUint32(in + 4);
+	packet.header.dstStreamID = readUint32(in + 8);
+	packet.header.seq		  = readUint64(in + 12);
 
-	// A sender always has an incarnation
-	if (packet.header.srcIncarnation == 0)
+	// A sender always has a stream ID
+	if (packet.header.srcStreamID == 0)
 		return std::nullopt;
 
 	if (packet.header.flags.isFragmented())
