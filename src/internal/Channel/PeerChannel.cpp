@@ -139,16 +139,16 @@ void netlink::PeerChannel::registerPeer(const std::string &displayName, const ne
 	{
 		std::lock_guard<std::mutex> lock(mPeerRegistryMutex);
 
-		if (auto it = mPeerRegistry.find(displayName); it != mPeerRegistry.end())
+		if (const auto it = mPeerRegistry.find(displayName); it != mPeerRegistry.end())
 			previous = it->second;
 
-		mPeerRegistry[displayName] = {ipv4, channelPort};
+		mPeerRegistry[displayName] = {.IPv4 = ipv4, .channelPort = channelPort};
 	}
 
 	NETLINK_LOG_DEBUG("Registered peer {} -> {}:{}", displayName, ipv4.toString(), channelPort);
 
 	// The peer moved to another socket (restart, adapter switch): its old stream is gone
-	if (previous.isValid() && previous.address() != PeerEndpoint{ipv4, channelPort}.address())
+	if (previous.isValid() && previous.address() != PeerEndpoint{.IPv4 = ipv4, .channelPort = channelPort}.address())
 	{
 		std::lock_guard<std::mutex> lock(mLinksMutex);
 		mLinks.erase(previous.address());
@@ -188,7 +188,7 @@ netlink::PeerEndpoint netlink::PeerChannel::resolvePeer(const std::string &compu
 {
 	std::lock_guard<std::mutex> lock(mPeerRegistryMutex);
 
-	const auto						it = mPeerRegistry.find(computerName);
+	const auto					it = mPeerRegistry.find(computerName);
 	if (it == mPeerRegistry.end())
 	{
 		NETLINK_LOG_WARNING("Cannot resolve peer {}: not registered", computerName);
@@ -223,9 +223,9 @@ bool netlink::PeerChannel::sendConnectRequest(const std::string &computerName)
 }
 
 
-bool netlink::PeerChannel::sendConnectAnswer(const std::string &computerName, bool requestAccepted, const std::string &reason)
+bool netlink::PeerChannel::sendConnectAnswer(const std::string &computerName, const bool requestAccepted, const std::string &reason)
 {
-	return sendSignal(computerName, SignalType::ConnectAnswer, PayloadConnectAnswer{requestAccepted, reason});
+	return sendSignal(computerName, SignalType::ConnectAnswer, PayloadConnectAnswer{.accepted = requestAccepted, .reason = reason});
 }
 
 
@@ -235,7 +235,7 @@ bool netlink::PeerChannel::sendDisconnect(const std::string &computerName)
 }
 
 
-bool netlink::PeerChannel::sendReadyFlag(const std::string &computerName, bool ready)
+bool netlink::PeerChannel::sendReadyFlag(const std::string &computerName, const bool ready)
 {
 	return sendSignal(computerName, SignalType::ReadyFlag, PayloadReadyFlag{ready});
 }
@@ -290,16 +290,16 @@ bool netlink::PeerChannel::sendSignal(const std::string &computerName, SignalTyp
 }
 
 
-bool netlink::PeerChannel::sendMessage(const std::string &computerName, uint32_t type, std::span<const uint8_t> data, DeliveryMode mode)
+bool netlink::PeerChannel::sendMessage(const std::string &computerName, const uint32_t type, std::span<const uint8_t> data, const DeliveryMode mode)
 {
-	auto peer = resolvePeer(computerName);
+	const auto peer = resolvePeer(computerName);
 	if (!peer.isValid())
 		return false;
 
 	// Application body: [u32 type][data]
 	std::vector<uint8_t> body(sizeof(uint32_t) + data.size());
 	channel::writeUint32(body.data(), type);
-	std::copy(data.begin(), data.end(), body.begin() + sizeof(uint32_t));
+	std::ranges::copy(data, body.begin() + sizeof(uint32_t));
 
 	if (mode == DeliveryMode::ReliableOrdered)
 		return queueReliable(peer, channel::ChannelId::Application, std::move(body));
@@ -326,7 +326,7 @@ bool netlink::PeerChannel::sendMessage(const std::string &computerName, uint32_t
 }
 
 
-bool netlink::PeerChannel::queueReliable(const PeerEndpoint &peer, channel::ChannelId channelId, std::vector<uint8_t> body)
+bool netlink::PeerChannel::queueReliable(const PeerEndpoint &peer, const channel::ChannelId channelId, std::vector<uint8_t> body)
 {
 	if (!mInitialized.load())
 	{
@@ -360,9 +360,9 @@ bool netlink::PeerChannel::queueReliable(const PeerEndpoint &peer, channel::Chan
 }
 
 
-void netlink::PeerChannel::setKeepAlive(const std::string &computerName, bool enabled)
+void netlink::PeerChannel::setKeepAlive(const std::string &computerName, const bool enabled)
 {
-	auto peer = resolvePeer(computerName);
+	const auto peer = resolvePeer(computerName);
 	if (!peer.isValid())
 		return;
 
@@ -381,7 +381,7 @@ void netlink::PeerChannel::setKeepAlive(const std::string &computerName, bool en
 
 void netlink::PeerChannel::dropApplicationTraffic(const std::string &computerName)
 {
-	auto peer = resolvePeer(computerName);
+	const auto peer = resolvePeer(computerName);
 	if (!peer.isValid())
 		return;
 
@@ -392,9 +392,9 @@ void netlink::PeerChannel::dropApplicationTraffic(const std::string &computerNam
 }
 
 
-bool netlink::PeerChannel::flush(const std::string &computerName, std::chrono::milliseconds timeout)
+bool netlink::PeerChannel::flush(const std::string &computerName, const std::chrono::milliseconds timeout)
 {
-	auto peer = resolvePeer(computerName);
+	const auto peer = resolvePeer(computerName);
 	if (!peer.isValid())
 		return true;
 
@@ -405,8 +405,7 @@ bool netlink::PeerChannel::flush(const std::string &computerName, std::chrono::m
 		{
 			std::lock_guard<std::mutex> lock(mLinksMutex);
 
-			auto					   *link = linkFor(peer.address(), false);
-			if (!link || !link->hasPendingReliable())
+			if (const auto *link = linkFor(peer.address(), false); !link || !link->hasPendingReliable())
 				return true;
 		}
 
@@ -423,9 +422,9 @@ bool netlink::PeerChannel::flush(const std::string &computerName, std::chrono::m
 // Link bookkeeping (caller holds mLinksMutex)
 // ---------------------------------------------------------------------------
 
-netlink::channel::ReliableLink *netlink::PeerChannel::linkFor(const net::SocketAddress &address, bool create)
+netlink::channel::ReliableLink *netlink::PeerChannel::linkFor(const net::SocketAddress &address, const bool create)
 {
-	if (auto it = mLinks.find(address); it != mLinks.end())
+	if (const auto it = mLinks.find(address); it != mLinks.end())
 		return it->second.get();
 
 	if (!create)
@@ -442,16 +441,16 @@ netlink::channel::ReliableLink *netlink::PeerChannel::linkFor(const net::SocketA
 }
 
 
-void netlink::PeerChannel::collect(const net::SocketAddress &address, channel::ReliableLink &link, Batch &batch, TimePoint now)
+void netlink::PeerChannel::collect(const net::SocketAddress &address, channel::ReliableLink &link, Batch &batch, const TimePoint now)
 {
-	for (auto &event : link.takeEvents())
+	for (const auto &event : link.takeEvents())
 	{
 		// Partial messages of the old stream can never complete
 		mFragmentation.reset(address);
 		mHeartbeat.unwatch(address);
 
 		const char *reason = event == channel::LinkEvent::Failed ? "the peer stopped acknowledging messages" : "the peer restarted";
-		batch.lostPeers.push_back({address, reason});
+		batch.lostPeers.push_back({.address = address, .reason = reason});
 	}
 
 	auto datagrams = link.takeOutgoing();
@@ -460,12 +459,12 @@ void netlink::PeerChannel::collect(const net::SocketAddress &address, channel::R
 		mHeartbeat.onSent(address, now);
 
 	for (auto &datagram : datagrams)
-		batch.datagrams.push_back({address, std::move(datagram)});
+		batch.datagrams.push_back({.to = address, .bytes = std::move(datagram)});
 
-	for (auto &packet : link.takeDelivered())
+	for (auto &[header, body] : link.takeDelivered())
 	{
-		if (auto message = mFragmentation.accept(address, packet.header, packet.body))
-			batch.messages.push_back({address, std::move(*message)});
+		if (auto message = mFragmentation.accept(address, header, body))
+			batch.messages.push_back({.from = address, .message = std::move(*message)});
 	}
 }
 
@@ -491,13 +490,13 @@ std::chrono::milliseconds netlink::PeerChannel::nextWait()
 	{
 		std::lock_guard<std::mutex> lock(mLinksMutex);
 
-		for (const auto &[address, link] : mLinks)
+		for (const auto &link : mLinks | std::views::values)
 		{
 			if (auto due = link->nextDeadline(); due && (!next || *due < *next))
 				next = due;
 		}
 
-		if (auto due = mHeartbeat.nextDeadline(); due && (!next || *due < *next))
+		if (const auto due = mHeartbeat.nextDeadline(); due && (!next || *due < *next))
 			next = due;
 	}
 
@@ -511,7 +510,7 @@ std::chrono::milliseconds netlink::PeerChannel::nextWait()
 
 void netlink::PeerChannel::receiveDatagram()
 {
-	auto socket = mInitialized.load() ? this->socket() : nullptr;
+	const auto socket = mInitialized.load() ? this->socket() : nullptr;
 
 	if (!socket)
 	{
@@ -534,9 +533,9 @@ void netlink::PeerChannel::receiveDatagram()
 }
 
 
-void netlink::PeerChannel::handleDatagram(const net::SocketAddress &from, std::span<const uint8_t> bytes)
+void netlink::PeerChannel::handleDatagram(const net::SocketAddress &from, const std::span<const uint8_t> bytes)
 {
-	auto packet = channel::decodePacket(bytes);
+	const auto packet = channel::decodePacket(bytes);
 
 	if (!packet)
 	{
@@ -578,9 +577,9 @@ void netlink::PeerChannel::serviceTimers()
 			collect(address, *link, batch, now);
 		}
 
-		auto tick = mHeartbeat.tick(now);
+		auto [heartbeatsDue, silentPeers] = mHeartbeat.tick(now);
 
-		for (const auto &address : tick.heartbeatsDue)
+		for (const auto &address : heartbeatsDue)
 		{
 			if (auto *link = linkFor(address, false))
 			{
@@ -589,8 +588,8 @@ void netlink::PeerChannel::serviceTimers()
 			}
 		}
 
-		for (const auto &address : tick.silentPeers)
-			batch.lostPeers.push_back({address, "no traffic from the peer anymore"});
+		for (const auto &address : silentPeers)
+			batch.lostPeers.push_back({.address = address, .reason = "no traffic from the peer anymore"});
 	}
 
 	execute(batch);
@@ -601,41 +600,41 @@ void netlink::PeerChannel::serviceTimers()
 // Carrying out collected work (no lock held)
 // ---------------------------------------------------------------------------
 
-void netlink::PeerChannel::execute(Batch &batch)
+void netlink::PeerChannel::execute(Batch &batch) const
 {
 	if (!batch.datagrams.empty())
 	{
-		if (auto socket = this->socket())
+		if (const auto socket = this->socket())
 		{
-			for (const auto &datagram : batch.datagrams)
+			for (const auto &[to, bytes] : batch.datagrams)
 			{
 				// A lost datagram is recovered by retransmission, a failed send is no different
-				if (auto sent = socket->sendTo(datagram.to, datagram.bytes); !sent)
-					NETLINK_LOG_DEBUG("Sending to {} failed: {}", datagram.to.toString(), net::toString(sent.error()));
+				if (auto sent = socket->sendTo(to, bytes); !sent)
+					NETLINK_LOG_DEBUG("Sending to {} failed: {}", to.toString(), net::toString(sent.error()));
 			}
 		}
 	}
 
-	for (auto &inbound : batch.messages)
+	for (auto &[from, message] : batch.messages)
 	{
-		if (inbound.message.channel == channel::ChannelId::Control)
-			routeControl(inbound.from, inbound.message.body);
+		if (message.channel == channel::ChannelId::Control)
+			routeControl(from, message.body);
 		else
-			routeApplication(inbound.from, inbound.message.body);
+			routeApplication(from, message.body);
 	}
 
-	for (const auto &lost : batch.lostPeers)
+	for (const auto &[address, reason] : batch.lostPeers)
 	{
-		const std::string name = nameOf(lost.address);
-		NETLINK_LOG_WARNING("Lost peer {} ({}): {}", name.empty() ? "<unknown>" : name, lost.address.toString(), lost.reason);
+		const std::string name = nameOf(address);
+		NETLINK_LOG_WARNING("Lost peer {} ({}): {}", name.empty() ? "<unknown>" : name, address.toString(), reason);
 
 		if (!name.empty() && mOnPeerLost)
-			mOnPeerLost(name, lost.reason);
+			mOnPeerLost(name, reason);
 	}
 }
 
 
-void netlink::PeerChannel::routeApplication(const net::SocketAddress &from, std::span<const uint8_t> body)
+void netlink::PeerChannel::routeApplication(const net::SocketAddress &from, std::span<const uint8_t> body) const
 {
 	if (body.size() < sizeof(uint32_t))
 	{
@@ -656,7 +655,7 @@ void netlink::PeerChannel::routeApplication(const net::SocketAddress &from, std:
 }
 
 
-void netlink::PeerChannel::routeControl(const net::SocketAddress &from, std::span<const uint8_t> body)
+void netlink::PeerChannel::routeControl(const net::SocketAddress &from, std::span<const uint8_t> body) const
 {
 	SignalPacket packet;
 
@@ -683,9 +682,9 @@ void netlink::PeerChannel::routeControl(const net::SocketAddress &from, std::spa
 
 	case SignalType::ConnectAnswer:
 	{
-		const auto &pl = std::get<PayloadConnectAnswer>(packet.payload);
+		const auto &[accepted, reason] = std::get<PayloadConnectAnswer>(packet.payload);
 		if (mConnectionCallbacks.onConnectRequestAnswered)
-			mConnectionCallbacks.onConnectRequestAnswered(sender, pl.accepted, pl.reason);
+			mConnectionCallbacks.onConnectRequestAnswered(sender, accepted, reason);
 		break;
 	}
 
@@ -701,31 +700,31 @@ void netlink::PeerChannel::routeControl(const net::SocketAddress &from, std::spa
 
 	case SignalType::ValidationRequest:
 	{
-		const auto &pl = std::get<PayloadValidationRequest>(packet.payload);
-		if (pl.request != static_cast<uint8_t>(RemoteRequest::Secret) && pl.request != static_cast<uint8_t>(RemoteRequest::Version))
+		const auto &[request] = std::get<PayloadValidationRequest>(packet.payload);
+		if (request != static_cast<uint8_t>(RemoteRequest::Secret) && request != static_cast<uint8_t>(RemoteRequest::Version))
 		{
-			NETLINK_LOG_WARNING("Ignoring unknown validation request {} from {}", static_cast<int>(pl.request), sender);
+			NETLINK_LOG_WARNING("Ignoring unknown validation request {} from {}", static_cast<int>(request), sender);
 			break;
 		}
 
 		if (mValidationCallbacks.onValidationRequestReceived)
-			mValidationCallbacks.onValidationRequestReceived(sender, static_cast<RemoteRequest>(pl.request));
+			mValidationCallbacks.onValidationRequestReceived(sender, static_cast<RemoteRequest>(request));
 		break;
 	}
 
 	case SignalType::SecretResponse:
 	{
-		const auto &pl = std::get<PayloadSecretResponse>(packet.payload);
+		const auto &[secret] = std::get<PayloadSecretResponse>(packet.payload);
 		if (mValidationCallbacks.onSecretResponseReceived)
-			mValidationCallbacks.onSecretResponseReceived(sender, pl.secret);
+			mValidationCallbacks.onSecretResponseReceived(sender, secret);
 		break;
 	}
 
 	case SignalType::VersionResponse:
 	{
-		const auto &pl = std::get<PayloadVersionResponse>(packet.payload);
+		const auto &[version] = std::get<PayloadVersionResponse>(packet.payload);
 		if (mValidationCallbacks.onVersionResponseReceived)
-			mValidationCallbacks.onVersionResponseReceived(sender, pl.version);
+			mValidationCallbacks.onVersionResponseReceived(sender, version);
 		break;
 	}
 

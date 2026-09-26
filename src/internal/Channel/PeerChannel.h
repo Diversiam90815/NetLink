@@ -172,9 +172,9 @@ private:
 	void								  collect(const net::SocketAddress &address, channel::ReliableLink &link, Batch &batch, TimePoint now);
 
 	// Caller must not hold mLinksMutex
-	void								  execute(Batch &batch);
-	void								  routeControl(const net::SocketAddress &from, std::span<const uint8_t> body);
-	void								  routeApplication(const net::SocketAddress &from, std::span<const uint8_t> body);
+	void								  execute(Batch &batch) const;
+	void								  routeControl(const net::SocketAddress &from, std::span<const uint8_t> body) const;
+	void								  routeApplication(const net::SocketAddress &from, std::span<const uint8_t> body) const;
 
 	bool								  sendSignal(const std::string &computerName, SignalType type, decltype(SignalPacket::payload) payload = PayloadEmpty{});
 	bool								  queueReliable(const PeerEndpoint &peer, channel::ChannelId channelId, std::vector<uint8_t> body);
