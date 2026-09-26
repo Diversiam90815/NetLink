@@ -96,13 +96,12 @@ Result<void> ensureInitialized()
 }
 
 
-Result<NativeHandle> createSocket(SocketKind kind)
+Result<NativeHandle> createSocket()
 {
 	if (auto init = ensureInitialized(); !init)
 		return std::unexpected(init.error());
 
-	const bool	 isStream = kind == SocketKind::Stream;
-	NativeSocket sock	  = ::socket(AF_INET, isStream ? SOCK_STREAM : SOCK_DGRAM, isStream ? IPPROTO_TCP : IPPROTO_UDP);
+	NativeSocket sock = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
 
 	if (sock == INVALID_SOCKET)
 		return std::unexpected(lastError());
@@ -113,12 +112,10 @@ Result<NativeHandle> createSocket(SocketKind kind)
 		return std::unexpected(nonBlocking.error());
 	}
 
-	if (!isStream)
-	{
-		BOOL  reportReset	= FALSE;
-		DWORD bytesReturned = 0;
-		WSAIoctl(sock, SIO_UDP_CONNRESET, &reportReset, sizeof(reportReset), nullptr, 0, &bytesReturned, nullptr, nullptr);
-	}
+	// Without this an ICMP port-unreachable makes the next recvfrom() fail with WSAECONNRESET
+	BOOL  reportReset	= FALSE;
+	DWORD bytesReturned = 0;
+	WSAIoctl(sock, SIO_UDP_CONNRESET, &reportReset, sizeof(reportReset), nullptr, 0, &bytesReturned, nullptr, nullptr);
 
 	return fromNative(sock);
 }
@@ -131,12 +128,6 @@ Result<void> setNonBlocking(NativeHandle handle)
 		return std::unexpected(lastError());
 
 	return {};
-}
-
-
-Result<void> prepareAcceptedSocket(NativeHandle handle)
-{
-	return setNonBlocking(handle);
 }
 
 

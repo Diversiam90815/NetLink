@@ -75,16 +75,14 @@ Result<void> ensureInitialized()
 }
 
 
-Result<NativeHandle> createSocket(SocketKind kind)
+Result<NativeHandle> createSocket()
 {
-	const bool isStream = kind == SocketKind::Stream;
-
-	int		   type		= isStream ? SOCK_STREAM : SOCK_DGRAM;
+	int type = SOCK_DGRAM;
 #if defined(SOCK_CLOEXEC)
 	type |= SOCK_CLOEXEC;
 #endif
 
-	int sock = ::socket(AF_INET, type, isStream ? IPPROTO_TCP : IPPROTO_UDP);
+	int sock = ::socket(AF_INET, type, IPPROTO_UDP);
 
 	if (sock < 0)
 		return std::unexpected(lastError());
@@ -102,16 +100,6 @@ Result<NativeHandle> createSocket(SocketKind kind)
 	disableSigPipe(sock);
 
 	return fromNative(sock);
-}
-
-
-Result<void> prepareAcceptedSocket(NativeHandle handle)
-{
-#if defined(FD_CLOEXEC)
-	::fcntl(toNative(handle), F_SETFD, FD_CLOEXEC);
-#endif
-	disableSigPipe(toNative(handle));
-	return setNonBlocking(handle);
 }
 
 

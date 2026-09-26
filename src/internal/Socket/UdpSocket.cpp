@@ -17,7 +17,7 @@ UdpSocket::UdpSocket(SocketHandle handle, SocketAddress localAddress) : mHandle(
 
 Result<UdpSocket> UdpSocket::bind(const SocketAddress &localAddress, const BindOptions &options)
 {
-	auto native = platform::createSocket(platform::SocketKind::Datagram);
+	auto native = platform::createSocket();
 	if (!native)
 		return std::unexpected(native.error());
 
@@ -50,13 +50,13 @@ DatagramSocketFactory UdpSocket::factory()
 }
 
 
-Result<size_t> UdpSocket::sendTo(const SocketAddress &destination, std::span<const uint8_t> data)
+Result<size_t> UdpSocket::sendTo(const SocketAddress &destination, const std::span<const uint8_t> data)
 {
 	return platform::sendDatagram(mHandle.get(), destination, data);
 }
 
 
-Result<Datagram> UdpSocket::receiveFrom(std::span<uint8_t> buffer, std::chrono::milliseconds timeout)
+Result<Datagram> UdpSocket::receiveFrom(const std::span<uint8_t> buffer, const std::chrono::milliseconds timeout)
 {
 	if (auto ready = mHandle.wait(WaitFor::Readable, timeout); !ready)
 		return std::unexpected(ready.error());

@@ -7,8 +7,8 @@
 
 #pragma once
 
+#include <compare>
 #include <cstdint>
-#include <cstddef>
 #include <expected>
 #include <string>
 #include <string_view>
@@ -25,11 +25,12 @@ struct SocketAddress
 	IPv4Address			 ip{};
 	uint16_t			 port{0};
 
-	bool				 operator==(const SocketAddress &other) const = default;
+	auto				 operator<=>(const SocketAddress &other) const = default;
+	bool				 operator==(const SocketAddress &other) const  = default;
 
 	std::string			 toString() const { return ip.toString() + ":" + std::to_string(port); }
 
-	static SocketAddress any(uint16_t port = 0) { return {IPv4Address::unspecified(), port}; }
+	static SocketAddress any(const uint16_t port = 0) { return {.ip = IPv4Address::unspecified(), .port = port}; }
 };
 
 
@@ -54,7 +55,7 @@ enum class SocketError : uint8_t
 };
 
 
-constexpr std::string_view toString(SocketError error)
+constexpr std::string_view toString(const SocketError error)
 {
 	switch (error)
 	{

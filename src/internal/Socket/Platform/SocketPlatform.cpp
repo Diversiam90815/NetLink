@@ -103,12 +103,6 @@ Result<void> applyBindOptions(NativeHandle handle, const BindOptions &options)
 }
 
 
-Result<void> setNoDelay(NativeHandle handle)
-{
-	return setIntOption(handle, IPPROTO_TCP, TCP_NODELAY, 1);
-}
-
-
 Result<void> bindTo(NativeHandle handle, const SocketAddress &address)
 {
 	auto addr = toSockaddr(address);
@@ -117,67 +111,6 @@ Result<void> bindTo(NativeHandle handle, const SocketAddress &address)
 
 	if (::bind(toNative(handle), reinterpret_cast<sockaddr *>(&*addr), sizeof(sockaddr_in)) == SocketErrorRet)
 		return failure();
-
-	return {};
-}
-
-
-Result<void> listenOn(NativeHandle handle, int backlog)
-{
-	if (::listen(toNative(handle), backlog) == SocketErrorRet)
-		return failure();
-
-	return {};
-}
-
-
-Result<std::pair<NativeHandle, SocketAddress>> acceptOne(NativeHandle listener)
-{
-	sockaddr_in	 peer{};
-	SockLen		 length	  = sizeof(peer);
-
-	NativeSocket accepted = ::accept(toNative(listener), reinterpret_cast<sockaddr *>(&peer), &length);
-
-	if (fromNative(accepted) == InvalidNativeHandle)
-		return failure();
-
-	return std::pair{fromNative(accepted), fromSockaddr(peer)};
-}
-
-
-Result<void> startConnect(NativeHandle handle, const SocketAddress &remote)
-{
-	auto addr = toSockaddr(remote);
-	if (!addr)
-		return std::unexpected(addr.error());
-
-	if (remote.ip.isUnspecified() || remote.port == 0)
-		return std::unexpected(SocketError::InvalidArgument);
-
-	if (::connect(toNative(handle), reinterpret_cast<sockaddr *>(&*addr), sizeof(sockaddr_in)) == SocketErrorRet)
-	{
-		const int code = lastNativeError();
-
-		if (isConnectInProgress(code))
-			return std::unexpected(SocketError::WouldBlock);
-
-		return std::unexpected(mapNativeError(code));
-	}
-
-	return {};
-}
-
-
-Result<void> finishConnect(NativeHandle handle)
-{
-	int		pendingError = 0;
-	SockLen length		 = sizeof(pendingError);
-
-	if (getsockopt(toNative(handle), SOL_SOCKET, SO_ERROR, reinterpret_cast<char *>(&pendingError), &length) == SocketErrorRet)
-		return failure();
-
-	if (pendingError != 0)
-		return std::unexpected(mapNativeError(pendingError));
 
 	return {};
 }
@@ -192,57 +125,6 @@ Result<SocketAddress> localAddressOf(NativeHandle handle)
 		return failure();
 
 	return fromSockaddr(addr);
-}
-
-
-Result<SocketAddress> remoteAddressOf(NativeHandle handle)
-{
-	sockaddr_in addr{};
-	SockLen		length = sizeof(addr);
-
-	if (getpeername(toNative(handle), reinterpret_cast<sockaddr *>(&addr), &length) == SocketErrorRet)
-		return failure();
-
-	return fromSockaddr(addr);
-}
-
-
-Result<size_t> sendSome(NativeHandle handle, std::span<const uint8_t> data)
-{
-	while (true)
-	{
-		const auto sent = ::send(toNative(handle), reinterpret_cast<const char *>(data.data()), clampLength(data.size()), SendFlags);
-
-		if (sent != SocketErrorRet)
-			return static_cast<size_t>(sent);
-
-		const int code = lastNativeError();
-		if (isInterrupted(code))
-			continue;
-
-		return std::unexpected(isWouldBlock(code) ? SocketError::WouldBlock : mapNativeError(code));
-	}
-}
-
-
-Result<size_t> receiveSome(NativeHandle handle, std::span<uint8_t> buffer)
-{
-	while (true)
-	{
-		const auto received = ::recv(toNative(handle), reinterpret_cast<char *>(buffer.data()), clampLength(buffer.size()), 0);
-
-		if (received == 0 && !buffer.empty())
-			return std::unexpected(SocketError::Closed);
-
-		if (received != SocketErrorRet)
-			return static_cast<size_t>(received);
-
-		const int code = lastNativeError();
-		if (isInterrupted(code))
-			continue;
-
-		return std::unexpected(isWouldBlock(code) ? SocketError::WouldBlock : mapNativeError(code));
-	}
 }
 
 
