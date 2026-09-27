@@ -123,7 +123,7 @@ BENCHMARK(BM_TaskQueue_Drain)->ArgName("batch")->Arg(1)->Arg(64)->Arg(1024)->Use
 
 
 // One million tasks posted by 1..8 producers at once, without throttling. Timed until the worker executed all of them.
-static void BM_TaskQueue_Load_Burst(benchmark::State &state)
+static void BM_TaskQueue_Burst(benchmark::State &state)
 {
 	constexpr uint64_t		 Total		 = 1'000'000;
 	const auto				 producers	 = static_cast<size_t>(state.range(0));
@@ -177,6 +177,6 @@ static void BM_TaskQueue_Load_Burst(benchmark::State &state)
 
 	state.SetItemsProcessed(static_cast<int64_t>(state.iterations() * perProducer * producers));
 }
-BENCHMARK(BM_TaskQueue_Load_Burst)->ArgName("producers")->Arg(1)->Arg(4)->Arg(8)->UseManualTime()->Unit(benchmark::kMillisecond);
+BENCHMARK(BM_TaskQueue_Burst)->ArgName("producers")->Arg(1)->Arg(4)->Arg(8)->UseManualTime()->Unit(benchmark::kMillisecond);
 
 } // namespace QueueBenchmarks

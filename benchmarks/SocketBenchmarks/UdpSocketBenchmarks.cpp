@@ -186,7 +186,7 @@ BENCHMARK(BM_UdpSocket_Bind)->UseRealTime();
 
 // N sockets each send 10k datagrams of the channel's datagram size to one receiver as fast as they can: the raw OS limit
 // underneath PeerChannel's fan-in. Timed is the send phase; arrived: share the receiver actually got (the OS dropped the rest).
-static void BM_UdpSocket_Load_FanIn(benchmark::State &state)
+static void BM_UdpSocket_FanIn(benchmark::State &state)
 {
 	constexpr uint64_t PerSender = 10'000;
 	const auto		   senders	 = static_cast<size_t>(state.range(0));
@@ -248,6 +248,6 @@ static void BM_UdpSocket_Load_FanIn(benchmark::State &state)
 	state.SetItemsProcessed(static_cast<int64_t>(sent));
 	state.SetBytesProcessed(static_cast<int64_t>(sent) * static_cast<int64_t>(payload.size()));
 }
-BENCHMARK(BM_UdpSocket_Load_FanIn)->ArgName("senders")->Arg(1)->Arg(8)->Arg(32)->UseManualTime()->Unit(benchmark::kMillisecond);
+BENCHMARK(BM_UdpSocket_FanIn)->ArgName("senders")->Arg(1)->Arg(8)->Arg(32)->UseManualTime()->Unit(benchmark::kMillisecond);
 
 } // namespace SocketBenchmarks

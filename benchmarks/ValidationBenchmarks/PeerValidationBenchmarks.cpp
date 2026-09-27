@@ -180,7 +180,7 @@ BENCHMARK_REGISTER_F(BM_PeerValidation, Validate)->ArgName("checks")->Arg(0)->Ar
 
 // Many peers appear at once: a hub and N peers (secret and version check) all discover each other at the same moment.
 // Timed until the hub validated every peer and every peer validated the hub; items: peers validated by the hub.
-static void BM_PeerValidation_Load_Swarm(benchmark::State &state)
+static void BM_PeerValidation_Swarm(benchmark::State &state)
 {
 	constexpr int64_t									bothChecks = 3;
 	const auto											peerCount  = static_cast<size_t>(state.range(0));
@@ -256,6 +256,6 @@ static void BM_PeerValidation_Load_Swarm(benchmark::State &state)
 		validation->cancelAllPendingValidation();
 	swarm.stop();
 }
-BENCHMARK(BM_PeerValidation_Load_Swarm)->ArgName("peers")->Arg(8)->Arg(32)->Arg(128)->Arg(250)->UseManualTime()->Unit(benchmark::kMillisecond);
+BENCHMARK(BM_PeerValidation_Swarm)->ArgName("peers")->Arg(8)->Arg(32)->Arg(128)->Arg(250)->UseManualTime()->Unit(benchmark::kMillisecond);
 
 } // namespace ValidationBenchmarks

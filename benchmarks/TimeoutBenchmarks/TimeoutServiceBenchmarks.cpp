@@ -83,8 +83,7 @@ static void BM_TimeoutService_StartCancel(benchmark::State &state)
 
 	state.SetItemsProcessed(static_cast<int64_t>(state.iterations()));
 }
-BENCHMARK(BM_TimeoutService_StartCancel)->Apply(bench::populations);
-BENCHMARK(BM_TimeoutService_StartCancel)->Name("BM_TimeoutService_Load_StartCancel")->ArgName("entries")->Arg(16'384)->Arg(65'536)->Unit(benchmark::kMicrosecond);
+BENCHMARK(BM_TimeoutService_StartCancel)->Apply(bench::populations)->Arg(16'384)->Arg(65'536)->Unit(benchmark::kMicrosecond);
 
 
 // Arms one timeout per category for a peer, then cancels them all by identifier (a peer going away)
@@ -201,17 +200,21 @@ static void BM_TimeoutService_FireLatency(benchmark::State &state)
 
 	state.counters["overshoot_us"] = benchmark::Counter(overshootUs, benchmark::Counter::kAvgIterations);
 }
-BENCHMARK(BM_TimeoutService_FireLatency)->ArgNames({"timeoutMs", "active"})->ArgsProduct({{0, 1, 5, 10}, {0}})->UseManualTime();
 BENCHMARK(BM_TimeoutService_FireLatency)
-	->Name("BM_TimeoutService_Load_FireLatency")
 	->ArgNames({"timeoutMs", "active"})
-	->ArgsProduct({{0}, {1024, 16'384, 65'536}})
+	->Args({0, 0})
+	->Args({1, 0})
+	->Args({5, 0})
+	->Args({10, 0})
+	->Args({0, 1024})
+	->Args({0, 16'384})
+	->Args({0, 65'536})
 	->UseManualTime()
 	->Unit(benchmark::kMicrosecond);
 
 
 // Many timeouts come due at once (every peer of a large LAN timing out together). Timed until every callback ran.
-static void BM_TimeoutService_Load_MassExpiry(benchmark::State &state)
+static void BM_TimeoutService_MassExpiry(benchmark::State &state)
 {
 	const auto				 count = static_cast<size_t>(state.range(0));
 	const auto				 keys  = makeKeys(count);
@@ -238,6 +241,6 @@ static void BM_TimeoutService_Load_MassExpiry(benchmark::State &state)
 
 	state.SetItemsProcessed(static_cast<int64_t>(state.iterations() * count));
 }
-BENCHMARK(BM_TimeoutService_Load_MassExpiry)->ArgName("timeouts")->Arg(1'000)->Arg(10'000)->Arg(30'000)->UseManualTime()->Unit(benchmark::kMillisecond);
+BENCHMARK(BM_TimeoutService_MassExpiry)->ArgName("timeouts")->Arg(1'000)->Arg(10'000)->Arg(30'000)->UseManualTime()->Unit(benchmark::kMillisecond);
 
 } // namespace TimeoutBenchmarks

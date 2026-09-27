@@ -73,7 +73,7 @@ struct CountingPair
 // A long stream of reliable messages, up to the largest message the channel accepts, from an application that waits
 // whenever the send queue is full.
 // blocked_ms: time per stream the sender was held back by backpressure.
-static void BM_PeerChannel_Load_Stream(benchmark::State &state)
+static void BM_PeerChannel_Stream(benchmark::State &state)
 {
 	const auto	 size	  = static_cast<size_t>(state.range(0));
 	const auto	 messages = static_cast<uint64_t>(state.range(1));
@@ -114,7 +114,7 @@ static void BM_PeerChannel_Load_Stream(benchmark::State &state)
 	state.SetItemsProcessed(static_cast<int64_t>(state.iterations() * messages));
 	state.SetBytesProcessed(static_cast<int64_t>(state.iterations() * messages * size));
 }
-BENCHMARK(BM_PeerChannel_Load_Stream)
+BENCHMARK(BM_PeerChannel_Stream)
 	->ArgNames({"bytes", "messages"})
 	->Args({64, 100'000})
 	->Args({bench::KiB, 100'000})
@@ -128,7 +128,7 @@ BENCHMARK(BM_PeerChannel_Load_Stream)
 
 // A burst far beyond the send queue (1024 messages), sent without waiting. Timed until the burst is drained.
 // accepted: share send() took; delivered: share that reached b. DropNewest refuses the excess, DropOldest evicts unsent messages.
-static void BM_PeerChannel_Load_Burst(benchmark::State &state)
+static void BM_PeerChannel_Burst(benchmark::State &state)
 {
 	const auto		  messages	 = static_cast<uint64_t>(state.range(0));
 	const bool		  dropOldest = state.range(1) != 0;
@@ -170,11 +170,11 @@ static void BM_PeerChannel_Load_Burst(benchmark::State &state)
 	state.SetLabel(dropOldest ? "DropOldest" : "DropNewest");
 	state.SetItemsProcessed(static_cast<int64_t>(pair.received.value()));
 }
-BENCHMARK(BM_PeerChannel_Load_Burst)->ArgNames({"messages", "dropOldest"})->ArgsProduct({{10'000, 100'000}, {0, 1}})->UseRealTime()->Unit(benchmark::kMillisecond);
+BENCHMARK(BM_PeerChannel_Burst)->ArgNames({"messages", "dropOldest"})->ArgsProduct({{10'000, 100'000}, {0, 1}})->UseRealTime()->Unit(benchmark::kMillisecond);
 
 
 // Unreliable messages as fast as the sender can go. Timed is sending; arrived: share that reached b.
-static void BM_PeerChannel_Load_UnreliableFlood(benchmark::State &state)
+static void BM_PeerChannel_UnreliableFlood(benchmark::State &state)
 {
 	const auto	 messages = static_cast<uint64_t>(state.range(0));
 	const auto	 payload  = bench::makePayload(static_cast<size_t>(state.range(1)));
@@ -203,13 +203,13 @@ static void BM_PeerChannel_Load_UnreliableFlood(benchmark::State &state)
 	state.SetItemsProcessed(static_cast<int64_t>(sent));
 	state.SetBytesProcessed(static_cast<int64_t>(sent) * state.range(1));
 }
-BENCHMARK(BM_PeerChannel_Load_UnreliableFlood)->ArgNames({"messages", "bytes"})->Args({100'000, 64})->Args({100'000, 1176})->UseRealTime()->Unit(benchmark::kMillisecond);
+BENCHMARK(BM_PeerChannel_UnreliableFlood)->ArgNames({"messages", "bytes"})->Args({100'000, 64})->Args({100'000, 1176})->UseRealTime()->Unit(benchmark::kMillisecond);
 
 
 // Many peers stream to one hub at the same time, each from its own thread, each respecting backpressure.
 // Timed until the last message reached the hub. Under this load the OS drops datagrams at the hub's socket; links that
 // exhaust their retransmissions are reset and their unsent messages are gone (links_lost). delivered: share that arrived.
-static void BM_PeerChannel_Load_FanIn(benchmark::State &state)
+static void BM_PeerChannel_FanIn(benchmark::State &state)
 {
 	const auto				 senders   = static_cast<size_t>(state.range(0));
 	const auto				 perSender = static_cast<uint64_t>(state.range(1));
@@ -286,11 +286,11 @@ static void BM_PeerChannel_Load_FanIn(benchmark::State &state)
 
 	swarm.stop();
 }
-BENCHMARK(BM_PeerChannel_Load_FanIn)->ArgNames({"senders", "perSender"})->ArgsProduct({{8, 32, 128}, {500}})->UseManualTime()->Unit(benchmark::kMillisecond);
+BENCHMARK(BM_PeerChannel_FanIn)->ArgNames({"senders", "perSender"})->ArgsProduct({{8, 32, 128}, {500}})->UseManualTime()->Unit(benchmark::kMillisecond);
 
 
 // Several application threads send over the same channel to the same peer (lock contention on the send path)
-static void BM_PeerChannel_Load_ConcurrentSenders(benchmark::State &state)
+static void BM_PeerChannel_ConcurrentSenders(benchmark::State &state)
 {
 	const auto	 threadCount = static_cast<size_t>(state.range(0));
 	const auto	 perThread	 = static_cast<uint64_t>(20'000 / threadCount);
@@ -347,7 +347,7 @@ static void BM_PeerChannel_Load_ConcurrentSenders(benchmark::State &state)
 
 	state.SetItemsProcessed(static_cast<int64_t>(state.iterations() * threadCount * perThread));
 }
-BENCHMARK(BM_PeerChannel_Load_ConcurrentSenders)->ArgName("threads")->Arg(1)->Arg(2)->Arg(4)->Arg(8)->UseManualTime()->Unit(benchmark::kMillisecond);
+BENCHMARK(BM_PeerChannel_ConcurrentSenders)->ArgName("threads")->Arg(1)->Arg(2)->Arg(4)->Arg(8)->UseManualTime()->Unit(benchmark::kMillisecond);
 
 
 } // namespace ChannelBenchmarks

@@ -161,13 +161,7 @@ BENCHMARK_DEFINE_F(BM_ConnectionService, Establish)(benchmark::State &state)
 
 	state.SetItemsProcessed(static_cast<int64_t>(state.iterations()));
 }
-BENCHMARK_REGISTER_F(BM_ConnectionService, Establish)->ArgName("traffic")->Arg(0)->UseManualTime();
-BENCHMARK_REGISTER_F(BM_ConnectionService, Establish)
-	->Name("BM_ConnectionService_Load_EstablishUnderTraffic")
-	->ArgName("traffic")
-	->Arg(1)
-	->UseManualTime()
-	->Unit(benchmark::kMillisecond);
+BENCHMARK_REGISTER_F(BM_ConnectionService, Establish)->ArgName("traffic")->Arg(0)->Arg(1)->UseManualTime()->Unit(benchmark::kMicrosecond);
 
 
 // A full session lifecycle: establish, then close until both sides report it closed
@@ -208,7 +202,7 @@ BENCHMARK(BM_ReadySyncTracker_BothReady);
 
 // N validated peers invite one hub at the same moment. The hub accepts one and declines the rest (it is busy).
 // Timed until every peer got its answer; the winning session is closed again between rounds, untimed.
-static void BM_ConnectionService_Load_InvitationStorm(benchmark::State &state)
+static void BM_ConnectionService_InvitationStorm(benchmark::State &state)
 {
 	using Type											= ConnectionStatusUpdate::Type;
 	const auto										peerCount = static_cast<size_t>(state.range(0));
@@ -319,6 +313,6 @@ static void BM_ConnectionService_Load_InvitationStorm(benchmark::State &state)
 	peerServices.clear();
 	hubService.reset();
 }
-BENCHMARK(BM_ConnectionService_Load_InvitationStorm)->ArgName("peers")->Arg(8)->Arg(32)->Arg(128)->UseManualTime()->Unit(benchmark::kMillisecond);
+BENCHMARK(BM_ConnectionService_InvitationStorm)->ArgName("peers")->Arg(8)->Arg(32)->Arg(128)->UseManualTime()->Unit(benchmark::kMillisecond);
 
 } // namespace ConnectionBenchmarks

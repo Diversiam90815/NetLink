@@ -57,12 +57,10 @@ static void BM_ReliableLink_Transfer(benchmark::State &state)
 	state.SetItemsProcessed(static_cast<int64_t>(state.iterations() * batch));
 	state.SetBytesProcessed(static_cast<int64_t>(state.iterations() * batch * size));
 }
-BENCHMARK(BM_ReliableLink_Transfer)->ArgNames({"bytes", "dropEvery"})->ArgsProduct({{64, bench::KiB, 64 * bench::KiB, bench::MiB}, {0, 20, 5}});
 BENCHMARK(BM_ReliableLink_Transfer)
-	->Name("BM_ReliableLink_Load_Transfer")
 	->ArgNames({"bytes", "dropEvery"})
-	->ArgsProduct({{4 * bench::MiB, static_cast<int64_t>(internal::MaxMessagePayload)}, {0, 20, 5}})
-	->Unit(benchmark::kMillisecond);
+	->ArgsProduct({{64, bench::KiB, 64 * bench::KiB, bench::MiB, 4 * bench::MiB, static_cast<int64_t>(internal::MaxMessagePayload)}, {0, 20, 5}})
+	->Unit(benchmark::kMicrosecond);
 
 
 // A full window of unacknowledged packets comes due: onTimer() retransmits all of them
@@ -134,7 +132,7 @@ BENCHMARK(BM_ReliableLink_SendUnreliable)->ArgName("bytes")->Arg(64)->Arg(512)->
 
 
 // 10k / 100k small messages queued at once behind a send queue sized for them (NetLinkConfig::sendQueueCapacity)
-static void BM_ReliableLink_Load_DeepQueue(benchmark::State &state)
+static void BM_ReliableLink_DeepQueue(benchmark::State &state)
 {
 	const auto		  messages = static_cast<size_t>(state.range(0));
 	const auto		  payload  = bench::makePayload(64);
@@ -158,6 +156,6 @@ static void BM_ReliableLink_Load_DeepQueue(benchmark::State &state)
 
 	state.SetItemsProcessed(static_cast<int64_t>(state.iterations() * messages));
 }
-BENCHMARK(BM_ReliableLink_Load_DeepQueue)->ArgName("messages")->Arg(10'000)->Arg(100'000)->Unit(benchmark::kMillisecond);
+BENCHMARK(BM_ReliableLink_DeepQueue)->ArgName("messages")->Arg(10'000)->Arg(100'000)->Unit(benchmark::kMillisecond);
 
 } // namespace ChannelBenchmarks

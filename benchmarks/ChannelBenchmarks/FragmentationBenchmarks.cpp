@@ -84,8 +84,7 @@ static void BM_Fragmentation_Split(benchmark::State &state)
 	state.counters["fragments"] = static_cast<double>(FragmentationService::fragmentCount(body.size(), maxFragment));
 	state.SetBytesProcessed(static_cast<int64_t>(state.iterations() * body.size()));
 }
-BENCHMARK(BM_Fragmentation_Split)->Apply(bench::messageSizes);
-BENCHMARK(BM_Fragmentation_Split)->Name("BM_Fragmentation_Load_Split")->ArgName("bytes")->Arg(4 * bench::MiB)->Arg(MaxMessage)->Unit(benchmark::kMicrosecond);
+BENCHMARK(BM_Fragmentation_Split)->Apply(bench::messageSizes)->Arg(4 * bench::MiB)->Arg(MaxMessage)->Unit(benchmark::kMicrosecond);
 
 
 // Feeds every fragment of one message into accept(); args: message bytes, shuffled arrival order
@@ -113,16 +112,14 @@ static void BM_Fragmentation_Reassemble(benchmark::State &state)
 	state.counters["fragments"] = static_cast<double>(arrivals.size());
 	state.SetBytesProcessed(static_cast<int64_t>(state.iterations() * body.size()));
 }
-BENCHMARK(BM_Fragmentation_Reassemble)->ArgNames({"bytes", "shuffled"})->ArgsProduct({{64, bench::KiB, 64 * bench::KiB, bench::MiB}, {0, 1}});
 BENCHMARK(BM_Fragmentation_Reassemble)
-	->Name("BM_Fragmentation_Load_Reassemble")
 	->ArgNames({"bytes", "shuffled"})
-	->ArgsProduct({{4 * bench::MiB, MaxMessage}, {0, 1}})
-	->Unit(benchmark::kMillisecond);
+	->ArgsProduct({{64, bench::KiB, 64 * bench::KiB, bench::MiB, 4 * bench::MiB, MaxMessage}, {0, 1}})
+	->Unit(benchmark::kMicrosecond);
 
 
 // Many peers each deliver a 256 KiB message at the same time; their fragments arrive interleaved
-static void BM_Fragmentation_Load_ManyPeers(benchmark::State &state)
+static void BM_Fragmentation_ManyPeers(benchmark::State &state)
 {
 	const auto						peers	 = static_cast<size_t>(state.range(0));
 	const auto						message	 = bench::makePayload(256 * bench::KiB);
@@ -151,6 +148,6 @@ static void BM_Fragmentation_Load_ManyPeers(benchmark::State &state)
 	state.SetItemsProcessed(static_cast<int64_t>(state.iterations() * peers));
 	state.SetBytesProcessed(static_cast<int64_t>(state.iterations() * peers * message.size()));
 }
-BENCHMARK(BM_Fragmentation_Load_ManyPeers)->ArgName("peers")->Arg(16)->Arg(64)->Arg(255)->Unit(benchmark::kMillisecond);
+BENCHMARK(BM_Fragmentation_ManyPeers)->ArgName("peers")->Arg(16)->Arg(64)->Arg(255)->Unit(benchmark::kMillisecond);
 
 } // namespace ChannelBenchmarks
