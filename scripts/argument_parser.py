@@ -58,6 +58,13 @@ def create_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--benchmark-filter",
         default=None,
-        help="Only run benchmarks matching this regex, e.g. 'TimeoutService' or 'PeerChannel/Reliable'."
+        help="Only run benchmarks matching this regex, e.g. 'TimeoutService', 'PeerChannel/Reliable', '_Load_' for all load benchmarks or 'TimeoutService_Load' for one module's."
+    )
+
+    parser.add_argument(
+        "--benchmark-repetitions",
+        type=int,
+        default=1,
+        help="Run every benchmark this many times and report mean, median, stddev and cv instead of single results."
     )
     return parser

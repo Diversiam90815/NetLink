@@ -24,23 +24,30 @@ class BuildRunner:
         self.build_number = self.version_manager.get_build_number()
         self.version = self.version_manager.full_version()
 
-
     # ---- CMake / build ----
-    def prepare_cmake_project(self, platform: Platform, architecture: Architecture) -> None:
-        prepare_cmd = [
+    def configure_cmake_project(self, platform: Platform, architecture: Architecture,
+                                options: list[str] | None = None) -> None:
+        configure_cmd = [
             "cmake",
-            "-G", str(platform),
             "-S", str(self.root_dir),
             "-B", str(self.build_dir),
             f"-DNETLINK_BUILD_NUMBER={self.build_number}",
-        ]  
-        if platform == Platform.VS2022 or platform == Platform.VS2026:
-            prepare_cmd += ["-A", str(architecture)]
+            *(options or []),
+        ]
+
+        # The generator is chosen when the build directory is created; an existing one keeps its own
+        if not (self.build_dir / "CMakeCache.txt").is_file():
+            configure_cmd += ["-G", str(platform)]
+            if platform == Platform.VS2022 or platform == Platform.VS2026:
+                configure_cmd += ["-A", str(architecture)]
 
         BuildUtils.execute_command(
-            prepare_cmd,
+            configure_cmd,
             f"CMake: Generate {platform} project",
         )
+
+    def prepare_cmake_project(self, platform: Platform, architecture: Architecture) -> None:
+        self.configure_cmake_project(platform, architecture)
 
         # build backend in Release
         BuildUtils.execute_command(
@@ -52,7 +59,7 @@ class BuildRunner:
             ],
             f"CMake: Build {self.project_name} v{self.version or 'unknown'} (Release)",
         )
-        
+
         # build backend in Debug
         BuildUtils.execute_command(
             [
@@ -86,7 +93,6 @@ class BuildRunner:
             f"CMake: Install {self.project_name} (Debug)",
         )
 
-
     def run_cpp_unit_tests(self, configuration: Configuration, build_dir, target) -> None:
         with working_directory(build_dir):
             BuildUtils.execute_command(
@@ -109,9 +115,12 @@ class BuildRunner:
                 "CMake: Running C++ unit tests",
             )
 
+    def run_cpp_benchmarks(self, platform: Platform, architecture: Architecture, build_dir: Path, target: str,
+                           benchmark_filter: str | None = None, repetitions: int = 1) -> None:
+        # Benchmarks are opt-in and never part of a normal (CI) build: enable them in this build directory
+        self.configure_cmake_project(platform, architecture, ["-DNETLINK_BUILD_BENCHMARKS=ON"])
 
-    def run_cpp_benchmarks(self, build_dir: Path, target: str, benchmark_filter: str | None = None) -> None:
-        # Numbers of unoptimized code say nothing: benchmarks always run in Release
+        # Benchmarks always run in Release
         configuration = Configuration.Release
 
         BuildUtils.execute_command(
@@ -137,10 +146,11 @@ class BuildRunner:
         ]
         if benchmark_filter:
             command.append(f"--benchmark_filter={benchmark_filter}")
+        if repetitions > 1:
+            command += [f"--benchmark_repetitions={repetitions}", "--benchmark_report_aggregates_only=true"]
 
         BuildUtils.execute_streaming(command, "Running C++ benchmarks")
         print(f"\nResults written to {results_file}")
-
 
     @staticmethod
     def _find_executable(directory: Path, target: str, configuration: Configuration) -> Path:
