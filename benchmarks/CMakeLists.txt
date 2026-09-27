@@ -5,6 +5,15 @@ set(Benchmark_Directory ${CMAKE_CURRENT_SOURCE_DIR})
 
 set(Timeout_Benchmarks
     ${Benchmark_Directory}/TimeoutBenchmarks/TimeoutServiceBenchmarks.cpp
+
+set(Channel_Benchmarks
+        ${Benchmark_Directory}/ChannelBenchmarks/PacketCodecBenchmarks.cpp
+        ${Benchmark_Directory}/ChannelBenchmarks/SignalPacketBenchmarks.cpp
+        ${Benchmark_Directory}/ChannelBenchmarks/FragmentationBenchmarks.cpp
+        ${Benchmark_Directory}/ChannelBenchmarks/ReliableLinkBenchmarks.cpp
+        ${Benchmark_Directory}/ChannelBenchmarks/HeartbeatRttBenchmarks.cpp
+        ${Benchmark_Directory}/ChannelBenchmarks/PeerChannelBenchmarks.cpp
+)
 )
 
 set(Benchmark_Support
@@ -13,17 +22,18 @@ set(Benchmark_Support
         ${Benchmark_Directory}/Support/LoopbackChannelPair.h
 )
 set(All_Benchmarks
-    ${Timeout_Benchmarks}
+        ${Timeout_Benchmarks}
+        ${Channel_Benchmarks}
 )
 add_executable(NetLinkBenchmarks ${All_Benchmarks} ${Benchmark_Support})
 
 target_link_libraries(NetLinkBenchmarks PRIVATE NetLinkInternal)
 
-if(MSVC)
+if (MSVC)
     target_compile_options(NetLinkBenchmarks PRIVATE /W4)
-else()
+else ()
     target_compile_options(NetLinkBenchmarks PRIVATE -Wall -Wextra)
-endif()
+endif ()
 
 target_include_directories(NetLinkBenchmarks PRIVATE ${Benchmark_Directory}/Support)
 
