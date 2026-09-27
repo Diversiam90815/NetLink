@@ -3,8 +3,16 @@ include(Benchmarking)
 set(Benchmark_Directory ${CMAKE_CURRENT_SOURCE_DIR})
 
 
+
+set(Queue_Benchmarks
+        ${Benchmark_Directory}/QueueBenchmarks/BoundedQueueBenchmarks.cpp
+        ${Benchmark_Directory}/QueueBenchmarks/SequenceBufferBenchmarks.cpp
+        ${Benchmark_Directory}/QueueBenchmarks/TaskQueueBenchmarks.cpp
+)
+
 set(Timeout_Benchmarks
-    ${Benchmark_Directory}/TimeoutBenchmarks/TimeoutServiceBenchmarks.cpp
+        ${Benchmark_Directory}/TimeoutBenchmarks/TimeoutServiceBenchmarks.cpp
+)
 
 set(Channel_Benchmarks
         ${Benchmark_Directory}/ChannelBenchmarks/PacketCodecBenchmarks.cpp
@@ -36,6 +44,7 @@ set(Benchmark_Support
         ${Benchmark_Directory}/Support/LoopbackChannelPair.h
 )
 set(All_Benchmarks
+        ${Queue_Benchmarks}
         ${Timeout_Benchmarks}
         ${Channel_Benchmarks}
         ${Validation_Benchmarks}
