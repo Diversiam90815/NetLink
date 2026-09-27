@@ -3,6 +3,10 @@ include(Benchmarking)
 set(Benchmark_Directory ${CMAKE_CURRENT_SOURCE_DIR})
 
 
+set(Socket_Benchmarks
+        ${Benchmark_Directory}/SocketBenchmarks/UdpSocketBenchmarks.cpp
+        ${Benchmark_Directory}/SocketBenchmarks/IPv4AddressBenchmarks.cpp
+)
 
 set(Queue_Benchmarks
         ${Benchmark_Directory}/QueueBenchmarks/BoundedQueueBenchmarks.cpp
@@ -43,7 +47,10 @@ set(Benchmark_Support
         ${Benchmark_Directory}/Support/LinkWire.h
         ${Benchmark_Directory}/Support/LoopbackChannelPair.h
 )
+
+
 set(All_Benchmarks
+        ${Socket_Benchmarks}
         ${Queue_Benchmarks}
         ${Timeout_Benchmarks}
         ${Channel_Benchmarks}
