@@ -13,7 +13,7 @@ bool netlink::HandshakeTracker::beginForDiscoveredPeer(const DiscoveryEndpoint &
 {
 	std::lock_guard<std::mutex> lock(mMutex);
 
-	auto						it = mHandshakes.find(endpoint.displayName);
+	const auto					it = mHandshakes.find(endpoint.displayName);
 
 	if (it == mHandshakes.end())
 	{
@@ -39,9 +39,7 @@ bool netlink::HandshakeTracker::markReceived(const std::string &computerName)
 {
 	std::lock_guard<std::mutex> lock(mMutex);
 
-	auto						it = mHandshakes.find(computerName);
-
-	if (it != mHandshakes.end())
+	if (const auto it = mHandshakes.find(computerName); it != mHandshakes.end())
 	{
 		it->second.received = true;
 		return false;
@@ -62,8 +60,7 @@ void netlink::HandshakeTracker::markSent(const std::string &computerName)
 {
 	std::lock_guard<std::mutex> lock(mMutex);
 
-	auto						it = mHandshakes.find(computerName);
-	if (it != mHandshakes.end())
+	if (const auto it = mHandshakes.find(computerName); it != mHandshakes.end())
 		it->second.sent = true;
 }
 
@@ -72,7 +69,7 @@ std::optional<DiscoveryEndpoint> netlink::HandshakeTracker::tryCompleteAndRemove
 {
 	std::lock_guard<std::mutex> lock(mMutex);
 
-	auto						it = mHandshakes.find(computerName);
+	const auto					it = mHandshakes.find(computerName);
 	if (it == mHandshakes.end())
 	{
 		NETLINK_LOG_WARNING("Cannot start validation for {}. No pending handshake found!", computerName);
@@ -105,8 +102,7 @@ std::optional<netlink::RemoteHandshake> netlink::HandshakeTracker::get(const std
 {
 	std::lock_guard<std::mutex> lock(mMutex);
 
-	auto						it = mHandshakes.find(computerName);
-	if (it != mHandshakes.end())
+	if (const auto it = mHandshakes.find(computerName); it != mHandshakes.end())
 		return it->second;
 
 	return std::nullopt;

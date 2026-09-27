@@ -42,11 +42,11 @@ Result<sockaddr_in> toSockaddr(const SocketAddress &address)
 
 SocketAddress fromSockaddr(const sockaddr_in &addr)
 {
-	return {IPv4Address::fromHostOrder(ntohl(addr.sin_addr.s_addr)), ntohs(addr.sin_port)};
+	return {.ip = IPv4Address::fromHostOrder(ntohl(addr.sin_addr.s_addr)), .port = ntohs(addr.sin_port)};
 }
 
 
-Result<void> setIntOption(NativeHandle handle, int level, int name, int value)
+Result<void> setIntOption(const NativeHandle handle, const int level, const int name, const int value)
 {
 	if (setsockopt(toNative(handle), level, name, reinterpret_cast<const char *>(&value), sizeof(value)) == SocketErrorRet)
 		return failure();
@@ -55,7 +55,7 @@ Result<void> setIntOption(NativeHandle handle, int level, int name, int value)
 }
 
 
-BufferLength clampLength(size_t size)
+BufferLength clampLength(const size_t size)
 {
 #if defined(_WIN32)
 	return static_cast<BufferLength>(std::min<size_t>(size, static_cast<size_t>(std::numeric_limits<int>::max())));
@@ -67,7 +67,7 @@ BufferLength clampLength(size_t size)
 } // namespace
 
 
-Result<void> applyBindOptions(NativeHandle handle, const BindOptions &options)
+Result<void> applyBindOptions(const NativeHandle handle, const BindOptions &options)
 {
 	if (options.reuseAddress)
 	{
@@ -103,7 +103,7 @@ Result<void> applyBindOptions(NativeHandle handle, const BindOptions &options)
 }
 
 
-Result<void> bindTo(NativeHandle handle, const SocketAddress &address)
+Result<void> bindTo(const NativeHandle handle, const SocketAddress &address)
 {
 	auto addr = toSockaddr(address);
 	if (!addr)
@@ -116,7 +116,7 @@ Result<void> bindTo(NativeHandle handle, const SocketAddress &address)
 }
 
 
-Result<SocketAddress> localAddressOf(NativeHandle handle)
+Result<SocketAddress> localAddressOf(const NativeHandle handle)
 {
 	sockaddr_in addr{};
 	SockLen		length = sizeof(addr);
@@ -128,7 +128,7 @@ Result<SocketAddress> localAddressOf(NativeHandle handle)
 }
 
 
-Result<size_t> sendDatagram(NativeHandle handle, const SocketAddress &to, std::span<const uint8_t> data)
+Result<size_t> sendDatagram(const NativeHandle handle, const SocketAddress &to, const std::span<const uint8_t> data)
 {
 	auto addr = toSockaddr(to);
 	if (!addr)
@@ -151,17 +151,17 @@ Result<size_t> sendDatagram(NativeHandle handle, const SocketAddress &to, std::s
 }
 
 
-Result<Datagram> receiveDatagram(NativeHandle handle, std::span<uint8_t> buffer)
+Result<Datagram> receiveDatagram(const NativeHandle handle, std::span<uint8_t> buffer)
 {
 	while (true)
 	{
 		sockaddr_in from{};
-		SockLen		length	 = sizeof(from);
+		SockLen		length = sizeof(from);
 
-		const auto	received = ::recvfrom(toNative(handle), reinterpret_cast<char *>(buffer.data()), clampLength(buffer.size()), 0, reinterpret_cast<sockaddr *>(&from), &length);
-
-		if (received != SocketErrorRet)
-			return Datagram{static_cast<size_t>(received), fromSockaddr(from)};
+		if (const auto received =
+				::recvfrom(toNative(handle), reinterpret_cast<char *>(buffer.data()), clampLength(buffer.size()), 0, reinterpret_cast<sockaddr *>(&from), &length);
+			received != SocketErrorRet)
+			return Datagram{.size = static_cast<size_t>(received), .from = fromSockaddr(from)};
 
 		const int code = lastNativeError();
 		if (isInterrupted(code))

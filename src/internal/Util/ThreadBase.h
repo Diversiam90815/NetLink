@@ -83,7 +83,7 @@ public:
 protected:
 	virtual void run() = 0;
 
-	bool		 waitForEvent(unsigned long timeoutMS = 0)
+	bool		 waitForEvent(const unsigned long timeoutMS = 0)
 	{
 		std::unique_lock<std::mutex> lock(mMutex);
 
@@ -95,8 +95,8 @@ protected:
 		{
 			cv.wait(lock, [this] { return mEventTriggered || !isRunning(); });
 		}
-		bool wasTriggered = mEventTriggered;
-		mEventTriggered	  = false;			// Reset the flag
+		const bool wasTriggered = mEventTriggered;
+		mEventTriggered			= false;	// Reset the flag
 
 		return wasTriggered && isRunning(); // Return true if event was triggered and thread is still running
 	}

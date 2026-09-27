@@ -2,7 +2,7 @@
   ==============================================================================
 	Module:         ReliableLink
 	Description:    Reliable, ordered message stream to one remote peer on top
-					of datagrams (Data -> DataAck -> AckAck per message key)
+					of datagrams (Data -> DataAck -> AckAck per seq)
   ==============================================================================
 */
 

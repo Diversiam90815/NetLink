@@ -2,7 +2,7 @@
   ==============================================================================
 	Module:         ReliableLink
 	Description:    Reliable, ordered message stream to one remote peer on top
-					of datagrams (Data -> DataAck -> AckAck per message key)
+					of datagrams (Data -> DataAck -> AckAck per seq)
   ==============================================================================
 */
 
@@ -23,10 +23,10 @@
 
 /*
  Reliable flow:
-	Every reliable packet is identified by its 64-bit seq (the message key within the sender's current stream) and
+	Every reliable packet is identified by its 64-bit seq (unique within the sender's current stream) and
 	completes a three-way exchange:
 
-		Data(key) -> DataAck(key) -> AckAck(key)
+		Data(seq) -> DataAck(seq) -> AckAck(seq)
 
 	The sender retransmits Data until the DataAck arrives, the receiver retransmits the DataAck until the AckAck arrives.
  */

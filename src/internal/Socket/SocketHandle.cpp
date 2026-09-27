@@ -39,7 +39,7 @@ void SocketHandle::shutdown() const
 }
 
 
-Result<void> SocketHandle::wait(WaitFor what, std::chrono::milliseconds timeout) const
+Result<void> SocketHandle::wait(const WaitFor what, const std::chrono::milliseconds timeout) const
 {
 	using Clock			= std::chrono::steady_clock;
 	const auto deadline = Clock::now() + timeout;
@@ -51,9 +51,7 @@ Result<void> SocketHandle::wait(WaitFor what, std::chrono::milliseconds timeout)
 
 		const auto remaining = std::max(std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now()), std::chrono::milliseconds{0});
 
-		auto	   ready	 = platform::waitUntil(mHandle, what, std::min(remaining, ShutdownPollSlice));
-
-		if (ready || ready.error() != SocketError::Timeout)
+		if (auto ready = platform::waitUntil(mHandle, what, std::min(remaining, ShutdownPollSlice)); ready || ready.error() != SocketError::Timeout)
 			return isShutdown() ? Result<void>(std::unexpected(SocketError::Closed)) : ready;
 
 		if (Clock::now() >= deadline)

@@ -35,7 +35,7 @@ class SocketHandle
 {
 public:
 	SocketHandle() = default;
-	explicit SocketHandle(NativeHandle handle) : mHandle(handle), mShutdown(std::make_unique<std::atomic<bool>>(false)) {}
+	explicit SocketHandle(const NativeHandle handle) : mHandle(handle), mShutdown(std::make_unique<std::atomic<bool>>(false)) {}
 	~SocketHandle() { reset(); }
 
 	SocketHandle(const SocketHandle &)			  = delete;

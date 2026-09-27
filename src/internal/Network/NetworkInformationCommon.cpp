@@ -7,6 +7,7 @@
 */
 
 #include "NetworkInformation.h"
+#include "NetLinkLog.h"
 
 #include <algorithm>
 #include <ranges>

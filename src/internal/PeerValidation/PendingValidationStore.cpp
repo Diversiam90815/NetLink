@@ -29,8 +29,7 @@ std::optional<netlink::PendingValidation> netlink::PendingValidationStore::get(c
 {
 	std::lock_guard<std::mutex> lock(mMutex);
 
-	auto						it = mPending.find(computerName);
-	if (it != mPending.end())
+	if (const auto it = mPending.find(computerName); it != mPending.end())
 		return it->second;
 
 	return std::nullopt;

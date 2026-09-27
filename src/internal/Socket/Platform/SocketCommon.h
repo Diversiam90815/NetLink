@@ -44,11 +44,11 @@ inline int			 lastNativeError()
 {
 	return WSAGetLastError();
 }
-inline bool isWouldBlock(int code)
+inline bool isWouldBlock(const int code)
 {
 	return code == WSAEWOULDBLOCK;
 }
-inline bool isInterrupted(int code)
+inline bool isInterrupted(const int code)
 {
 	return code == WSAEINTR;
 }
@@ -82,12 +82,12 @@ inline bool isInterrupted(int code)
 #endif
 
 
-inline NativeSocket toNative(NativeHandle handle)
+inline NativeSocket toNative(const NativeHandle handle)
 {
 	return static_cast<NativeSocket>(handle);
 }
 
-inline NativeHandle fromNative(NativeSocket socket)
+inline NativeHandle fromNative(const NativeSocket socket)
 {
 	return static_cast<NativeHandle>(socket);
 }

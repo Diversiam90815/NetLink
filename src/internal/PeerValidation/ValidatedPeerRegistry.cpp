@@ -20,8 +20,7 @@ std::optional<netlink::ValidationResult> netlink::ValidatedPeerRegistry::get(con
 {
 	std::lock_guard<std::mutex> lock(mMutex);
 
-	auto						it = mValidatedPeers.find(computerName);
-	if (it != mValidatedPeers.end())
+	if (const auto it = mValidatedPeers.find(computerName); it != mValidatedPeers.end())
 		return it->second;
 
 	return std::nullopt;
@@ -42,7 +41,7 @@ std::vector<netlink::ValidationResult> netlink::ValidatedPeerRegistry::getAllRea
 	std::vector<ValidationResult> result;
 	result.reserve(mValidatedPeers.size());
 
-	for (const auto &[name, vr] : mValidatedPeers)
+	for (const auto &vr : mValidatedPeers | std::views::values)
 	{
 		if (vr.isReadyToConnect())
 			result.push_back(vr);
