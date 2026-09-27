@@ -6,6 +6,7 @@
 */
 
 #include "NetworkInformation.h"
+#include "NetLinkLog.h"
 
 #include <arpa/inet.h>
 #include <ifaddrs.h>
@@ -91,7 +92,7 @@ NetworkInformation::~NetworkInformation()
 }
 
 
-bool NetworkInformation::init()
+bool NetworkInformation::init() const
 {
 	return mImpl->getNetworkInformationFromOS();
 }
