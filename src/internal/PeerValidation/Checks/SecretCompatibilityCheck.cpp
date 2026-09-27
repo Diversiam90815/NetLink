@@ -28,7 +28,7 @@ void netlink::SecretCompatibilityCheck::onRemoteDataReceived(const std::string &
 bool netlink::SecretCompatibilityCheck::isReady(const std::string &computerName) const
 {
 	std::lock_guard<std::mutex> lock(mMutex);
-	return mReceivedSecrets.find(computerName) != mReceivedSecrets.end();
+	return mReceivedSecrets.contains(computerName);
 }
 
 
@@ -36,7 +36,7 @@ bool netlink::SecretCompatibilityCheck::evaluate(const std::string &computerName
 {
 	std::lock_guard<std::mutex> lock(mMutex);
 
-	auto						it = mReceivedSecrets.find(computerName);
+	const auto					it = mReceivedSecrets.find(computerName);
 	if (it == mReceivedSecrets.end())
 		return false;
 

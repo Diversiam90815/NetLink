@@ -18,11 +18,11 @@ namespace
 // major.minor of a dotted version string. Missing or unparsable components count as 0
 std::pair<int, int> protocolVersion(std::string_view version)
 {
-	const auto number = [](std::string_view text)
+	const auto number = [](const std::string_view text)
 	{
-		int		   value  = 0;
-		const auto result = std::from_chars(text.data(), text.data() + text.size(), value);
-		return result.ec == std::errc{} ? value : 0;
+		int value			 = 0;
+		const auto [ptr, ec] = std::from_chars(text.data(), text.data() + text.size(), value);
+		return ec == std::errc{} ? value : 0;
 	};
 
 	const auto firstDot = version.find('.');
@@ -60,11 +60,11 @@ void netlink::VersionCompatibilityCheck::onRemoteDataReceived(const std::string 
 bool netlink::VersionCompatibilityCheck::isReady(const std::string &computerName) const
 {
 	std::lock_guard<std::mutex> lock(mMutex);
-	return mReceivedVersions.find(computerName) != mReceivedVersions.end();
+	return mReceivedVersions.contains(computerName);
 }
 
 
-bool netlink::VersionCompatibilityCheck::isCompatible(std::string_view first, std::string_view second)
+bool netlink::VersionCompatibilityCheck::isCompatible(const std::string_view first, const std::string_view second)
 {
 	return protocolVersion(first) == protocolVersion(second);
 }
@@ -74,7 +74,7 @@ bool netlink::VersionCompatibilityCheck::evaluate(const std::string &computerNam
 {
 	std::lock_guard<std::mutex> lock(mMutex);
 
-	auto						it = mReceivedVersions.find(computerName);
+	const auto					it = mReceivedVersions.find(computerName);
 	if (it == mReceivedVersions.end())
 		return false;
 
@@ -86,7 +86,7 @@ std::string netlink::VersionCompatibilityCheck::failureMessage(const std::string
 {
 	std::lock_guard<std::mutex> lock(mMutex);
 
-	auto						it	   = mReceivedVersions.find(computerName);
+	const auto					it	   = mReceivedVersions.find(computerName);
 	const std::string			remote = it != mReceivedVersions.end() ? it->second : std::string{"unknown"};
 
 	return "Version mismatch: remote " + remote + ", local " + mLocalVersion;
@@ -104,6 +104,6 @@ std::string netlink::VersionCompatibilityCheck::remoteVersion(const std::string 
 {
 	std::lock_guard<std::mutex> lock(mMutex);
 
-	auto						it = mReceivedVersions.find(computerName);
+	const auto					it = mReceivedVersions.find(computerName);
 	return it != mReceivedVersions.end() ? it->second : std::string{};
 }

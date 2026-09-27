@@ -8,10 +8,9 @@
 #include <vector>
 
 #include "TestIp.h"
+#include "Channel/PeerChannel.h"
 #include "ConnectionService/ConnectionService.h"
-#include "Signaling/SignalingService.h"
-#include "Transport/TransportFactory.h"
-#include "Transport/TransportInterfaces.h"
+#include "FakeDatagramNetwork.h"
 
 using namespace netlink;
 using namespace std::chrono_literals;
@@ -19,97 +18,6 @@ using namespace std::chrono_literals;
 
 namespace ConnectionTests
 {
-
-class FakeSession : public ISession
-{
-public:
-	explicit FakeSession(net::IPv4Address remote) : remoteAddress(remote) {}
-
-	bool			  isConnected() const override { return !closed.load(); }
-	bool			  sendMessage(const InternalMessage &, DeliveryMode) override { return isConnected(); }
-	void			  startReadAsync(MessageReceivedCallback, DisconnectedCallback) override {}
-	void			  stopReadAsync() override {}
-	int				  getBoundPort() const override { return 40000; }
-	net::IPv4Address  getRemoteAddress() const override { return remoteAddress; }
-	int				  getRemotePort() const override { return 50000; }
-	void			  close() override { closed.store(true); }
-
-	net::IPv4Address  remoteAddress;
-	std::atomic<bool> closed{false};
-};
-
-
-class FakeServer : public IServer
-{
-public:
-	void setSessionHandler(SessionHandler handler) override { sessionHandler = std::move(handler); }
-	bool start(const net::IPv4Address &localAddress) override
-	{
-		startedOn = localAddress;
-		started	  = true;
-		return startSucceeds;
-	}
-	void			 stop() override { stopped = true; }
-	int				 getBoundPort() const override { return boundPort; }
-
-	bool			 startSucceeds{true};
-	bool			 started{false};
-	bool			 stopped{false};
-	net::IPv4Address startedOn;
-	int				 boundPort{12345};
-	SessionHandler	 sessionHandler;
-};
-
-
-class FakeClient : public IClient
-{
-public:
-	void connect(const net::IPv4Address &localAddress, const net::IPv4Address &host, unsigned short port) override
-	{
-		connectedFrom = localAddress;
-		connectedHost = host;
-		connectedPort = port;
-		connectCalled = true;
-	}
-	void				  setConnectHandler(ConnectHandler handler) override { connectHandler = std::move(handler); }
-	void				  setConnectTimeoutHandler(ConnectTimeoutHandler handler) override { timeoutHandler = std::move(handler); }
-
-	bool				  connectCalled{false};
-	net::IPv4Address	  connectedFrom;
-	net::IPv4Address	  connectedHost;
-	unsigned short		  connectedPort{0};
-	ConnectHandler		  connectHandler;
-	ConnectTimeoutHandler timeoutHandler;
-};
-
-
-class FakeTransportFactory : public ITransportFactory
-{
-public:
-	std::unique_ptr<IServer> createServer() override
-	{
-		auto server			  = std::make_unique<FakeServer>();
-		server->startSucceeds = !failServerStart;
-		lastServer			  = server.get();
-		serverCreated		  = true;
-		return server;
-	}
-
-	std::unique_ptr<IClient> createClient() override
-	{
-		auto client	  = std::make_unique<FakeClient>();
-		lastClient	  = client.get();
-		clientCreated = true;
-		return client;
-	}
-
-	bool		failServerStart{false};
-	bool		serverCreated{false};
-	bool		clientCreated{false};
-	FakeServer *lastServer{nullptr};
-	FakeClient *lastClient{nullptr};
-};
-
 
 template <typename Predicate>
 bool waitUntil(Predicate predicate, std::chrono::milliseconds timeout = 1s)
@@ -137,19 +45,86 @@ static ValidationResult makeReadyResult(const std::string &name, std::string_vie
 }
 
 
+// The service talks through a real, bound PeerChannel; its packets go into an in-memory network nobody listens on.
+// Signals from the remote are injected by calling the service's handlers directly.
 class ConnectionServiceTest : public ::testing::Test
 {
 protected:
 	void SetUp() override
 	{
-		signaling = std::make_unique<SignalingService>();
-		service	  = std::make_unique<ConnectionService>(*signaling, factory);
+		ASSERT_TRUE(channel.init("pc-local"));
+		channel.setLocalIPv4(ipv4("10.0.0.1"));
+
+		service = std::make_unique<ConnectionService>(channel);
 		service->setLocalIP(ipv4("10.0.0.1"));
+
+		ConnectionServiceCallbacks cb;
+		cb.onStatusUpdate = [this](const ConnectionStatusUpdate &update)
+		{
+			std::lock_guard<std::mutex> lock(updatesMutex);
+			updates.push_back(update.type);
+			lastMessage = update.message;
+		};
+		service->setCallbacks(cb);
 	}
 
-	FakeTransportFactory			   factory;
-	std::unique_ptr<SignalingService>  signaling;
-	std::unique_ptr<ConnectionService> service;
+	void TearDown() override
+	{
+		service.reset();
+		channel.deinit();
+	}
+
+	// Discovered (known to the channel) and validated
+	void validate(const std::string &name, std::string_view ip = "10.0.0.5", int port = 6000)
+	{
+		channel.registerPeer(name, ipv4(ip), port);
+		service->onPeerValidated(makeReadyResult(name, ip, port));
+	}
+
+	bool received(ConnectionStatusUpdate::Type type)
+	{
+		std::lock_guard<std::mutex> lock(updatesMutex);
+		return std::find(updates.begin(), updates.end(), type) != updates.end();
+	}
+
+	std::string message()
+	{
+		std::lock_guard<std::mutex> lock(updatesMutex);
+		return lastMessage;
+	}
+
+	// Initiator side: invitation sent and accepted, waiting for the remote's ready flag
+	void acceptedAsInitiator(const std::string &name = "pc-a")
+	{
+		validate(name);
+		ASSERT_TRUE(service->initiateConnection(name));
+		service->onReceivedAnswerToInvite(name, true, "");
+		ASSERT_EQ(service->getConnectionState(), ConnectionStateInternal::AwaitingReadyFlag);
+	}
+
+	// Acceptor side: invitation received and accepted, waiting for the remote's ready flag
+	void acceptedAsAcceptor(const std::string &name = "pc-b")
+	{
+		validate(name);
+		service->onReceivedInvitation(name);
+		ASSERT_TRUE(service->acceptIncomingConnection(name));
+		ASSERT_EQ(service->getConnectionState(), ConnectionStateInternal::AwaitingReadyFlag);
+	}
+
+	void establish(const std::string &name = "pc-b")
+	{
+		acceptedAsAcceptor(name);
+		service->onReadyFlagReceived(name);
+		ASSERT_TRUE(waitUntil([&] { return received(ConnectionStatusUpdate::Type::Established); }));
+	}
+
+	std::shared_ptr<FakeNet::FakeDatagramNetwork> network = FakeNet::FakeDatagramNetwork::create();
+	PeerChannel									  channel{network->factory("10.0.0.1")};
+	std::unique_ptr<ConnectionService>			  service;
+
+	std::mutex									  updatesMutex;
+	std::vector<ConnectionStatusUpdate::Type>	  updates;
+	std::string									  lastMessage;
 };
 
 
@@ -177,7 +152,7 @@ TEST_F(ConnectionServiceTest, InitiateConnection_FailsWhenValidationNotReady)
 
 TEST_F(ConnectionServiceTest, InitiateConnection_SucceedsWhenValidated)
 {
-	service->onPeerValidated(makeReadyResult("pc-a"));
+	validate("pc-a");
 
 	EXPECT_TRUE(service->initiateConnection("pc-a")) << "initiateConnection() must succeed once a ready-to-connect validation result is cached";
 	EXPECT_TRUE(service->isConnecting()) << "The service must be in the 'connecting' state right after initiating a connection";
@@ -185,10 +160,21 @@ TEST_F(ConnectionServiceTest, InitiateConnection_SucceedsWhenValidated)
 }
 
 
+TEST_F(ConnectionServiceTest, InitiateConnection_FailsWhenTheInvitationCannotBeSent)
+{
+	// Validated, but the channel does not know where the peer lives
+	service->onPeerValidated(makeReadyResult("pc-a"));
+
+	EXPECT_FALSE(service->initiateConnection("pc-a"));
+	EXPECT_EQ(service->getConnectionState(), ConnectionStateInternal::Idle);
+	EXPECT_TRUE(received(ConnectionStatusUpdate::Type::Failed));
+}
+
+
 TEST_F(ConnectionServiceTest, InitiateConnection_FailsWhenAlreadyConnecting)
 {
-	service->onPeerValidated(makeReadyResult("pc-a"));
-	service->onPeerValidated(makeReadyResult("pc-b"));
+	validate("pc-a");
+	validate("pc-b", "10.0.0.6");
 
 	ASSERT_TRUE(service->initiateConnection("pc-a"));
 	EXPECT_FALSE(service->initiateConnection("pc-b")) << "A second initiateConnection() call must fail while a connection attempt is already in progress";
@@ -197,7 +183,7 @@ TEST_F(ConnectionServiceTest, InitiateConnection_FailsWhenAlreadyConnecting)
 
 TEST_F(ConnectionServiceTest, InitiateConnection_SetsCurrentRemote)
 {
-	service->onPeerValidated(makeReadyResult("pc-a", "10.0.0.9", 7000));
+	validate("pc-a", "10.0.0.9", 7000);
 	ASSERT_TRUE(service->initiateConnection("pc-a"));
 
 	auto remote = service->getCurrentRemote();
@@ -221,7 +207,7 @@ TEST_F(ConnectionServiceTest, OnReceivedInvitation_DeclinesWhenPeerNotValidated)
 
 TEST_F(ConnectionServiceTest, OnReceivedInvitation_TracksInvitationWhenValidated)
 {
-	service->onPeerValidated(makeReadyResult("pc-b"));
+	validate("pc-b");
 	service->onReceivedInvitation("pc-b");
 
 	EXPECT_TRUE(service->hasIncomingInvitation()) << "An invitation from a validated peer must be tracked as a pending incoming invitation";
@@ -234,12 +220,13 @@ TEST_F(ConnectionServiceTest, OnReceivedInvitation_AutoAcceptsWhenConfigured)
 	ConnectionConfig cfg;
 	cfg.autoAcceptConnection = true;
 	service->setConfig(cfg);
-	service->onPeerValidated(makeReadyResult("pc-b"));
+	validate("pc-b");
 
 	service->onReceivedInvitation("pc-b");
 
 	// auto-accept is posted onto the task queue, so we need to wait for it to run
-	EXPECT_TRUE(waitUntil([&] { return service->isConnecting(); })) << "With autoAcceptConnection enabled, the invitation must be automatically accepted asynchronously";
+	EXPECT_TRUE(waitUntil([&] { return service->getConnectionState() == ConnectionStateInternal::AwaitingReadyFlag; }))
+		<< "With autoAcceptConnection enabled, the invitation must be automatically accepted asynchronously";
 }
 
 
@@ -255,7 +242,7 @@ TEST_F(ConnectionServiceTest, AcceptIncomingConnection_FailsWithoutPendingInvita
 
 TEST_F(ConnectionServiceTest, AcceptIncomingConnection_FailsOnNameMismatch)
 {
-	service->onPeerValidated(makeReadyResult("pc-b"));
+	validate("pc-b");
 	service->onReceivedInvitation("pc-b");
 
 	EXPECT_FALSE(service->acceptIncomingConnection("someone-else"))
@@ -263,16 +250,14 @@ TEST_F(ConnectionServiceTest, AcceptIncomingConnection_FailsOnNameMismatch)
 }
 
 
-TEST_F(ConnectionServiceTest, AcceptIncomingConnection_SucceedsAndEstablishesTransport)
+TEST_F(ConnectionServiceTest, AcceptIncomingConnection_OpensTheSession)
 {
-	service->onPeerValidated(makeReadyResult("pc-b", "10.0.0.2"));
-	service->onReceivedInvitation("pc-b");
+	acceptedAsAcceptor();
 
-	EXPECT_TRUE(service->acceptIncomingConnection("pc-b")) << "acceptIncomingConnection() must succeed for a matching, pending invitation";
-	// Local IP 10.0.0.1 vs remote 10.0.0.2 -> remote numerically higher => remote would be Acceptor,
-	// meaning the local side (lower IP) becomes the Connector and creates a client.
-	EXPECT_TRUE(waitUntil([&] { return factory.clientCreated || factory.serverCreated; }))
-		<< "Accepting the invitation must trigger transport role negotiation, creating either a server or a client";
+	EXPECT_TRUE(received(ConnectionStatusUpdate::Type::Accepted));
+	EXPECT_TRUE(received(ConnectionStatusUpdate::Type::Establishing));
+	EXPECT_FALSE(service->isConnected()) << "Connected only once the remote's ready flag arrived";
+	EXPECT_TRUE(service->isConnecting());
 }
 
 
@@ -284,7 +269,7 @@ TEST_F(ConnectionServiceTest, DeclineIncomingConnection_FailsWithoutPendingInvit
 
 TEST_F(ConnectionServiceTest, DeclineIncomingConnection_ClearsPendingInvitation)
 {
-	service->onPeerValidated(makeReadyResult("pc-b"));
+	validate("pc-b");
 	service->onReceivedInvitation("pc-b");
 
 	EXPECT_TRUE(service->declineIncomingConnection("pc-b", "not now"));
@@ -294,51 +279,28 @@ TEST_F(ConnectionServiceTest, DeclineIncomingConnection_ClearsPendingInvitation)
 
 
 // ---------------------------------------------------------------------------
-// closeConnection
-// ---------------------------------------------------------------------------
-
-TEST_F(ConnectionServiceTest, CloseConnection_FailsWhenNoConnectionExists)
-{
-	EXPECT_FALSE(service->closeConnection("pc-b")) << "closeConnection() must fail when there is no active or in-progress connection";
-}
-
-
-TEST_F(ConnectionServiceTest, CloseConnection_ClearsInProgressConnection)
-{
-	service->onPeerValidated(makeReadyResult("pc-a"));
-	ASSERT_TRUE(service->initiateConnection("pc-a"));
-
-	EXPECT_TRUE(service->closeConnection("pc-a"));
-	EXPECT_EQ(service->getConnectionState(), ConnectionStateInternal::Idle) << "Closing an in-progress connection must reset state back to Idle";
-	EXPECT_FALSE(service->isConnecting());
-}
-
-
-// ---------------------------------------------------------------------------
 // onReceivedAnswerToInvite
 // ---------------------------------------------------------------------------
 
 TEST_F(ConnectionServiceTest, OnReceivedAnswerToInvite_Declined_ClearsConnection)
 {
-	service->onPeerValidated(makeReadyResult("pc-a"));
+	validate("pc-a");
 	ASSERT_TRUE(service->initiateConnection("pc-a"));
 
 	service->onReceivedAnswerToInvite("pc-a", false, "no thanks");
 
 	EXPECT_EQ(service->getConnectionState(), ConnectionStateInternal::Idle) << "A declined answer must clear the current connection attempt, returning state to Idle";
 	EXPECT_FALSE(service->isConnecting());
+	EXPECT_NE(message().find("no thanks"), std::string::npos) << "The remote's reason must reach the app";
 }
 
 
-TEST_F(ConnectionServiceTest, OnReceivedAnswerToInvite_Accepted_EstablishesTransport)
+TEST_F(ConnectionServiceTest, OnReceivedAnswerToInvite_Accepted_OpensTheSession)
 {
-	service->onPeerValidated(makeReadyResult("pc-a", "10.0.0.9"));
-	ASSERT_TRUE(service->initiateConnection("pc-a"));
+	acceptedAsInitiator();
 
-	service->onReceivedAnswerToInvite("pc-a", true, "");
-
-	EXPECT_TRUE(waitUntil([&] { return factory.clientCreated || factory.serverCreated; }))
-		<< "Accepting our invitation must trigger role negotiation and transport creation on the initiator side";
+	EXPECT_TRUE(received(ConnectionStatusUpdate::Type::Accepted));
+	EXPECT_TRUE(received(ConnectionStatusUpdate::Type::Establishing));
 }
 
 
@@ -351,7 +313,176 @@ TEST_F(ConnectionServiceTest, OnReceivedAnswerToInvite_IgnoredWithoutActiveReque
 
 
 // ---------------------------------------------------------------------------
-// State queries
+// Session establishment (ready flags)
+// ---------------------------------------------------------------------------
+
+TEST_F(ConnectionServiceTest, Acceptor_ConnectsOnceTheRemoteIsReady)
+{
+	acceptedAsAcceptor();
+
+	service->onReadyFlagReceived("pc-b");
+
+	EXPECT_TRUE(waitUntil([&] { return received(ConnectionStatusUpdate::Type::Established); }));
+	EXPECT_TRUE(service->isConnected());
+	EXPECT_FALSE(service->isConnecting());
+	EXPECT_EQ(service->getConnectionState(), ConnectionStateInternal::Connected);
+}
+
+
+TEST_F(ConnectionServiceTest, Initiator_ConnectsOnceTheRemoteIsReady)
+{
+	acceptedAsInitiator();
+
+	service->onReadyFlagReceived("pc-a");
+
+	EXPECT_TRUE(waitUntil([&] { return received(ConnectionStatusUpdate::Type::Established); }));
+	EXPECT_TRUE(service->isConnected());
+}
+
+
+TEST_F(ConnectionServiceTest, EarlyReadyFlag_CompletesAsSoonAsTheSessionOpens)
+{
+	validate("pc-a");
+	ASSERT_TRUE(service->initiateConnection("pc-a"));
+
+	// The remote's ready flag is processed before its answer
+	service->onReadyFlagReceived("pc-a");
+	ASSERT_TRUE(waitUntil([&] { return service->getConnectionState() == ConnectionStateInternal::InvitationSent && !service->isConnected(); }));
+	std::this_thread::sleep_for(20ms);
+
+	service->onReceivedAnswerToInvite("pc-a", true, "");
+
+	EXPECT_TRUE(service->isConnected()) << "Both sides are ready: no need to wait for another flag";
+}
+
+
+TEST_F(ConnectionServiceTest, ReadyFlagFromAnotherPeer_IsIgnored)
+{
+	acceptedAsAcceptor("pc-b");
+
+	service->onReadyFlagReceived("pc-intruder");
+
+	std::this_thread::sleep_for(50ms);
+	EXPECT_FALSE(service->isConnected());
+}
+
+
+TEST_F(ConnectionServiceTest, MissingReadyFlag_FailsAfterTheTimeout)
+{
+	ConnectionConfig cfg;
+	cfg.readyFlagTimeoutMs = 100;
+	service->setConfig(cfg);
+
+	acceptedAsAcceptor();
+
+	EXPECT_TRUE(waitUntil([&] { return received(ConnectionStatusUpdate::Type::Failed); }));
+	EXPECT_EQ(service->getConnectionState(), ConnectionStateInternal::Idle);
+}
+
+
+TEST_F(ConnectionServiceTest, Established_DisarmsTheReadyFlagTimeout)
+{
+	ConnectionConfig cfg;
+	cfg.readyFlagTimeoutMs = 100;
+	service->setConfig(cfg);
+
+	establish();
+
+	std::this_thread::sleep_for(250ms);
+	EXPECT_TRUE(service->isConnected());
+	EXPECT_FALSE(received(ConnectionStatusUpdate::Type::Failed));
+}
+
+
+// ---------------------------------------------------------------------------
+// Loss and teardown
+// ---------------------------------------------------------------------------
+
+TEST_F(ConnectionServiceTest, PeerLost_ClosesAnEstablishedConnection)
+{
+	establish();
+
+	service->onPeerLost("pc-b", "the peer stopped acknowledging messages");
+
+	EXPECT_TRUE(waitUntil([&] { return !service->isConnected(); }));
+	EXPECT_TRUE(waitUntil([&] { return received(ConnectionStatusUpdate::Type::Closed); })) << "A lost peer must be reported as Closed";
+	EXPECT_EQ(service->getConnectionState(), ConnectionStateInternal::Idle);
+}
+
+
+TEST_F(ConnectionServiceTest, PeerLost_WhileConnecting_Fails)
+{
+	acceptedAsInitiator();
+
+	service->onPeerLost("pc-a", "no traffic from the peer anymore");
+
+	EXPECT_TRUE(waitUntil([&] { return received(ConnectionStatusUpdate::Type::Failed); }));
+	EXPECT_EQ(service->getConnectionState(), ConnectionStateInternal::Idle);
+}
+
+
+TEST_F(ConnectionServiceTest, PeerLost_ForAnotherPeer_IsIgnored)
+{
+	establish("pc-b");
+
+	service->onPeerLost("pc-other", "whatever");
+
+	std::this_thread::sleep_for(50ms);
+	EXPECT_TRUE(service->isConnected());
+}
+
+
+TEST_F(ConnectionServiceTest, PeerLost_WithoutConnection_IsIgnored)
+{
+	service->onPeerLost("pc-b", "stale notification");
+
+	std::this_thread::sleep_for(50ms);
+	EXPECT_FALSE(received(ConnectionStatusUpdate::Type::Closed));
+}
+
+
+TEST_F(ConnectionServiceTest, DisconnectReceived_ClosesTheConnection)
+{
+	establish();
+
+	service->onDisconnectReceived("pc-b");
+
+	EXPECT_TRUE(waitUntil([&] { return received(ConnectionStatusUpdate::Type::Closed); }));
+	EXPECT_FALSE(service->isConnected());
+}
+
+
+TEST_F(ConnectionServiceTest, CloseConnection_FailsWhenNoConnectionExists)
+{
+	EXPECT_FALSE(service->closeConnection("pc-b")) << "closeConnection() must fail when there is no active or in-progress connection";
+}
+
+
+TEST_F(ConnectionServiceTest, CloseConnection_ClearsInProgressConnection)
+{
+	validate("pc-a");
+	ASSERT_TRUE(service->initiateConnection("pc-a"));
+
+	EXPECT_TRUE(service->closeConnection("pc-a"));
+	EXPECT_EQ(service->getConnectionState(), ConnectionStateInternal::Idle) << "Closing an in-progress connection must reset state back to Idle";
+	EXPECT_FALSE(service->isConnecting());
+}
+
+
+TEST_F(ConnectionServiceTest, CloseConnection_WhenConnected_ReportsClosed)
+{
+	establish();
+
+	EXPECT_TRUE(service->closeConnection("pc-b"));
+
+	EXPECT_FALSE(service->isConnected());
+	EXPECT_TRUE(received(ConnectionStatusUpdate::Type::Closing)) << "An established connection must go through the closing path (sends Disconnect to the peer)";
+	EXPECT_TRUE(received(ConnectionStatusUpdate::Type::Closed));
+}
+
+
+// ---------------------------------------------------------------------------
+// State and configuration
 // ---------------------------------------------------------------------------
 
 TEST_F(ConnectionServiceTest, InitialState_IsIdleAndNotConnected)
@@ -364,194 +495,21 @@ TEST_F(ConnectionServiceTest, InitialState_IsIdleAndNotConnected)
 }
 
 
-// ---------------------------------------------------------------------------
-// setConfig
-// ---------------------------------------------------------------------------
-
 TEST_F(ConnectionServiceTest, SetConfig_DoesNotCrash)
 {
 	ConnectionConfig cfg;
-	cfg.maxConnectionRetries = 5;
-	cfg.invitationTimeoutMs	 = 1000;
+	cfg.invitationTimeoutMs = 1000;
 	EXPECT_NO_THROW(service->setConfig(cfg)) << "Applying a custom config must not throw";
 }
 
 
-// ---------------------------------------------------------------------------
-// Callbacks
-// ---------------------------------------------------------------------------
-
 TEST_F(ConnectionServiceTest, StatusCallback_FiresOnInitiate)
 {
-	std::atomic<bool>						  fired{false};
-	std::vector<ConnectionStatusUpdate::Type> types;
-	std::mutex								  mutex;
-
-	ConnectionServiceCallbacks				  cb;
-	cb.onStatusUpdate = [&](const ConnectionStatusUpdate &update)
-	{
-		std::lock_guard<std::mutex> lock(mutex);
-		types.push_back(update.type);
-		fired.store(true);
-	};
-	service->setCallbacks(cb);
-
-	service->onPeerValidated(makeReadyResult("pc-a"));
+	validate("pc-a");
 	service->initiateConnection("pc-a");
 
-	EXPECT_TRUE(fired.load()) << "The onStatusUpdate callback must fire at least once when a connection is initiated";
-	std::lock_guard<std::mutex> lock(mutex);
-	EXPECT_NE(std::find(types.begin(), types.end(), ConnectionStatusUpdate::Type::Initiated), types.end())
-		<< "The Initiated status update must be delivered when initiateConnection() begins";
-	EXPECT_NE(std::find(types.begin(), types.end(), ConnectionStatusUpdate::Type::InvitationSent), types.end())
-		<< "The InvitationSent status update must be delivered after successfully sending the invitation";
-}
-
-// ---------------------------------------------------------------------------
-// Transport establishment
-// ---------------------------------------------------------------------------
-
-class ConnectionServiceAcceptorTest : public ConnectionServiceTest
-{
-protected:
-	void SetUp() override
-	{
-		ConnectionServiceTest::SetUp();
-
-		ConnectionServiceCallbacks cb;
-		cb.onStatusUpdate = [this](const ConnectionStatusUpdate &update)
-		{
-			std::lock_guard<std::mutex> lock(updatesMutex);
-			updates.push_back(update.type);
-		};
-		service->setCallbacks(cb);
-	}
-
-	// Local 10.0.0.1 is higher than the remote 10.0.0.0 -> local side becomes the Acceptor
-	void acceptInvitationAsAcceptor()
-	{
-		service->onPeerValidated(makeReadyResult("pc-b", "10.0.0.0"));
-		service->onReceivedInvitation("pc-b");
-		ASSERT_TRUE(service->acceptIncomingConnection("pc-b"));
-		ASSERT_NE(factory.lastServer, nullptr) << "The acceptor role must create a server";
-	}
-
-	void establish()
-	{
-		acceptInvitationAsAcceptor();
-		factory.lastServer->sessionHandler(std::make_shared<FakeSession>(ipv4("10.0.0.0")));
-		ASSERT_TRUE(waitUntil([&] { return service->isConnected(); }));
-	}
-
-	bool received(ConnectionStatusUpdate::Type type)
-	{
-		std::lock_guard<std::mutex> lock(updatesMutex);
-		return std::find(updates.begin(), updates.end(), type) != updates.end();
-	}
-
-	std::mutex								  updatesMutex;
-	std::vector<ConnectionStatusUpdate::Type> updates;
-};
-
-
-TEST_F(ConnectionServiceAcceptorTest, Acceptor_StartsServerOnLocalAddress)
-{
-	acceptInvitationAsAcceptor();
-
-	EXPECT_TRUE(factory.lastServer->started) << "The acceptor must actually start listening, otherwise it announces port 0";
-	EXPECT_EQ(factory.lastServer->startedOn, ipv4("10.0.0.1")) << "The server must listen on the selected adapter address";
-}
-
-
-TEST_F(ConnectionServiceAcceptorTest, Acceptor_FailsWhenServerCannotListen)
-{
-	factory.failServerStart = true;
-
-	service->onPeerValidated(makeReadyResult("pc-b", "10.0.0.0"));
-	service->onReceivedInvitation("pc-b");
-
-	EXPECT_FALSE(service->acceptIncomingConnection("pc-b")) << "A server that cannot listen must fail the connection attempt";
-	EXPECT_EQ(service->getConnectionState(), ConnectionStateInternal::Idle);
-}
-
-
-TEST_F(ConnectionServiceAcceptorTest, Acceptor_SessionFromExpectedPeer_EstablishesConnection)
-{
-	acceptInvitationAsAcceptor();
-
-	auto session = std::make_shared<FakeSession>(ipv4("10.0.0.0"));
-	factory.lastServer->sessionHandler(session);
-
-	EXPECT_TRUE(waitUntil([&] { return service->isConnected(); })) << "A session from the negotiated peer must establish the connection";
-	EXPECT_TRUE(waitUntil([&] { return received(ConnectionStatusUpdate::Type::Established); }));
-	EXPECT_TRUE(factory.lastServer->stopped) << "Once connected, the server must stop accepting further connections";
-	EXPECT_FALSE(session->closed.load());
-}
-
-
-TEST_F(ConnectionServiceAcceptorTest, Acceptor_SessionFromUnexpectedAddress_IsRejected)
-{
-	acceptInvitationAsAcceptor();
-
-	auto intruder = std::make_shared<FakeSession>(ipv4("10.0.0.99"));
-	factory.lastServer->sessionHandler(intruder);
-
-	EXPECT_TRUE(waitUntil([&] { return intruder->closed.load(); })) << "A connection from any other host must be closed";
-	EXPECT_FALSE(service->isConnected());
-}
-
-
-TEST_F(ConnectionServiceAcceptorTest, TransportDisconnected_ClosesConnection)
-{
-	establish();
-
-	service->onTransportDisconnected("connection reset");
-
-	EXPECT_TRUE(waitUntil([&] { return !service->isConnected(); })) << "A lost transport must tear down the connection";
-	EXPECT_TRUE(waitUntil([&] { return received(ConnectionStatusUpdate::Type::Closed); })) << "A lost transport must be reported as Closed";
-	EXPECT_EQ(service->getConnectionState(), ConnectionStateInternal::Idle);
-}
-
-
-TEST_F(ConnectionServiceAcceptorTest, TransportDisconnected_WithoutConnection_IsIgnored)
-{
-	service->onTransportDisconnected("stale notification");
-
-	std::this_thread::sleep_for(50ms);
-	EXPECT_FALSE(received(ConnectionStatusUpdate::Type::Closed));
-}
-
-
-TEST_F(ConnectionServiceAcceptorTest, CloseConnection_WhenConnected_ReportsClosed)
-{
-	establish();
-
-	EXPECT_TRUE(service->closeConnection("pc-b"));
-
-	EXPECT_FALSE(service->isConnected());
-	EXPECT_TRUE(received(ConnectionStatusUpdate::Type::Closing)) << "An established connection must go through the closing path (sends Disconnect to the peer)";
-	EXPECT_TRUE(received(ConnectionStatusUpdate::Type::Closed));
-}
-
-
-TEST_F(ConnectionServiceTest, Connector_ConnectsOnceRemoteIsReady)
-{
-	// Local 10.0.0.1 is lower than the remote 10.0.0.2 -> local side becomes the Connector
-	service->onPeerValidated(makeReadyResult("pc-b", "10.0.0.2", 7000));
-	service->onReceivedInvitation("pc-b");
-	ASSERT_TRUE(service->acceptIncomingConnection("pc-b"));
-	ASSERT_NE(factory.lastClient, nullptr) << "The connector role must create a client";
-
-	service->onDataPortReceived("pc-b", 45678);
-	service->onReceivedConnectionReadyFlag("pc-b");
-
-	EXPECT_TRUE(factory.lastClient->connectCalled);
-	EXPECT_EQ(factory.lastClient->connectedHost, ipv4("10.0.0.2"));
-	EXPECT_EQ(factory.lastClient->connectedPort, 45678) << "The connector must use the announced data port, not the signaling port";
-	EXPECT_EQ(factory.lastClient->connectedFrom, ipv4("10.0.0.1")) << "The connection must originate from the selected adapter address";
-
-	factory.lastClient->connectHandler(std::make_shared<FakeSession>(ipv4("10.0.0.2")));
-	EXPECT_TRUE(waitUntil([&] { return service->isConnected(); }));
+	EXPECT_TRUE(received(ConnectionStatusUpdate::Type::Initiated)) << "The Initiated status update must be delivered when initiateConnection() begins";
+	EXPECT_TRUE(received(ConnectionStatusUpdate::Type::InvitationSent)) << "The InvitationSent status update must be delivered after successfully sending the invitation";
 }
 
 } // namespace ConnectionTests

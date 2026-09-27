@@ -29,7 +29,7 @@ TimeoutService::~TimeoutService()
 }
 
 
-void TimeoutService::startTimeout(const TimeoutKey &key, int timeoutMS, TimeoutCallback callback)
+void TimeoutService::startTimeout(const TimeoutKey &key, const int timeoutMS, TimeoutCallback callback)
 {
 	{
 		std::lock_guard<std::mutex> lock(mMutex);
@@ -38,7 +38,7 @@ void TimeoutService::startTimeout(const TimeoutKey &key, int timeoutMS, TimeoutC
 			return;
 
 		// Replacing an entry also discards a pending (not yet running) callback for the same key
-		mActiveTimeouts[key] = Entry{Clock::now() + std::chrono::milliseconds(std::max(timeoutMS, 0)), std::move(callback)};
+		mActiveTimeouts[key] = Entry{.deadline = Clock::now() + std::chrono::milliseconds(std::max(timeoutMS, 0)), .callback = std::move(callback)};
 
 		if (!mWorker.joinable())
 			mWorker = std::thread(&TimeoutService::run, this);
@@ -95,9 +95,8 @@ int TimeoutService::cancelIf(const std::function<bool(const TimeoutKey &)> &matc
 	const size_t removed = std::erase_if(mActiveTimeouts, [&matches](const auto &entry) { return matches(entry.first); });
 
 	// A matching callback may be executing right now: wait for it, unless we are that callback
-	const bool	 onWorker = mWorker.joinable() && mWorker.get_id() == std::this_thread::get_id();
 
-	if (!onWorker)
+	if (const bool onWorker = mWorker.joinable() && mWorker.get_id() == std::this_thread::get_id(); !onWorker)
 		mCallbackDone.wait(lock, [&] { return !mRunningKey.has_value() || !matches(*mRunningKey); });
 
 	return static_cast<int>(removed);
@@ -116,7 +115,7 @@ void TimeoutService::run()
 			continue;
 		}
 
-		auto next = std::ranges::min_element(mActiveTimeouts, {}, [](const auto &entry) { return entry.second.deadline; });
+		const auto next = std::ranges::min_element(mActiveTimeouts, {}, [](const auto &entry) { return entry.second.deadline; });
 
 		if (Clock::now() < next->second.deadline)
 		{

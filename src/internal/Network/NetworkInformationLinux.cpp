@@ -41,13 +41,6 @@ bool fileExists(const std::string &path)
 }
 
 
-// ---------------------------------------------------------------------------
-// nl80211 SSID lookup for the interface currently associated with an AP.
-// Mirrors what `iw dev <if> link` does: scan results, find the BSS marked as
-// associated, then extract the SSID information element (tag 0) from the
-// raw information-elements blob.
-// ---------------------------------------------------------------------------
-
 struct Nl80211Session
 {
 	nl_sock *sock{nullptr};
@@ -88,9 +81,9 @@ struct ScanCallbackContext
 
 int handleScanResults(nl_msg *msg, void *arg)
 {
-	auto			 *ctx	 = static_cast<ScanCallbackContext *>(arg);
-	genlmsghdr		 *gnlh	 = static_cast<genlmsghdr *>(nlmsg_data(nlmsg_hdr(msg)));
-	nlattr			 *tb[NL80211_ATTR_MAX + 1];
+	auto	   *ctx	 = static_cast<ScanCallbackContext *>(arg);
+	genlmsghdr *gnlh = static_cast<genlmsghdr *>(nlmsg_data(nlmsg_hdr(msg)));
+	nlattr	   *tb[NL80211_ATTR_MAX + 1];
 
 	nla_parse(tb, NL80211_ATTR_MAX, genlmsg_attrdata(gnlh, 0), genlmsg_attrlen(gnlh, 0), nullptr);
 
@@ -117,8 +110,8 @@ int handleScanResults(nl_msg *msg, void *arg)
 	int			   pos	 = 0;
 	while (pos + 2 <= ieLen)
 	{
-		uint8_t id	 = ie[pos];
-		uint8_t len	 = ie[pos + 1];
+		uint8_t id	= ie[pos];
+		uint8_t len = ie[pos + 1];
 
 		if (pos + 2 + len > ieLen)
 			break;
@@ -157,9 +150,9 @@ std::string queryAssociatedSsid(int ifIndex)
 	genlmsg_put(msg, 0, 0, session.driverId, 0, NLM_F_DUMP, NL80211_CMD_GET_SCAN, 0);
 	nla_put_u32(msg, NL80211_ATTR_IFINDEX, ifIndex);
 
-	nl_cb			   *cb	   = nl_cb_alloc(NL_CB_DEFAULT);
+	nl_cb			   *cb = nl_cb_alloc(NL_CB_DEFAULT);
 	ScanCallbackContext ctx;
-	int					done   = 0;
+	int					done = 0;
 
 	nl_cb_set(cb, NL_CB_VALID, NL_CB_CUSTOM, handleScanResults, &ctx);
 	nl_cb_set(cb, NL_CB_FINISH, NL_CB_CUSTOM, finishHandler, &done);
@@ -192,13 +185,13 @@ struct NetworkInformation::Impl
 {
 	using AddrList = std::unique_ptr<ifaddrs, void (*)(ifaddrs *)>;
 
-	AddrList				mAddrList{nullptr, &freeifaddrs};
+	AddrList	 mAddrList{nullptr, &freeifaddrs};
 
-	bool					getNetworkInformationFromOS();
-	void					saveAdapter(std::vector<NetworkAdapterInternal> &adapters, const ifaddrs *ifa, const int ID, const std::unordered_set<std::string> &defaultRouteIfNames);
+	bool		 getNetworkInformationFromOS();
+	void		 saveAdapter(std::vector<NetworkAdapterInternal> &adapters, const ifaddrs *ifa, const int ID, const std::unordered_set<std::string> &defaultRouteIfNames);
 
-	std::string				sockaddrToString(const sockaddr *sa) const;
-	AdapterTypes			filterAdapterType(const std::string &ifName, unsigned int flags) const;
+	std::string	 sockaddrToString(const sockaddr *sa) const;
+	AdapterTypes filterAdapterType(const std::string &ifName, unsigned int flags) const;
 	AdapterPriorityInternal determinePriority(bool isDefaultRoute, AdapterTypes type, unsigned int flags) const;
 
 	bool					getDefaultInterfaces(std::unordered_set<std::string> &ifNames);
@@ -267,19 +260,22 @@ void NetworkInformation::processAdapter()
 }
 
 
-void NetworkInformation::Impl::saveAdapter(std::vector<NetworkAdapterInternal> &adapters, const ifaddrs *ifa, const int ID, const std::unordered_set<std::string> &defaultRouteIfNames)
+void NetworkInformation::Impl::saveAdapter(std::vector<NetworkAdapterInternal>	 &adapters,
+										   const ifaddrs						 *ifa,
+										   const int							  ID,
+										   const std::unordered_set<std::string> &defaultRouteIfNames)
 {
 	if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET)
 		return;
 
-	std::string	adapterName		= ifa->ifa_name ? ifa->ifa_name : "";
-	std::string	addressString	= sockaddrToString(ifa->ifa_addr);
-	std::string	subnetMaskString = ifa->ifa_netmask ? sockaddrToString(ifa->ifa_netmask) : std::string{};
-	AdapterTypes type			= filterAdapterType(adapterName, ifa->ifa_flags);
-	std::string	networkName		= getNetworkName(type, adapterName, addressString);
-	const bool	isDefaultRoute	= defaultRouteIfNames.find(adapterName) != defaultRouteIfNames.end();
+	std::string				adapterName		 = ifa->ifa_name ? ifa->ifa_name : "";
+	std::string				addressString	 = sockaddrToString(ifa->ifa_addr);
+	std::string				subnetMaskString = ifa->ifa_netmask ? sockaddrToString(ifa->ifa_netmask) : std::string{};
+	AdapterTypes			type			 = filterAdapterType(adapterName, ifa->ifa_flags);
+	std::string				networkName		 = getNetworkName(type, adapterName, addressString);
+	const bool				isDefaultRoute	 = defaultRouteIfNames.find(adapterName) != defaultRouteIfNames.end();
 
-	AdapterPriorityInternal visibility = determinePriority(isDefaultRoute, type, ifa->ifa_flags);
+	AdapterPriorityInternal visibility		 = determinePriority(isDefaultRoute, type, ifa->ifa_flags);
 
 	adapters.emplace_back(adapterName, networkName, addressString, subnetMaskString, ID, isDefaultRoute, type, visibility);
 }
@@ -396,7 +392,7 @@ std::string NetworkInformation::Impl::getWifiSsid(const std::string &ifName) con
 {
 	std::string networkName = "WiFi";
 
-	unsigned	 ifIndex	 = if_nametoindex(ifName.c_str());
+	unsigned	ifIndex		= if_nametoindex(ifName.c_str());
 	if (ifIndex == 0)
 		return networkName;
 
@@ -410,7 +406,7 @@ std::string NetworkInformation::Impl::getWifiSsid(const std::string &ifName) con
 
 std::string NetworkInformation::Impl::getNetworkGatename(AdapterTypes type, const std::string &ifName, const std::string &address)
 {
-	std::string networkName = (type == AdapterTypes::Virtual) ? "Virtual Ethernet" : "Ethernet";
+	std::string	  networkName = (type == AdapterTypes::Virtual) ? "Virtual Ethernet" : "Ethernet";
 
 	std::ifstream file("/proc/net/route");
 	if (!file.is_open())
@@ -441,9 +437,9 @@ std::string NetworkInformation::Impl::getNetworkGatename(AdapterTypes type, cons
 
 		sockaddr_in gatewaySockaddr{};
 		gatewaySockaddr.sin_family = AF_INET;
-		gatewaySockaddr.sin_addr	= gatewayAddr;
+		gatewaySockaddr.sin_addr   = gatewayAddr;
 
-		std::string host = getHostName(reinterpret_cast<const sockaddr *>(&gatewaySockaddr), sizeof(gatewaySockaddr));
+		std::string host		   = getHostName(reinterpret_cast<const sockaddr *>(&gatewaySockaddr), sizeof(gatewaySockaddr));
 
 		if (!host.empty())
 		{

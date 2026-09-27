@@ -25,7 +25,7 @@ struct netlink::NetLink::Impl
 // Helpers: map internal <-> public types
 // ---------------------------------------------------------------------------
 
-static netlink::AdapterPriority mapPriority(netlink::AdapterPriorityInternal internal)
+static netlink::AdapterPriority mapPriority(const netlink::AdapterPriorityInternal internal)
 {
 	switch (internal)
 	{
@@ -60,13 +60,13 @@ netlink::NetLink::~NetLink()
 }
 
 
-void netlink::NetLink::configure(const NetLinkConfig &config, const NetLinkCallbacks &callbacks)
+void netlink::NetLink::configure(const NetLinkConfig &config, const NetLinkCallbacks &callbacks) const
 {
 	pImpl->core.configure(config, callbacks);
 }
 
 
-bool netlink::NetLink::init()
+bool netlink::NetLink::init() const
 {
 	Impl *impl = pImpl.get();
 
@@ -92,9 +92,7 @@ bool netlink::NetLink::init()
 	if (!impl->core.init())
 		return false;
 
-	const auto &current = impl->network.getCurrentNetworkAdapter();
-
-	if (current.isValid())
+	if (const auto &current = impl->network.getCurrentNetworkAdapter(); current.isValid())
 	{
 		impl->core.setLocalAddress(current.IPv4, current.Subnet);
 		return true;
@@ -114,7 +112,7 @@ bool netlink::NetLink::init()
 }
 
 
-void netlink::NetLink::shutdown()
+void netlink::NetLink::shutdown() const
 {
 	pImpl->core.shutdown();
 }
@@ -124,37 +122,37 @@ void netlink::NetLink::shutdown()
 // Discovery & connection
 // ---------------------------------------------------------------------------
 
-bool netlink::NetLink::startDiscovery()
+bool netlink::NetLink::startDiscovery() const
 {
 	return pImpl->core.startDiscovery();
 }
 
 
-void netlink::NetLink::stopDiscovery()
+void netlink::NetLink::stopDiscovery() const
 {
 	pImpl->core.stopDiscovery();
 }
 
 
-std::vector<netlink::Endpoint> netlink::NetLink::getPotentialEndpoints()
+std::vector<netlink::Endpoint> netlink::NetLink::getPotentialEndpoints() const
 {
 	return pImpl->core.getPotentialEndpoints();
 }
 
 
-bool netlink::NetLink::connectTo(const Endpoint &remote)
+bool netlink::NetLink::connectTo(const Endpoint &remote) const
 {
 	return pImpl->core.connectTo(remote);
 }
 
 
-void netlink::NetLink::respondToConnection(bool accepted)
+void netlink::NetLink::respondToConnection(const bool accepted) const
 {
 	pImpl->core.respondToConnection(accepted);
 }
 
 
-void netlink::NetLink::disconnect()
+void netlink::NetLink::disconnect() const
 {
 	pImpl->core.disconnect();
 }
@@ -170,13 +168,13 @@ netlink::ConnectionState netlink::NetLink::getConnectionState() const
 // Messaging
 // ---------------------------------------------------------------------------
 
-bool netlink::NetLink::send(const Message &message, DeliveryMode mode)
+bool netlink::NetLink::send(const Message &message, const DeliveryMode mode) const
 {
 	return pImpl->core.send(message.type, message.data, mode);
 }
 
 
-bool netlink::NetLink::send(uint32_t type, const std::vector<uint8_t> &payload, DeliveryMode mode)
+bool netlink::NetLink::send(const uint32_t type, const std::vector<uint8_t> &payload, const DeliveryMode mode) const
 {
 	return pImpl->core.send(type, payload, mode);
 }
@@ -186,7 +184,7 @@ bool netlink::NetLink::send(uint32_t type, const std::vector<uint8_t> &payload, 
 // Network adapters
 // ---------------------------------------------------------------------------
 
-std::vector<netlink::NetworkAdapter> netlink::NetLink::getAvailableAdapters()
+std::vector<netlink::NetworkAdapter> netlink::NetLink::getAvailableAdapters() const
 {
 	const auto				   &internal = pImpl->network.getAvailableNetworkAdapters();
 
@@ -200,7 +198,7 @@ std::vector<netlink::NetworkAdapter> netlink::NetLink::getAvailableAdapters()
 }
 
 
-bool netlink::NetLink::setActiveAdapter(const int &adapterID)
+bool netlink::NetLink::setActiveAdapter(const int &adapterID) const
 {
 	// Fires onAdapterChanged, which moves all networking to the new address
 	return pImpl->network.setCurrentNetworkAdapter(adapterID);

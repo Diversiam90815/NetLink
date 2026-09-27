@@ -13,7 +13,6 @@
 #include <string>
 #include <tuple>
 
-#include "NetLinkLog.h"
 #include "Socket/IPv4Address.h"
 
 
@@ -88,7 +87,7 @@ public:
 	NetworkInformation();
 	~NetworkInformation();
 
-	bool									   init();
+	bool									   init() const;
 
 	void									   deinit();
 

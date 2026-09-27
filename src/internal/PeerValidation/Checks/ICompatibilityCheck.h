@@ -32,7 +32,7 @@ public:
 	// Does this check need to ask the remote for something before it can be evaluated?
 	virtual bool						 requiresRemoteRequest() const = 0;
 
-	// If this check needs a remote round-trip over the existing signaling wire protocol,
+	// If this check needs a remote round-trip over the existing peer channel,
 	// this identifies which wire message type correlates to it. Checks that compute purely
 	// from local state (or use a future/new wire message) may return std::nullopt.
 	virtual std::optional<RemoteRequest> wireRequestType() const { return std::nullopt; }

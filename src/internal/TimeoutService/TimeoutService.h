@@ -61,43 +61,43 @@ public:
 	/**
 	 * @brief	Start a new timeout, replacing an active one with the same key
 	 * @param	key Unique identifier for this timeout
-	 * @param	timeoutMs Timeout duration in milliseconds
+	 * @param	timeoutMS Timeout duration in milliseconds
 	 * @param	callback Function to call when timeout expires
 	 */
-	void   startTimeout(const TimeoutKey &key, int timeoutMS, TimeoutCallback callback);
+	void			startTimeout(const TimeoutKey &key, int timeoutMS, TimeoutCallback callback);
 
 	/**
 	 * @brief	Cancel a specific timeout
 	 * @return	true if timeout was found and cancelled
 	 */
-	bool   cancelTimeout(const TimeoutKey &key);
+	bool			cancelTimeout(const TimeoutKey &key);
 
 	/**
 	 * @brief	Cancel all timeouts matching a category
 	 * @return	Number of timeouts cancelled
 	 */
-	int	   cancelCategory(const std::string &category);
+	int				cancelCategory(const std::string &category);
 
 	/**
 	 * @brief	Cancel all timeouts for a specific remote
 	 * @return	Number of timeouts cancelled
 	 */
-	int	   cancelByIdentifier(const std::string &identifier);
+	int				cancelByIdentifier(const std::string &identifier);
 
 	/**
 	 * @brief	Cancel all active timeouts
 	 */
-	void   cancelAll();
+	void			cancelAll();
 
 	/**
 	 * @brief	Check if a specific timeout is active (pending, not yet fired)
 	 */
-	bool   isActive(const TimeoutKey &key) const;
+	bool			isActive(const TimeoutKey &key) const;
 
 	/**
 	 * @brief	Get count of active timeouts
 	 */
-	size_t activeCount() const;
+	size_t			activeCount() const;
 
 private:
 	using Clock = std::chrono::steady_clock;
@@ -108,15 +108,15 @@ private:
 		TimeoutCallback	  callback;
 	};
 
-	void												run();
-	int													cancelIf(const std::function<bool(const TimeoutKey &)> &matches, std::unique_lock<std::mutex> &lock);
+	void						run();
+	int							cancelIf(const std::function<bool(const TimeoutKey &)> &matches, std::unique_lock<std::mutex> &lock);
 
-	mutable std::mutex									mMutex;
-	std::condition_variable								mWakeUp;	  // new timeout / stop
-	std::condition_variable								mCallbackDone; // a callback finished
-	std::map<TimeoutKey, Entry>							mActiveTimeouts;
-	std::optional<TimeoutKey>							mRunningKey;  // key whose callback is executing right now
+	mutable std::mutex			mMutex;
+	std::condition_variable		mWakeUp;	   // new timeout / stop
+	std::condition_variable		mCallbackDone; // a callback finished
+	std::map<TimeoutKey, Entry> mActiveTimeouts;
+	std::optional<TimeoutKey>	mRunningKey;   // key whose callback is executing right now
 
-	std::thread											mWorker;
-	bool												mStopping{false};
+	std::thread					mWorker;
+	bool						mStopping{false};
 };

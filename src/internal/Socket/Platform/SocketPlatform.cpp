@@ -42,11 +42,11 @@ Result<sockaddr_in> toSockaddr(const SocketAddress &address)
 
 SocketAddress fromSockaddr(const sockaddr_in &addr)
 {
-	return {IPv4Address::fromHostOrder(ntohl(addr.sin_addr.s_addr)), ntohs(addr.sin_port)};
+	return {.ip = IPv4Address::fromHostOrder(ntohl(addr.sin_addr.s_addr)), .port = ntohs(addr.sin_port)};
 }
 
 
-Result<void> setIntOption(NativeHandle handle, int level, int name, int value)
+Result<void> setIntOption(const NativeHandle handle, const int level, const int name, const int value)
 {
 	if (setsockopt(toNative(handle), level, name, reinterpret_cast<const char *>(&value), sizeof(value)) == SocketErrorRet)
 		return failure();
@@ -55,7 +55,7 @@ Result<void> setIntOption(NativeHandle handle, int level, int name, int value)
 }
 
 
-BufferLength clampLength(size_t size)
+BufferLength clampLength(const size_t size)
 {
 #if defined(_WIN32)
 	return static_cast<BufferLength>(std::min<size_t>(size, static_cast<size_t>(std::numeric_limits<int>::max())));
@@ -67,7 +67,7 @@ BufferLength clampLength(size_t size)
 } // namespace
 
 
-Result<void> applyBindOptions(NativeHandle handle, const BindOptions &options)
+Result<void> applyBindOptions(const NativeHandle handle, const BindOptions &options)
 {
 	if (options.reuseAddress)
 	{
@@ -103,13 +103,7 @@ Result<void> applyBindOptions(NativeHandle handle, const BindOptions &options)
 }
 
 
-Result<void> setNoDelay(NativeHandle handle)
-{
-	return setIntOption(handle, IPPROTO_TCP, TCP_NODELAY, 1);
-}
-
-
-Result<void> bindTo(NativeHandle handle, const SocketAddress &address)
+Result<void> bindTo(const NativeHandle handle, const SocketAddress &address)
 {
 	auto addr = toSockaddr(address);
 	if (!addr)
@@ -122,68 +116,7 @@ Result<void> bindTo(NativeHandle handle, const SocketAddress &address)
 }
 
 
-Result<void> listenOn(NativeHandle handle, int backlog)
-{
-	if (::listen(toNative(handle), backlog) == SocketErrorRet)
-		return failure();
-
-	return {};
-}
-
-
-Result<std::pair<NativeHandle, SocketAddress>> acceptOne(NativeHandle listener)
-{
-	sockaddr_in	 peer{};
-	SockLen		 length	  = sizeof(peer);
-
-	NativeSocket accepted = ::accept(toNative(listener), reinterpret_cast<sockaddr *>(&peer), &length);
-
-	if (fromNative(accepted) == InvalidNativeHandle)
-		return failure();
-
-	return std::pair{fromNative(accepted), fromSockaddr(peer)};
-}
-
-
-Result<void> startConnect(NativeHandle handle, const SocketAddress &remote)
-{
-	auto addr = toSockaddr(remote);
-	if (!addr)
-		return std::unexpected(addr.error());
-
-	if (remote.ip.isUnspecified() || remote.port == 0)
-		return std::unexpected(SocketError::InvalidArgument);
-
-	if (::connect(toNative(handle), reinterpret_cast<sockaddr *>(&*addr), sizeof(sockaddr_in)) == SocketErrorRet)
-	{
-		const int code = lastNativeError();
-
-		if (isConnectInProgress(code))
-			return std::unexpected(SocketError::WouldBlock);
-
-		return std::unexpected(mapNativeError(code));
-	}
-
-	return {};
-}
-
-
-Result<void> finishConnect(NativeHandle handle)
-{
-	int		pendingError = 0;
-	SockLen length		 = sizeof(pendingError);
-
-	if (getsockopt(toNative(handle), SOL_SOCKET, SO_ERROR, reinterpret_cast<char *>(&pendingError), &length) == SocketErrorRet)
-		return failure();
-
-	if (pendingError != 0)
-		return std::unexpected(mapNativeError(pendingError));
-
-	return {};
-}
-
-
-Result<SocketAddress> localAddressOf(NativeHandle handle)
+Result<SocketAddress> localAddressOf(const NativeHandle handle)
 {
 	sockaddr_in addr{};
 	SockLen		length = sizeof(addr);
@@ -195,58 +128,7 @@ Result<SocketAddress> localAddressOf(NativeHandle handle)
 }
 
 
-Result<SocketAddress> remoteAddressOf(NativeHandle handle)
-{
-	sockaddr_in addr{};
-	SockLen		length = sizeof(addr);
-
-	if (getpeername(toNative(handle), reinterpret_cast<sockaddr *>(&addr), &length) == SocketErrorRet)
-		return failure();
-
-	return fromSockaddr(addr);
-}
-
-
-Result<size_t> sendSome(NativeHandle handle, std::span<const uint8_t> data)
-{
-	while (true)
-	{
-		const auto sent = ::send(toNative(handle), reinterpret_cast<const char *>(data.data()), clampLength(data.size()), SendFlags);
-
-		if (sent != SocketErrorRet)
-			return static_cast<size_t>(sent);
-
-		const int code = lastNativeError();
-		if (isInterrupted(code))
-			continue;
-
-		return std::unexpected(isWouldBlock(code) ? SocketError::WouldBlock : mapNativeError(code));
-	}
-}
-
-
-Result<size_t> receiveSome(NativeHandle handle, std::span<uint8_t> buffer)
-{
-	while (true)
-	{
-		const auto received = ::recv(toNative(handle), reinterpret_cast<char *>(buffer.data()), clampLength(buffer.size()), 0);
-
-		if (received == 0 && !buffer.empty())
-			return std::unexpected(SocketError::Closed);
-
-		if (received != SocketErrorRet)
-			return static_cast<size_t>(received);
-
-		const int code = lastNativeError();
-		if (isInterrupted(code))
-			continue;
-
-		return std::unexpected(isWouldBlock(code) ? SocketError::WouldBlock : mapNativeError(code));
-	}
-}
-
-
-Result<size_t> sendDatagram(NativeHandle handle, const SocketAddress &to, std::span<const uint8_t> data)
+Result<size_t> sendDatagram(const NativeHandle handle, const SocketAddress &to, const std::span<const uint8_t> data)
 {
 	auto addr = toSockaddr(to);
 	if (!addr)
@@ -269,17 +151,17 @@ Result<size_t> sendDatagram(NativeHandle handle, const SocketAddress &to, std::s
 }
 
 
-Result<Datagram> receiveDatagram(NativeHandle handle, std::span<uint8_t> buffer)
+Result<Datagram> receiveDatagram(const NativeHandle handle, std::span<uint8_t> buffer)
 {
 	while (true)
 	{
 		sockaddr_in from{};
-		SockLen		length	 = sizeof(from);
+		SockLen		length = sizeof(from);
 
-		const auto	received = ::recvfrom(toNative(handle), reinterpret_cast<char *>(buffer.data()), clampLength(buffer.size()), 0, reinterpret_cast<sockaddr *>(&from), &length);
-
-		if (received != SocketErrorRet)
-			return Datagram{static_cast<size_t>(received), fromSockaddr(from)};
+		if (const auto received =
+				::recvfrom(toNative(handle), reinterpret_cast<char *>(buffer.data()), clampLength(buffer.size()), 0, reinterpret_cast<sockaddr *>(&from), &length);
+			received != SocketErrorRet)
+			return Datagram{.size = static_cast<size_t>(received), .from = fromSockaddr(from)};
 
 		const int code = lastNativeError();
 		if (isInterrupted(code))

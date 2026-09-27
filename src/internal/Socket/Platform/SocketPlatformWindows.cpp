@@ -10,7 +10,6 @@
 
 #include <algorithm>
 
-#include <mstcpip.h>
 
 #ifndef SIO_UDP_CONNRESET
 #define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
@@ -54,7 +53,7 @@ private:
 } // namespace
 
 
-SocketError common::mapNativeError(int code)
+SocketError common::mapNativeError(const int code)
 {
 	switch (code)
 	{
@@ -96,13 +95,12 @@ Result<void> ensureInitialized()
 }
 
 
-Result<NativeHandle> createSocket(SocketKind kind)
+Result<NativeHandle> createSocket()
 {
 	if (auto init = ensureInitialized(); !init)
 		return std::unexpected(init.error());
 
-	const bool	 isStream = kind == SocketKind::Stream;
-	NativeSocket sock	  = ::socket(AF_INET, isStream ? SOCK_STREAM : SOCK_DGRAM, isStream ? IPPROTO_TCP : IPPROTO_UDP);
+	const NativeSocket sock = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
 
 	if (sock == INVALID_SOCKET)
 		return std::unexpected(lastError());
@@ -113,18 +111,16 @@ Result<NativeHandle> createSocket(SocketKind kind)
 		return std::unexpected(nonBlocking.error());
 	}
 
-	if (!isStream)
-	{
-		BOOL  reportReset	= FALSE;
-		DWORD bytesReturned = 0;
-		WSAIoctl(sock, SIO_UDP_CONNRESET, &reportReset, sizeof(reportReset), nullptr, 0, &bytesReturned, nullptr, nullptr);
-	}
+	// Without this an ICMP port-unreachable makes the next recvfrom() fail with WSAECONNRESET
+	BOOL  reportReset	= FALSE;
+	DWORD bytesReturned = 0;
+	WSAIoctl(sock, SIO_UDP_CONNRESET, &reportReset, sizeof(reportReset), nullptr, 0, &bytesReturned, nullptr, nullptr);
 
 	return fromNative(sock);
 }
 
 
-Result<void> setNonBlocking(NativeHandle handle)
+Result<void> setNonBlocking(const NativeHandle handle)
 {
 	u_long nonBlocking = 1;
 	if (ioctlsocket(toNative(handle), FIONBIO, &nonBlocking) == SOCKET_ERROR)
@@ -134,27 +130,21 @@ Result<void> setNonBlocking(NativeHandle handle)
 }
 
 
-Result<void> prepareAcceptedSocket(NativeHandle handle)
-{
-	return setNonBlocking(handle);
-}
-
-
-void closeHandle(NativeHandle handle)
+void closeHandle(const NativeHandle handle)
 {
 	if (handle != InvalidNativeHandle)
 		closesocket(toNative(handle));
 }
 
 
-void shutdownHandle(NativeHandle handle)
+void shutdownHandle(const NativeHandle handle)
 {
 	if (handle != InvalidNativeHandle)
 		::shutdown(toNative(handle), SD_BOTH);
 }
 
 
-Result<void> waitUntil(NativeHandle handle, WaitFor what, std::chrono::milliseconds timeout)
+Result<void> waitUntil(const NativeHandle handle, const WaitFor what, const std::chrono::milliseconds timeout)
 {
 	if (handle == InvalidNativeHandle)
 		return std::unexpected(SocketError::InvalidArgument);

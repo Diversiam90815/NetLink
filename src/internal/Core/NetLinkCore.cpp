@@ -13,9 +13,9 @@
 #include "NetLinkVersion.h"
 
 
-netlink::NetLinkCore::NetLinkCore(NetLinkCoreDependencies dependencies)
-	: mDiscovery(dependencies.datagramSocketFactory), mSignaling(dependencies.datagramSocketFactory), mTransportFactory(createTransportFactory(mTransportKind)),
-	  mConnectionService(mSignaling, *mTransportFactory)
+netlink::NetLinkCore::NetLinkCore(const NetLinkCoreDependencies &dependencies)
+	: mDiscovery(dependencies.datagramSocketFactory), mChannel(dependencies.datagramSocketFactory, dependencies.channelConfig), mChannelConfig(dependencies.channelConfig),
+	  mConnectionService(mChannel)
 {
 	mEvents.start();
 	wireServices();
@@ -35,11 +35,11 @@ netlink::NetLinkCore::~NetLinkCore()
 
 void netlink::NetLinkCore::wireServices()
 {
-	// Discovery -> signaling registry + validation handshake
+	// Discovery -> channel registry + validation handshake
 	mDiscovery.setOnRemoteFound(
 		[this](const DiscoveryEndpoint &endpoint)
 		{
-			mSignaling.registerPeer(endpoint.displayName, endpoint.IPAddress, endpoint.port);
+			mChannel.registerPeer(endpoint.displayName, endpoint.IPAddress, endpoint.port);
 
 			// New or changed endpoint (e.g. the remote restarted): validate again
 			if (mValidation.getValidationResult(endpoint.displayName).has_value())
@@ -53,11 +53,11 @@ void netlink::NetLinkCore::wireServices()
 		[this](const DiscoveryEndpoint &endpoint)
 		{
 			// The peer of an active session may legitimately stop announcing; dropping
-			// its signaling registration here would break that connection
-			if (auto current = mConnectionService.getCurrentRemote(); current.has_value() && current->displayName == endpoint.displayName)
+			// its channel registration here would break that connection
+			if (const auto current = mConnectionService.getCurrentRemote(); current.has_value() && current->displayName == endpoint.displayName)
 				return;
 
-			mSignaling.unregisterPeer(endpoint.displayName);
+			mChannel.unregisterPeer(endpoint.displayName);
 			mValidation.clearValidatedPeer(endpoint.displayName);
 
 			postEvent(
@@ -68,53 +68,59 @@ void netlink::NetLinkCore::wireServices()
 				});
 		});
 
-	// Signaling -> connection lifecycle
-	SignalingConnectionCallbacks connectionSignals;
+	// Channel -> connection lifecycle
+	ChannelConnectionCallbacks connectionSignals;
 	connectionSignals.onConnectRequested	   = [this](const std::string &name) { mConnectionService.onReceivedInvitation(name); };
-	connectionSignals.onConnectRequestAnswered = [this](const std::string &name, bool accepted, const std::string &reason)
+	connectionSignals.onConnectRequestAnswered = [this](const std::string &name, const bool accepted, const std::string &reason)
 	{ mConnectionService.onReceivedAnswerToInvite(name, accepted, reason); };
 	connectionSignals.onDisconnectReceived = [this](const std::string &name) { mConnectionService.onDisconnectReceived(name); };
 	connectionSignals.onReadyFlagReceived  = [this](const std::string &name) { mConnectionService.onReadyFlagReceived(name); };
-	connectionSignals.onDataPortReceived   = [this](const std::string &name, int port) { mConnectionService.onDataPortReceived(name, port); };
-	mSignaling.setConnectionCallbacks(std::move(connectionSignals));
+	mChannel.setConnectionCallbacks(std::move(connectionSignals));
 
-	// Signaling -> peer validation
-	SignalingValidationCallbacks validationSignals;
-	validationSignals.onValidationRequestReceived = [this](const std::string &name, RemoteRequest request) { mValidation.onRequestReceived(name, request); };
+	// Channel -> peer validation
+	ChannelValidationCallbacks validationSignals;
+	validationSignals.onValidationRequestReceived = [this](const std::string &name, const RemoteRequest request) { mValidation.onRequestReceived(name, request); };
 	validationSignals.onSecretResponseReceived	  = [this](const std::string &name, const std::string &secret)
 	{ mValidation.onCheckResponseReceived(name, RemoteRequest::Secret, secret); };
 	validationSignals.onVersionResponseReceived = [this](const std::string &name, const std::string &version)
 	{ mValidation.onCheckResponseReceived(name, RemoteRequest::Version, version); };
 	validationSignals.onValidationHandshakeReceived = [this](const std::string &name) { mValidation.onHandshakeReceived(name); };
-	mSignaling.setValidationCallbacks(std::move(validationSignals));
+	mChannel.setValidationCallbacks(std::move(validationSignals));
 
-	// Peer validation -> signaling (outgoing) and -> connection service (results)
+	// Peer validation -> channel (outgoing) and -> connection service (results)
 	PeerValidationSendCallbacks validationSend;
-	validationSend.sendRequest		   = [this](const std::string &name, RemoteRequest request) { mSignaling.sendValidationRequest(name, request); };
-	validationSend.sendSecretResponse  = [this](const std::string &name, const std::string &value) { mSignaling.sendSecretResponse(name, value); };
-	validationSend.sendVersionResponse = [this](const std::string &name, const std::string &value) { mSignaling.sendVersionResponse(name, value); };
-	validationSend.sendHandshake	   = [this](const std::string &name) { mSignaling.sendValidationHandshake(name); };
+	validationSend.sendRequest		   = [this](const std::string &name, const RemoteRequest request) { mChannel.sendValidationRequest(name, request); };
+	validationSend.sendSecretResponse  = [this](const std::string &name, const std::string &value) { mChannel.sendSecretResponse(name, value); };
+	validationSend.sendVersionResponse = [this](const std::string &name, const std::string &value) { mChannel.sendVersionResponse(name, value); };
+	validationSend.sendHandshake	   = [this](const std::string &name) { mChannel.sendValidationHandshake(name); };
 	mValidation.setSendCallbacks(std::move(validationSend));
 	mValidation.setValidationCallback([this](const ValidationResult &result) { onValidationResult(result); });
 
-	// Connection lifecycle -> messaging + public events
+	// Connection lifecycle -> keepalive + public events
 	ConnectionServiceCallbacks connectionCallbacks;
 	connectionCallbacks.onStatusUpdate = [this](const ConnectionStatusUpdate &update) { onConnectionStatus(update); };
 	mConnectionService.setCallbacks(std::move(connectionCallbacks));
 
-	// Messaging -> public events / connection loss
-	mCommunication.setMessageCallback(
-		[this](uint32_t type, std::vector<uint8_t> &data)
+	// Channel -> public events: only messages of the connected remote reach the application
+	mChannel.setMessageCallback(
+		[this](const std::string &name, const uint32_t type, std::vector<uint8_t> data)
 		{
+			if (mState.load() != ConnectionState::Connected)
+				return;
+
+			if (const auto remote = mConnectionService.getCurrentRemote(); !remote.has_value() || remote->displayName != name)
+				return;
+
 			postEvent(
-				[message = Message{type, std::move(data)}](const NetLinkCallbacks &callbacks)
+				[message = Message{.type = type, .data = std::move(data)}](const NetLinkCallbacks &callbacks)
 				{
 					if (callbacks.onMessageReceived)
 						callbacks.onMessageReceived(message);
 				});
 		});
 
-	mCommunication.setDisconnectedCallback([this](const std::string &reason) { mConnectionService.onTransportDisconnected(reason); });
+	// Channel -> connection loss (unacknowledged messages, silence, peer restart)
+	mChannel.setOnPeerLost([this](const std::string &name, const std::string &reason) { mConnectionService.onPeerLost(name, reason); });
 }
 
 
@@ -134,12 +140,14 @@ void netlink::NetLinkCore::configure(const NetLinkConfig &config, const NetLinkC
 		mCallbacks = std::make_shared<const NetLinkCallbacks>(callbacks);
 	}
 
-	if (config.transport != mTransportKind)
+	PeerChannelConfig channelConfig;
 	{
-		mTransportKind	  = config.transport;
-		mTransportFactory = createTransportFactory(config.transport);
-		mConnectionService.setTransportFactory(*mTransportFactory);
+		std::lock_guard<std::mutex> lock(mConfigMutex);
+		mChannelConfig.reliability.sendQueueCapacity = config.sendQueueCapacity;
+		mChannelConfig.reliability.sendQueueOverflow = config.sendQueueOverflow;
+		channelConfig								 = mChannelConfig;
 	}
+	mChannel.setConfig(channelConfig);
 
 	// A configured secret must match on both sides; an empty secret disables the check
 	PeerValidationConfig validationConfig;
@@ -168,7 +176,7 @@ bool netlink::NetLinkCore::init()
 		version		= mLocalVersion;
 	}
 
-	if (!mSignaling.init(displayName))
+	if (!mChannel.init(displayName))
 	{
 		NETLINK_LOG_ERROR("NetLink init failed: a local display name is required");
 		return false;
@@ -184,14 +192,16 @@ bool netlink::NetLinkCore::init()
 
 void netlink::NetLinkCore::shutdown()
 {
-	// Tell the remote we are leaving while signaling is still available
-	if (auto remote = mConnectionService.getCurrentRemote(); remote.has_value())
+	// Tell the remote we are leaving while the channel is still available, and give the Disconnect a moment to be acknowledged
+	if (const auto remote = mConnectionService.getCurrentRemote(); remote.has_value())
+	{
 		mConnectionService.closeConnection(remote->displayName);
+		mChannel.flush(remote->displayName, ShutdownFlushTimeout);
+	}
 
-	mCommunication.deinit();
 	mValidation.cancelAllPendingValidation();
 	mDiscovery.deinit();
-	mSignaling.deinit();
+	mChannel.deinit();
 
 	mInitialized.store(false);
 	mState.store(ConnectionState::None);
@@ -210,9 +220,8 @@ void netlink::NetLinkCore::setLocalAddress(const std::string &ipv4, const std::s
 	}
 
 	// An unusable mask simply disables subnet scoping rather than failing the switch
-	const auto mask = net::IPv4Address::parse(subnetMask);
-
 	{
+		const auto					mask = net::IPv4Address::parse(subnetMask);
 		std::lock_guard<std::mutex> lock(mConfigMutex);
 		mLocalAddress = *parsed;
 		mSubnetMask	  = mask.value_or(net::IPv4Address{});
@@ -235,7 +244,7 @@ void netlink::NetLinkCore::applyLocalAddress()
 		return;
 
 	mConnectionService.setLocalIP(address);
-	mSignaling.setLocalIPv4(address);
+	mChannel.setLocalIPv4(address);
 	updateDiscoveryConfig();
 }
 
@@ -254,7 +263,7 @@ void netlink::NetLinkCore::updateDiscoveryConfig()
 		discoveryConfig.broadcastAddress = net::IPv4Address::parse(mConfig.broadcastAddress).value_or(net::IPv4Address::broadcast());
 	}
 
-	discoveryConfig.signalingPort = mSignaling.getBoundPort();
+	discoveryConfig.channelPort = mChannel.getBoundPort();
 
 	if (!mDiscovery.init(discoveryConfig))
 		NETLINK_LOG_ERROR("Discovery could not be configured for {}", discoveryConfig.localIPv4.toString());
@@ -273,7 +282,7 @@ bool netlink::NetLinkCore::startDiscovery()
 		return false;
 	}
 
-	mSignaling.start();
+	mChannel.start();
 
 	auto expected = ConnectionState::None;
 	mState.compare_exchange_strong(expected, ConnectionState::Searching);
@@ -283,7 +292,7 @@ bool netlink::NetLinkCore::startDiscovery()
 
 void netlink::NetLinkCore::stopDiscovery()
 {
-	// Signaling keeps running: established peers still need it for invitations and disconnects
+	// The channel keeps running: established peers still need it for their session
 	mDiscovery.stopDiscovery();
 
 	auto expected = ConnectionState::Searching;
@@ -291,7 +300,7 @@ void netlink::NetLinkCore::stopDiscovery()
 }
 
 
-std::vector<netlink::Endpoint> netlink::NetLinkCore::getPotentialEndpoints()
+std::vector<netlink::Endpoint> netlink::NetLinkCore::getPotentialEndpoints() const
 {
 	std::vector<Endpoint> result;
 
@@ -308,9 +317,9 @@ bool netlink::NetLinkCore::connectTo(const Endpoint &remote)
 }
 
 
-void netlink::NetLinkCore::respondToConnection(bool accepted)
+void netlink::NetLinkCore::respondToConnection(const bool accepted)
 {
-	auto remote = mConnectionService.getCurrentRemote();
+	const auto remote = mConnectionService.getCurrentRemote();
 	if (!remote.has_value())
 		return;
 
@@ -323,18 +332,21 @@ void netlink::NetLinkCore::respondToConnection(bool accepted)
 
 void netlink::NetLinkCore::disconnect()
 {
-	if (auto remote = mConnectionService.getCurrentRemote(); remote.has_value())
+	if (const auto remote = mConnectionService.getCurrentRemote(); remote.has_value())
 		mConnectionService.closeConnection(remote->displayName);
 }
 
 
-bool netlink::NetLinkCore::send(uint32_t type, const std::vector<uint8_t> &payload, DeliveryMode mode)
+bool netlink::NetLinkCore::send(const uint32_t type, const std::vector<uint8_t> &payload, const DeliveryMode mode)
 {
 	if (mState.load() != ConnectionState::Connected)
 		return false;
 
-	mCommunication.write(type, payload, mode);
-	return true;
+	const auto remote = mConnectionService.getCurrentRemote();
+	if (!remote.has_value())
+		return false;
+
+	return mChannel.sendMessage(remote->displayName, type, payload, mode);
 }
 
 
@@ -384,17 +396,9 @@ void netlink::NetLinkCore::onConnectionStatus(const ConnectionStatusUpdate &upda
 	switch (update.type)
 	{
 	case ConnectionStatusUpdate::Type::Established:
-		if (!mCommunication.init(update.session))
-		{
-			NETLINK_LOG_ERROR("Messaging could not be initialised for the session with {}", update.endpoint.displayName);
-			mState.store(ConnectionState::Error);
-			emitConnectionChanged(ConnectionState::Error, "Failed to initialise messaging", update.endpoint);
-			break;
-		}
-
+		mChannel.setKeepAlive(update.endpoint.displayName, true);
 		mState.store(ConnectionState::Connected);
 		emitConnectionChanged(ConnectionState::Connected, update.message, update.endpoint);
-		mCommunication.start();
 		break;
 
 	case ConnectionStatusUpdate::Type::InvitationReceived:
@@ -404,12 +408,13 @@ void netlink::NetLinkCore::onConnectionStatus(const ConnectionStatusUpdate &upda
 
 	case ConnectionStatusUpdate::Type::Failed:
 	case ConnectionStatusUpdate::Type::Declined:
+		endSessionTraffic(update.endpoint.displayName);
 		mState.store(ConnectionState::Error);
 		emitConnectionChanged(ConnectionState::Error, update.message, update.endpoint);
 		break;
 
 	case ConnectionStatusUpdate::Type::Closed:
-		mCommunication.deinit();
+		endSessionTraffic(update.endpoint.displayName);
 		mState.store(ConnectionState::Disconnected);
 		emitConnectionChanged(ConnectionState::Disconnected, update.message, update.endpoint);
 		break;
@@ -423,10 +428,21 @@ void netlink::NetLinkCore::onConnectionStatus(const ConnectionStatusUpdate &upda
 }
 
 
-void netlink::NetLinkCore::emitConnectionChanged(ConnectionState state, const std::string &message, const DiscoveryEndpoint &remote)
+void netlink::NetLinkCore::endSessionTraffic(const std::string &remote)
+{
+	if (remote.empty())
+		return;
+
+	// Control signals (e.g. the Disconnect) still go out, unsent application data of the ended session does not
+	mChannel.setKeepAlive(remote, false);
+	mChannel.dropApplicationTraffic(remote);
+}
+
+
+void netlink::NetLinkCore::emitConnectionChanged(const ConnectionState state, const std::string &message, const DiscoveryEndpoint &remote)
 {
 	postEvent(
-		[event = ConnectionEvent{state, message, toPublicEndpoint(remote)}](const NetLinkCallbacks &callbacks)
+		[event = ConnectionEvent{.state = state, .errorMessage = message, .remote = toPublicEndpoint(remote)}](const NetLinkCallbacks &callbacks)
 		{
 			if (callbacks.onConnectionChanged)
 				callbacks.onConnectionChanged(event);
@@ -436,5 +452,5 @@ void netlink::NetLinkCore::emitConnectionChanged(ConnectionState state, const st
 
 netlink::Endpoint netlink::NetLinkCore::toPublicEndpoint(const DiscoveryEndpoint &endpoint)
 {
-	return {endpoint.IPAddress.toString(), endpoint.port, endpoint.displayName};
+	return {.IPAddress = endpoint.IPAddress.toString(), .port = endpoint.port, .displayName = endpoint.displayName};
 }

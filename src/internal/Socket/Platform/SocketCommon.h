@@ -21,7 +21,6 @@
 #include <cerrno>
 #include <fcntl.h>
 #include <netinet/in.h>
-#include <netinet/tcp.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -45,15 +44,11 @@ inline int			 lastNativeError()
 {
 	return WSAGetLastError();
 }
-inline bool isWouldBlock(int code)
+inline bool isWouldBlock(const int code)
 {
 	return code == WSAEWOULDBLOCK;
 }
-inline bool isConnectInProgress(int code)
-{
-	return code == WSAEWOULDBLOCK || code == WSAEINPROGRESS;
-}
-inline bool isInterrupted(int code)
+inline bool isInterrupted(const int code)
 {
 	return code == WSAEINTR;
 }
@@ -79,10 +74,6 @@ inline bool isWouldBlock(int code)
 {
 	return code == EAGAIN || code == EWOULDBLOCK;
 }
-inline bool isConnectInProgress(int code)
-{
-	return code == EINPROGRESS || code == EAGAIN || code == EWOULDBLOCK;
-}
 inline bool isInterrupted(int code)
 {
 	return code == EINTR;
@@ -91,12 +82,12 @@ inline bool isInterrupted(int code)
 #endif
 
 
-inline NativeSocket toNative(NativeHandle handle)
+inline NativeSocket toNative(const NativeHandle handle)
 {
 	return static_cast<NativeSocket>(handle);
 }
 
-inline NativeHandle fromNative(NativeSocket socket)
+inline NativeHandle fromNative(const NativeSocket socket)
 {
 	return static_cast<NativeHandle>(socket);
 }

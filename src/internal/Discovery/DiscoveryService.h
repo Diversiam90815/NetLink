@@ -25,7 +25,7 @@ struct DiscoveryConfig
 {
 	std::string				  displayName{};
 	netlink::net::IPv4Address localIPv4{};
-	int						  signalingPort{0};
+	int						  channelPort{0};
 	int						  discoveryPort{5555};
 	netlink::net::IPv4Address broadcastAddress{netlink::net::IPv4Address::broadcast()};
 	int						  peerTimeoutMs{6000};
@@ -63,18 +63,19 @@ public:
 	void			  stopDiscovery();
 	bool			  isDiscovering() const { return isRunning(); }
 
-	DiscoveryEndpoint getEndpointFromIP(const netlink::net::IPv4Address &IPv4);
-	void			  addRemoteToList(DiscoveryEndpoint remote);
+	DiscoveryEndpoint getEndpointFromIP(const netlink::net::IPv4Address &IPv4) const;
+	void			  addRemoteToList(const DiscoveryEndpoint &remote);
 
+protected:
+	void run() override;
 
 private:
-	void										   run() override;
-
-	void										   sendPackage();
+	void										   sendPackage() const;
 	void										   receivePackage();
 	void										   expireStalePeers();
 
 	std::shared_ptr<netlink::net::IDatagramSocket> socket() const;
+
 
 	netlink::net::DatagramSocketFactory			   mSocketFactory;
 

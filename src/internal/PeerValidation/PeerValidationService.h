@@ -37,7 +37,7 @@ struct PeerValidationConfig
 
 struct PeerValidationSendCallbacks
 {
-	// outgoing validation messages via SignalingService
+	// outgoing validation messages via PeerChannel
 	std::function<void(const std::string &computerName, RemoteRequest)>			 sendRequest;
 	std::function<void(const std::string &computerName, const std::string &val)> sendSecretResponse;
 	std::function<void(const std::string &computerName, const std::string &val)> sendVersionResponse;
@@ -45,10 +45,10 @@ struct PeerValidationSendCallbacks
 };
 
 
-namespace PeerValidationTimouts
+namespace PeerValidationTimeouts
 {
-constexpr const char *Handshake = "handshake";
-} // namespace PeerValidationTimouts
+constexpr auto Handshake = "handshake";
+} // namespace PeerValidationTimeouts
 
 
 class PeerValidationService
@@ -72,16 +72,16 @@ public:
 
 	void							onPeerDiscovered(const DiscoveryEndpoint &remoteEndpoint);
 
-	std::vector<ValidationResult>	getValidatedPeers();
+	std::vector<ValidationResult>	getValidatedPeers() const;
 
-	// Incoming remote events (called by the signaling layer)
-	void							onRequestReceived(const std::string &computerName, RemoteRequest request);
+	// Incoming remote events (called by the peer channel)
+	void							onRequestReceived(const std::string &computerName, RemoteRequest request) const;
 	void							onCheckResponseReceived(const std::string &computerName, RemoteRequest request, const std::string &value);
 	void							onHandshakeReceived(const std::string &computerName);
 
 	// State queries
 	ValidationResult				getLastResult() const;
-	std::optional<ValidationResult> getValidationResult(const std::string &computerName);
+	std::optional<ValidationResult> getValidationResult(const std::string &computerName) const;
 	void							cancelAllPendingValidation();
 
 private:
@@ -92,11 +92,11 @@ private:
 	bool											  allChecksReady(const std::string &computerName);
 
 	// Request handlers -> Answer incoming requests
-	void											  handleSecretRequest(const std::string &computerName);
-	void											  handleVersionRequest(const std::string &computerName);
+	void											  handleSecretRequest(const std::string &computerName) const;
+	void											  handleVersionRequest(const std::string &computerName) const;
 
 	// Sending requests to remote
-	void											  sendRequestToRemote(const std::string &computerName, ICompatibilityCheck &check);
+	void											  sendRequestToRemote(const std::string &computerName, const ICompatibilityCheck &check);
 
 	// Handshake
 	void											  sendHandshake(const std::string &computerName);

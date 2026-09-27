@@ -5,7 +5,7 @@
 
 cmake_minimum_required(VERSION 4.0)
 
-set(PROJECT_VERSION 0.2.0)
+set(PROJECT_VERSION 0.3.0)
 set(NETLINK_BUILD_NUMBER "0" CACHE STRING "Build number")
 
 project(NetLink VERSION ${PROJECT_VERSION} LANGUAGES CXX)

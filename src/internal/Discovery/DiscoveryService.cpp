@@ -16,6 +16,7 @@
 
 using json = nlohmann::json;
 
+
 namespace
 {
 netlink::net::IPv4Address broadcastTarget(const DiscoveryConfig &config)
@@ -138,14 +139,14 @@ void DiscoveryService::stopDiscovery()
 }
 
 
-DiscoveryEndpoint DiscoveryService::getEndpointFromIP(const netlink::net::IPv4Address &IPv4)
+DiscoveryEndpoint DiscoveryService::getEndpointFromIP(const netlink::net::IPv4Address &IPv4) const
 {
 	auto entry = mRegistry.findByIP(IPv4);
 	return entry ? entry->endpoint : DiscoveryEndpoint{};
 }
 
 
-void DiscoveryService::addRemoteToList(DiscoveryEndpoint remote)
+void DiscoveryService::addRemoteToList(const DiscoveryEndpoint &remote)
 {
 	if (!remote.isValid())
 		return;
@@ -156,15 +157,14 @@ void DiscoveryService::addRemoteToList(DiscoveryEndpoint remote)
 			return; // Ignore our own announcements
 	}
 
-	auto result = mRegistry.addOrUpdate(remote);
-
-	switch (result)
+	switch (mRegistry.addOrUpdate(remote))
 	{
 	case netlink::discovery::DiscoveryRegistry::UpdateResult::Added:
 	case netlink::discovery::DiscoveryRegistry::UpdateResult::Updated:
 		if (mOnRemoteFound)
 			mOnRemoteFound(remote);
 		break;
+	case netlink::discovery::DiscoveryRegistry::UpdateResult::Refreshed: break;
 	}
 }
 
@@ -196,10 +196,9 @@ void DiscoveryService::run()
 
 void DiscoveryService::expireStalePeers()
 {
-	auto timeout = std::chrono::milliseconds(mConfig.peerTimeoutMs);
-	auto stale	 = mRegistry.removeStale(timeout);
+	const auto timeout = std::chrono::milliseconds(mConfig.peerTimeoutMs);
 
-	for (auto &endpoint : stale)
+	for (const auto stale = mRegistry.removeStale(timeout); auto &endpoint : stale)
 	{
 		if (mOnRemoteLost)
 			mOnRemoteLost(endpoint);
@@ -207,9 +206,9 @@ void DiscoveryService::expireStalePeers()
 }
 
 
-void DiscoveryService::sendPackage()
+void DiscoveryService::sendPackage() const
 {
-	auto socket = this->socket();
+	const auto socket = this->socket();
 
 	if (!socket)
 		return;
@@ -217,10 +216,10 @@ void DiscoveryService::sendPackage()
 	DiscoveryEndpoint local{};
 	local.IPAddress			  = mConfig.localIPv4;
 	local.displayName		  = mConfig.displayName;
-	local.port				  = mConfig.signalingPort;
+	local.port				  = mConfig.channelPort;
 
 	const std::string message = json(local).dump();
-	const auto		  target  = netlink::net::SocketAddress{broadcastTarget(mConfig), static_cast<uint16_t>(mConfig.discoveryPort)};
+	const auto		  target  = netlink::net::SocketAddress{.ip = broadcastTarget(mConfig), .port = static_cast<uint16_t>(mConfig.discoveryPort)};
 
 	if (auto sent = socket->sendTo(target, std::span(reinterpret_cast<const uint8_t *>(message.data()), message.size())); !sent)
 		NETLINK_LOG_WARNING("DiscoveryService: announcing to {} failed: {}", target.toString(), netlink::net::toString(sent.error()));
@@ -229,7 +228,7 @@ void DiscoveryService::sendPackage()
 
 void DiscoveryService::receivePackage()
 {
-	auto socket = this->socket();
+	const auto socket = this->socket();
 
 	if (!socket)
 	{
@@ -258,9 +257,9 @@ void DiscoveryService::receivePackage()
 
 	try
 	{
-		const auto		  begin	 = mReceiveBuffer.data();
-		auto			  j		 = json::parse(begin, begin + datagram->size);
-		DiscoveryEndpoint remote = j.get<DiscoveryEndpoint>();
+		const auto				begin  = mReceiveBuffer.data();
+		const auto				j	   = json::parse(begin, begin + datagram->size);
+		const DiscoveryEndpoint remote = j.get<DiscoveryEndpoint>();
 		addRemoteToList(remote);
 	}
 	catch (const std::exception &e)

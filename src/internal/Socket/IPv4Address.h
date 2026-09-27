@@ -24,7 +24,7 @@ public:
 	constexpr IPv4Address() = default;
 
 	// Strict dotted-quad parse: exactly four octets, decimal digits only, each 0..255
-	static constexpr std::optional<IPv4Address> parse(std::string_view text)
+	static constexpr std::optional<IPv4Address> parse(const std::string_view text)
 	{
 		uint32_t	 value	= 0;
 		int			 octets = 0;
@@ -73,7 +73,7 @@ public:
 		return IPv4Address(value);
 	}
 
-	static constexpr IPv4Address fromHostOrder(uint32_t value) { return IPv4Address(value); }
+	static constexpr IPv4Address fromHostOrder(const uint32_t value) { return IPv4Address(value); }
 
 	constexpr uint32_t			 toHostOrder() const { return mValue; }
 
@@ -107,21 +107,21 @@ public:
 	static constexpr IPv4Address broadcast() { return IPv4Address(0xFFFFFFFFu); }
 
 private:
-	explicit constexpr IPv4Address(uint32_t value) : mValue(value) {}
+	explicit constexpr IPv4Address(const uint32_t value) : mValue(value) {}
 
 	uint32_t mValue{0};
 };
 
 
 // Directed broadcast address of the subnet the address belongs to (e.g. 192.168.1.7/24 -> 192.168.1.255).
-constexpr IPv4Address subnetBroadcast(IPv4Address address, IPv4Address mask)
+constexpr IPv4Address subnetBroadcast(const IPv4Address address, const IPv4Address mask)
 {
 	return IPv4Address::fromHostOrder(address.toHostOrder() | ~mask.toHostOrder());
 }
 
 
 // True when both addresses sit on the same subnet under the given mask.
-constexpr bool sameSubnet(IPv4Address first, IPv4Address second, IPv4Address mask)
+constexpr bool sameSubnet(const IPv4Address first, const IPv4Address second, const IPv4Address mask)
 {
 	return (first.toHostOrder() & mask.toHostOrder()) == (second.toHostOrder() & mask.toHostOrder());
 }
