@@ -275,6 +275,9 @@ python build.py --benchmark --benchmark-repetitions=5            # every benchma
 Benchmarks are named `BM_<Module>_<Operation>`, or `BM_<Module>/<Operation>` for fixtures. The binary accepts all Google
 Benchmark flags. To compare two runs, use `compare.py` from Google Benchmark's `tools/` folder.
 
+The target is built with the project like the tests (`NETLINK_BUILD_BENCHMARKS`, ON for top-level builds), but it is
+never run by CI or ctest.
+
 ## Design Highlights
 
 | Pattern                  | Where applied                                                                                                                                                                                  |

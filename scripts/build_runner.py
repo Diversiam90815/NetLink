@@ -25,29 +25,21 @@ class BuildRunner:
         self.version = self.version_manager.full_version()
 
     # ---- CMake / build ----
-    def configure_cmake_project(self, platform: Platform, architecture: Architecture,
-                                options: list[str] | None = None) -> None:
-        configure_cmd = [
+    def prepare_cmake_project(self, platform: Platform, architecture: Architecture) -> None:
+        prepare_cmd = [
             "cmake",
+            "-G", str(platform),
             "-S", str(self.root_dir),
             "-B", str(self.build_dir),
             f"-DNETLINK_BUILD_NUMBER={self.build_number}",
-            *(options or []),
         ]
-
-        # The generator is chosen when the build directory is created; an existing one keeps its own
-        if not (self.build_dir / "CMakeCache.txt").is_file():
-            configure_cmd += ["-G", str(platform)]
-            if platform == Platform.VS2022 or platform == Platform.VS2026:
-                configure_cmd += ["-A", str(architecture)]
+        if platform == Platform.VS2022 or platform == Platform.VS2026:
+            prepare_cmd += ["-A", str(architecture)]
 
         BuildUtils.execute_command(
-            configure_cmd,
+            prepare_cmd,
             f"CMake: Generate {platform} project",
         )
-
-    def prepare_cmake_project(self, platform: Platform, architecture: Architecture) -> None:
-        self.configure_cmake_project(platform, architecture)
 
         # build backend in Release
         BuildUtils.execute_command(
@@ -115,11 +107,7 @@ class BuildRunner:
                 "CMake: Running C++ unit tests",
             )
 
-    def run_cpp_benchmarks(self, platform: Platform, architecture: Architecture, build_dir: Path, target: str,
-                           benchmark_filter: str | None = None, repetitions: int = 1) -> None:
-        # Benchmarks are opt-in and never part of a normal (CI) build: enable them in this build directory
-        self.configure_cmake_project(platform, architecture, ["-DNETLINK_BUILD_BENCHMARKS=ON"])
-
+    def run_cpp_benchmarks(self, build_dir: Path, target: str, benchmark_filter: str | None = None, repetitions: int = 1) -> None:
         # Benchmarks always run in Release
         configuration = Configuration.Release
 

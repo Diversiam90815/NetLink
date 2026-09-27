@@ -40,8 +40,8 @@ def main():
         runner.run_cpp_unit_tests(configuration=args.configuration, build_dir=build_dir, target="NetLinkTests")
 
     if args.benchmark:
-        runner.run_cpp_benchmarks(platform=args.platform, architecture=args.architecture, build_dir=build_dir, target="NetLinkBenchmarks",
-                                   benchmark_filter=args.benchmark_filter, repetitions=args.benchmark_repetitions)
+        runner.run_cpp_benchmarks(build_dir=build_dir, target="NetLinkBenchmarks", benchmark_filter=args.benchmark_filter,
+                                   repetitions=args.benchmark_repetitions)
 
     if args.build:
         runner.create_build_generator(platform=args.platform, architecture=args.architecture, configuration=args.configuration)
