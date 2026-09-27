@@ -1,7 +1,9 @@
 /*
   ==============================================================================
 	Module:         ConnectionServiceBenchmarks
-	Description:    The connection lifecycle between two peerss
+	Description:    The connection lifecycle between two peers.
+					Load: session setup on a saturated channel, many peers
+					inviting one hub at once.
   ==============================================================================
 */
 
@@ -9,15 +11,22 @@
 
 #include <atomic>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <string>
+#include <vector>
 
 #include "BenchUtil.h"
 #include "LoopbackChannelPair.h"
+#include "LoopbackSwarm.h"
+#include "ServiceWiring.h"
+#include "Traffic.h"
 #include "ConnectionService/ConnectionService.h"
 #include "ConnectionService/ReadySyncTracker.h"
 
 using namespace netlink;
 using bench::LoopbackChannelPair;
+using bench::LoopbackSwarm;
 
 
 namespace ConnectionBenchmarks
@@ -66,50 +75,25 @@ public:
 	}
 
 protected:
-	// Same wiring as NetLinkCore::wireServices(); the remote counts as validated, as after a successful validation
+	// Wired as NetLinkCore wires it; the remote counts as validated, as after a successful validation
 	void wire(PeerChannel &channel, ConnectionService &service, const int remotePort, const char *remoteName)
 	{
 		service.setLocalIP(bench::loopback());
+		service.setCallbacks(bench::connectionStatusHandler(channel, [this](const ConnectionStatusUpdate &update) { count(update); }));
+		bench::wireConnection(channel, service);
+		service.onPeerValidated(bench::validatedRemote(remoteName, remotePort));
+	}
 
-		ChannelConnectionCallbacks signals;
-		signals.onConnectRequested		 = [&service](const std::string &name) { service.onReceivedInvitation(name); };
-		signals.onConnectRequestAnswered = [&service](const std::string &name, const bool accepted, const std::string &reason)
-		{ service.onReceivedAnswerToInvite(name, accepted, reason); };
-		signals.onDisconnectReceived = [&service](const std::string &name) { service.onDisconnectReceived(name); };
-		signals.onReadyFlagReceived	 = [&service](const std::string &name) { service.onReadyFlagReceived(name); };
-		channel.setConnectionCallbacks(std::move(signals));
-		channel.setOnPeerLost([&service](const std::string &name, const std::string &reason) { service.onPeerLost(name, reason); });
-
-		// NetLinkCore::onConnectionStatus: keepalive for the session, session traffic ends with it
-		ConnectionServiceCallbacks callbacks;
-		callbacks.onStatusUpdate = [this, &channel](const ConnectionStatusUpdate &update)
+	void count(const ConnectionStatusUpdate &update)
+	{
+		switch (update.type)
 		{
-			switch (update.type)
-			{
-			case ConnectionStatusUpdate::Type::Established:
-				channel.setKeepAlive(update.endpoint.displayName, true);
-				established.notify();
-				break;
-
-			case ConnectionStatusUpdate::Type::Closed:
-				channel.setKeepAlive(update.endpoint.displayName, false);
-				channel.dropApplicationTraffic(update.endpoint.displayName);
-				closed.notify();
-				break;
-
-			case ConnectionStatusUpdate::Type::Failed:
-			case ConnectionStatusUpdate::Type::Declined: failed.store(true); break;
-
-			default: break;
-			}
-		};
-		service.setCallbacks(std::move(callbacks));
-
-		ValidationResult validated;
-		validated.remoteEndpoint = DiscoveryEndpoint{.IPAddress = bench::loopback(), .port = remotePort, .displayName = remoteName};
-		validated.status		 = ValidationResult::Status::ReadyToConnect;
-		validated.canConnect	 = true;
-		service.onPeerValidated(validated);
+		case ConnectionStatusUpdate::Type::Established: established.notify(); break;
+		case ConnectionStatusUpdate::Type::Closed: closed.notify(); break;
+		case ConnectionStatusUpdate::Type::Failed:
+		case ConnectionStatusUpdate::Type::Declined: failed.store(true); break;
+		default: break;
+		}
 	}
 
 	// a invites b; true once both sides report the established session
@@ -143,10 +127,15 @@ protected:
 
 
 // Invitation -> auto-accept -> ready flags -> both Established. The teardown between rounds is not timed.
+// traffic: a streams 1 KiB messages to b the whole time; control signals then compete with a full send window.
 BENCHMARK_DEFINE_F(BM_ConnectionService, Establish)(benchmark::State &state)
 {
-	uint64_t expectedEstablished = 0;
-	uint64_t expectedClosed		 = 0;
+	uint64_t						 expectedEstablished = 0;
+	uint64_t						 expectedClosed		 = 0;
+
+	std::optional<bench::BackgroundStream> traffic;
+	if (state.range(0) != 0 && pair->a.getBoundPort() != 0)
+		traffic.emplace(pair->a, LoopbackChannelPair::NameB, 1024);
 
 	for (auto _ : state)
 	{
@@ -167,9 +156,18 @@ BENCHMARK_DEFINE_F(BM_ConnectionService, Establish)(benchmark::State &state)
 		}
 	}
 
+	if (traffic)
+		state.counters["stream_msgs"] = static_cast<double>(traffic->sent());
+
 	state.SetItemsProcessed(static_cast<int64_t>(state.iterations()));
 }
-BENCHMARK_REGISTER_F(BM_ConnectionService, Establish)->UseManualTime();
+BENCHMARK_REGISTER_F(BM_ConnectionService, Establish)->ArgName("traffic")->Arg(0)->UseManualTime();
+BENCHMARK_REGISTER_F(BM_ConnectionService, Establish)
+	->Name("BM_ConnectionService_Load_EstablishUnderTraffic")
+	->ArgName("traffic")
+	->Arg(1)
+	->UseManualTime()
+	->Unit(benchmark::kMillisecond);
 
 
 // A full session lifecycle: establish, then close until both sides report it closed
@@ -206,5 +204,121 @@ static void BM_ReadySyncTracker_BothReady(benchmark::State &state)
 	}
 }
 BENCHMARK(BM_ReadySyncTracker_BothReady);
+
+
+// N validated peers invite one hub at the same moment. The hub accepts one and declines the rest (it is busy).
+// Timed until every peer got its answer; the winning session is closed again between rounds, untimed.
+static void BM_ConnectionService_Load_InvitationStorm(benchmark::State &state)
+{
+	using Type											= ConnectionStatusUpdate::Type;
+	const auto										peerCount = static_cast<size_t>(state.range(0));
+
+	// Declared first: the threads of everything below report into these
+	bench::CompletionCounter						answered; // peer side: established, declined or failed
+	bench::CompletionCounter						hubEstablished;
+	bench::CompletionCounter						closed;
+	std::atomic<uint64_t>							sessions{0};
+	std::mutex										winnerMutex;
+	std::optional<size_t>							winner;
+
+	LoopbackSwarm									swarm(peerCount);
+	std::unique_ptr<ConnectionService>				hubService;
+	std::vector<std::unique_ptr<ConnectionService>> peerServices;
+
+	if (!swarm.open())
+	{
+		state.SkipWithError("Could not bind the swarm to 127.0.0.1");
+		return;
+	}
+
+	hubService = std::make_unique<ConnectionService>(swarm.hub);
+	hubService->setConfig(ConnectionConfig{.autoAcceptConnection = true});
+	hubService->setCallbacks(bench::connectionStatusHandler(swarm.hub,
+															[&](const ConnectionStatusUpdate &update)
+															{
+																if (update.type == Type::Established)
+																	hubEstablished.notify();
+																else if (update.type == Type::Closed)
+																	closed.notify();
+															}));
+	bench::wireConnection(swarm.hub, *hubService);
+
+	for (size_t i = 0; i < peerCount; ++i)
+	{
+		auto &channel = *swarm.peers[i];
+		auto &service = *peerServices.emplace_back(std::make_unique<ConnectionService>(channel));
+
+		service.setCallbacks(bench::connectionStatusHandler(channel,
+															[&, i](const ConnectionStatusUpdate &update)
+															{
+																switch (update.type)
+																{
+																case Type::Established:
+																{
+																	std::lock_guard<std::mutex> lock(winnerMutex);
+																	winner = i;
+																	++sessions;
+																	answered.notify();
+																	break;
+																}
+																case Type::Declined:
+																case Type::Failed: answered.notify(); break;
+																case Type::Closed: closed.notify(); break;
+																default: break;
+																}
+															}));
+		bench::wireConnection(channel, service);
+
+		service.onPeerValidated(bench::validatedRemote(LoopbackSwarm::HubName, swarm.hub.getBoundPort()));
+		hubService->onPeerValidated(bench::validatedRemote(swarm.names[i], channel.getBoundPort()));
+	}
+
+	swarm.start();
+
+	uint64_t expectedAnswers = 0;
+	uint64_t expectedClosed	 = 0;
+	uint64_t rounds			 = 0;
+
+	for (auto _ : state)
+	{
+		const auto start = bench::Clock::now();
+
+		for (const auto &service : peerServices)
+			service->initiateConnection(LoopbackSwarm::HubName);
+
+		expectedAnswers += peerCount;
+		const bool complete = answered.waitFor(expectedAnswers, bench::LoadTimeout) && hubEstablished.waitFor(++rounds, bench::LoadTimeout);
+		state.SetIterationTime(bench::secondsSince(start));
+
+		std::optional<size_t> won;
+		{
+			std::lock_guard<std::mutex> lock(winnerMutex);
+			won = std::exchange(winner, std::nullopt);
+		}
+
+		if (!complete || !won)
+		{
+			state.SkipWithError("Not every invitation was answered, or no session was established");
+			break;
+		}
+
+		// Untimed: the winner closes its session, both sides report it closed
+		expectedClosed += 2;
+		if (!peerServices[*won]->closeConnection(LoopbackSwarm::HubName) || !closed.waitFor(expectedClosed, bench::LoadTimeout))
+		{
+			state.SkipWithError("The winning session did not close");
+			break;
+		}
+	}
+
+	state.counters["sessions"] = benchmark::Counter(static_cast<double>(sessions.load()), benchmark::Counter::kAvgIterations);
+	state.SetItemsProcessed(static_cast<int64_t>(state.iterations() * peerCount));
+
+	// Channel threads call into the services and the services into the channels: stop the threads first
+	swarm.stop();
+	peerServices.clear();
+	hubService.reset();
+}
+BENCHMARK(BM_ConnectionService_Load_InvitationStorm)->ArgName("peers")->Arg(8)->Arg(32)->Arg(128)->UseManualTime()->Unit(benchmark::kMillisecond);
 
 } // namespace ConnectionBenchmarks

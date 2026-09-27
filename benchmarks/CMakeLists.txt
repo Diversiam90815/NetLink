@@ -25,6 +25,7 @@ set(Channel_Benchmarks
         ${Benchmark_Directory}/ChannelBenchmarks/ReliableLinkBenchmarks.cpp
         ${Benchmark_Directory}/ChannelBenchmarks/HeartbeatRttBenchmarks.cpp
         ${Benchmark_Directory}/ChannelBenchmarks/PeerChannelBenchmarks.cpp
+        ${Benchmark_Directory}/ChannelBenchmarks/PeerChannelLoadBenchmarks.cpp
 )
 
 set(Validation_Benchmarks
@@ -49,6 +50,9 @@ set(Benchmark_Support
         ${Benchmark_Directory}/Support/BenchUtil.h
         ${Benchmark_Directory}/Support/LinkWire.h
         ${Benchmark_Directory}/Support/LoopbackChannelPair.h
+        ${Benchmark_Directory}/Support/LoopbackSwarm.h
+        ${Benchmark_Directory}/Support/ServiceWiring.h
+        ${Benchmark_Directory}/Support/Traffic.h
 )
 
 

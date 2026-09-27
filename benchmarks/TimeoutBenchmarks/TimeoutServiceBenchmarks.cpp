@@ -2,7 +2,8 @@
   ==============================================================================
 	Module:         TimeoutServiceBenchmarks
 	Description:    Arming, re-arming and cancelling timeouts with a populated
-					service, contention, and how late timeouts actually fire
+					service, contention, and how late timeouts actually fire.
+					Load: tens of thousands of active timeouts, mass expiry.
   ==============================================================================
 */
 
@@ -83,6 +84,7 @@ static void BM_TimeoutService_StartCancel(benchmark::State &state)
 	state.SetItemsProcessed(static_cast<int64_t>(state.iterations()));
 }
 BENCHMARK(BM_TimeoutService_StartCancel)->Apply(bench::populations);
+BENCHMARK(BM_TimeoutService_StartCancel)->Name("BM_TimeoutService_Load_StartCancel")->ArgName("entries")->Arg(16'384)->Arg(65'536)->Unit(benchmark::kMicrosecond);
 
 
 // Arms one timeout per category for a peer, then cancels them all by identifier (a peer going away)
@@ -160,11 +162,14 @@ static void BM_TimeoutService_StartCancel_Contended(benchmark::State &state)
 BENCHMARK(BM_TimeoutService_StartCancel_Contended)->Setup(createSharedService)->Teardown(destroySharedService)->ThreadRange(1, 8)->UseRealTime();
 
 
-// Time from arming until the callback ran. overshoot_us: how late it fired compared to the requested duration.
+// Time from arming until the callback ran, with `active` other timeouts armed.
+// overshoot_us: how late it fired compared to the requested duration.
 static void BM_TimeoutService_FireLatency(benchmark::State &state)
 {
 	const int				 timeoutMs = static_cast<int>(state.range(0));
 	TimeoutService			 service;
+	populate(service, makeKeys(static_cast<size_t>(state.range(1)), "background-"));
+
 	bench::CompletionCounter fired;
 	bench::Clock::time_point firedAt;
 	uint64_t				 expected	= 0;
@@ -196,6 +201,43 @@ static void BM_TimeoutService_FireLatency(benchmark::State &state)
 
 	state.counters["overshoot_us"] = benchmark::Counter(overshootUs, benchmark::Counter::kAvgIterations);
 }
-BENCHMARK(BM_TimeoutService_FireLatency)->ArgName("timeoutMs")->Arg(0)->Arg(1)->Arg(5)->Arg(10)->UseManualTime();
+BENCHMARK(BM_TimeoutService_FireLatency)->ArgNames({"timeoutMs", "active"})->ArgsProduct({{0, 1, 5, 10}, {0}})->UseManualTime();
+BENCHMARK(BM_TimeoutService_FireLatency)
+	->Name("BM_TimeoutService_Load_FireLatency")
+	->ArgNames({"timeoutMs", "active"})
+	->ArgsProduct({{0}, {1024, 16'384, 65'536}})
+	->UseManualTime()
+	->Unit(benchmark::kMicrosecond);
+
+
+// Many timeouts come due at once (every peer of a large LAN timing out together). Timed until every callback ran.
+static void BM_TimeoutService_Load_MassExpiry(benchmark::State &state)
+{
+	const auto				 count = static_cast<size_t>(state.range(0));
+	const auto				 keys  = makeKeys(count);
+	bench::CompletionCounter fired;
+	uint64_t				 expected = 0;
+
+	for (auto _ : state)
+	{
+		TimeoutService service; // fresh per round; its thread start and shutdown are outside the measured time
+		const auto	   start = bench::Clock::now();
+
+		for (const auto &key : keys)
+			service.startTimeout(key, 0, [&fired](const TimeoutKey &) { fired.notify(); });
+
+		expected += count;
+		if (!fired.waitFor(expected, bench::LoadTimeout))
+		{
+			state.SkipWithError("Not every timeout fired");
+			break;
+		}
+
+		state.SetIterationTime(bench::secondsSince(start));
+	}
+
+	state.SetItemsProcessed(static_cast<int64_t>(state.iterations() * count));
+}
+BENCHMARK(BM_TimeoutService_Load_MassExpiry)->ArgName("timeouts")->Arg(1'000)->Arg(10'000)->Arg(30'000)->UseManualTime()->Unit(benchmark::kMillisecond);
 
 } // namespace TimeoutBenchmarks

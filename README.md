@@ -267,13 +267,14 @@ sockets on loopback, and services wired the same way `NetLinkCore` wires them. E
 - peer validation, `ConnectionService`, discovery, and `NetLinkCore` end to end
 
 ```bash
-python build.py --benchmark                                    # everything, Release, JSON written to build/<arch>/benchmarks/results
-python build.py --benchmark --benchmark-filter=TimeoutService  # one module (regex on the name)
+python build.py --benchmark                                      # everything, Release, JSON written to build/<arch>/benchmarks/results
+python build.py --benchmark --benchmark-filter=TimeoutService    # one module (regex on the name)
+python build.py --benchmark --benchmark-repetitions=5            # every benchmark 5 times: mean, median, stddev, cv
 ```
 
 Benchmarks are named `BM_<Module>_<Operation>`, or `BM_<Module>/<Operation>` for fixtures. The binary accepts all Google
-Benchmark flags, e.g. `--benchmark_repetitions=5`. To compare two runs, use `compare.py` from Google Benchmark's
-`tools/` folder. The `NetLinkBenchmarks.Smoke` ctest runs every benchmark once, so they keep working.
+Benchmark flags. To compare two runs, use `compare.py` from Google Benchmark's `tools/` folder. The
+`NetLinkBenchmarks.Smoke` ctest runs every benchmark except the load benchmarks once, so they keep working.
 
 ## Design Highlights
 

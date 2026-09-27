@@ -1,7 +1,8 @@
 /*
   ==============================================================================
 	Module:         PeerValidationBenchmarks
-	Description:    The complete pre-connection validation between two peers
+	Description:    The complete pre-connection validation between two peers.
+					Load: a hub validating up to 250 peers that appear at once.
   ==============================================================================
 */
 
@@ -10,13 +11,17 @@
 #include <atomic>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "BenchUtil.h"
 #include "LoopbackChannelPair.h"
+#include "LoopbackSwarm.h"
+#include "ServiceWiring.h"
 #include "PeerValidation/PeerValidationService.h"
 
 using namespace netlink;
 using bench::LoopbackChannelPair;
+using bench::LoopbackSwarm;
 
 
 namespace ValidationBenchmarks
@@ -41,6 +46,36 @@ static const char *labelFor(const int64_t checks)
 	case 2: return "secret";
 	default: return "secret + version";
 	}
+}
+
+
+// Configured as NetLinkCore configures it, with the checks selected by `checks`
+static void configure(PeerValidationService &validation, const int64_t checks)
+{
+	validation.setConfig(configFor(checks));
+	validation.setLocalSecret("a-shared-application-secret");
+	validation.setLocalVersion("1.4.2.1337");
+}
+
+
+// Every result is counted; a rejection of these always compatible peers is remembered
+static void reportResults(PeerValidationService &validation, bench::CompletionCounter &completed, std::atomic<bool> &rejected)
+{
+	validation.setValidationCallback(
+		[&completed, &rejected](const ValidationResult &result)
+		{
+			if (!result.canConnect)
+				rejected.store(true);
+
+			completed.notify();
+		});
+}
+
+
+// How a peer's discovery announcement describes its channel
+static DiscoveryEndpoint endpointOf(const PeerChannel &channel, const std::string &name)
+{
+	return DiscoveryEndpoint{.IPAddress = bench::loopback(), .port = channel.getBoundPort(), .displayName = name};
 }
 
 
@@ -86,42 +121,11 @@ public:
 	}
 
 protected:
-	// Same wiring as NetLinkCore::wireServices()
 	void wire(PeerChannel &channel, PeerValidationService &validation, const int64_t checks)
 	{
-		validation.setConfig(configFor(checks));
-		validation.setLocalSecret("a-shared-application-secret");
-		validation.setLocalVersion("1.4.2.1337");
-
-		ChannelValidationCallbacks signals;
-		signals.onValidationRequestReceived = [&validation](const std::string &name, const RemoteRequest request) { validation.onRequestReceived(name, request); };
-		signals.onSecretResponseReceived	= [&validation](const std::string &name, const std::string &secret)
-		{ validation.onCheckResponseReceived(name, RemoteRequest::Secret, secret); };
-		signals.onVersionResponseReceived = [&validation](const std::string &name, const std::string &version)
-		{ validation.onCheckResponseReceived(name, RemoteRequest::Version, version); };
-		signals.onValidationHandshakeReceived = [&validation](const std::string &name) { validation.onHandshakeReceived(name); };
-		channel.setValidationCallbacks(std::move(signals));
-
-		PeerValidationSendCallbacks send;
-		send.sendRequest		 = [&channel](const std::string &name, const RemoteRequest request) { channel.sendValidationRequest(name, request); };
-		send.sendSecretResponse	 = [&channel](const std::string &name, const std::string &value) { channel.sendSecretResponse(name, value); };
-		send.sendVersionResponse = [&channel](const std::string &name, const std::string &value) { channel.sendVersionResponse(name, value); };
-		send.sendHandshake		 = [&channel](const std::string &name) { channel.sendValidationHandshake(name); };
-		validation.setSendCallbacks(std::move(send));
-
-		validation.setValidationCallback(
-			[this](const ValidationResult &result)
-			{
-				if (!result.canConnect)
-					rejected.store(true);
-
-				completed.notify();
-			});
-	}
-
-	static DiscoveryEndpoint endpointOf(const PeerChannel &channel, const char *name)
-	{
-		return DiscoveryEndpoint{.IPAddress = bench::loopback(), .port = channel.getBoundPort(), .displayName = name};
+		configure(validation, checks);
+		reportResults(validation, completed, rejected);
+		bench::wireValidation(channel, validation);
 	}
 
 	bench::CompletionCounter			   completed;
@@ -172,5 +176,86 @@ BENCHMARK_DEFINE_F(BM_PeerValidation, Validate)(benchmark::State &state)
 	state.SetItemsProcessed(static_cast<int64_t>(state.iterations()));
 }
 BENCHMARK_REGISTER_F(BM_PeerValidation, Validate)->ArgName("checks")->Arg(0)->Arg(1)->Arg(2)->Arg(3)->UseManualTime();
+
+
+// Many peers appear at once: a hub and N peers (secret and version check) all discover each other at the same moment.
+// Timed until the hub validated every peer and every peer validated the hub; items: peers validated by the hub.
+static void BM_PeerValidation_Load_Swarm(benchmark::State &state)
+{
+	constexpr int64_t									bothChecks = 3;
+	const auto											peerCount  = static_cast<size_t>(state.range(0));
+
+	// Declared first: every thread below reports into these
+	bench::CompletionCounter							completed;
+	std::atomic<bool>									rejected{false};
+
+	LoopbackSwarm										swarm(peerCount);
+	auto												hubValidation = std::make_unique<PeerValidationService>();
+	std::vector<std::unique_ptr<PeerValidationService>> peerValidations;
+
+	if (!swarm.open())
+	{
+		state.SkipWithError("Could not bind the swarm to 127.0.0.1");
+		return;
+	}
+
+	auto setUp = [&](PeerChannel &channel, PeerValidationService &validation)
+	{
+		configure(validation, bothChecks);
+		reportResults(validation, completed, rejected);
+		bench::wireValidation(channel, validation);
+	};
+
+	setUp(swarm.hub, *hubValidation);
+
+	for (size_t i = 0; i < peerCount; ++i)
+		setUp(*swarm.peers[i], *peerValidations.emplace_back(std::make_unique<PeerValidationService>()));
+
+	swarm.start();
+
+	const auto					   hubEndpoint = endpointOf(swarm.hub, LoopbackSwarm::HubName);
+	std::vector<DiscoveryEndpoint> peerEndpoints;
+	for (size_t i = 0; i < peerCount; ++i)
+		peerEndpoints.push_back(endpointOf(*swarm.peers[i], swarm.names[i]));
+
+	uint64_t expected = 0;
+
+	for (auto _ : state)
+	{
+		// Forget the previous round, as NetLinkCore does for re-discovered peers
+		for (size_t i = 0; i < peerCount; ++i)
+		{
+			hubValidation->clearValidatedPeer(swarm.names[i]);
+			peerValidations[i]->clearValidatedPeer(LoopbackSwarm::HubName);
+		}
+
+		const auto start = bench::Clock::now();
+
+		for (size_t i = 0; i < peerCount; ++i)
+		{
+			hubValidation->onPeerDiscovered(peerEndpoints[i]);
+			peerValidations[i]->onPeerDiscovered(hubEndpoint);
+		}
+
+		expected += 2 * peerCount;
+		const bool complete = completed.waitFor(expected, bench::LoadTimeout);
+		state.SetIterationTime(bench::secondsSince(start));
+
+		if (!complete || rejected.load())
+		{
+			state.SkipWithError(complete ? "A compatible peer was rejected" : "Validation did not complete for every peer");
+			break;
+		}
+	}
+
+	state.SetItemsProcessed(static_cast<int64_t>(state.iterations() * peerCount));
+
+	// No timeout may fire into a stopped swarm, and no channel thread into a destroyed service
+	hubValidation->cancelAllPendingValidation();
+	for (const auto &validation : peerValidations)
+		validation->cancelAllPendingValidation();
+	swarm.stop();
+}
+BENCHMARK(BM_PeerValidation_Load_Swarm)->ArgName("peers")->Arg(8)->Arg(32)->Arg(128)->Arg(250)->UseManualTime()->Unit(benchmark::kMillisecond);
 
 } // namespace ValidationBenchmarks

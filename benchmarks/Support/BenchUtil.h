@@ -29,6 +29,13 @@ using Clock = std::chrono::steady_clock;
 // Upper bound for any single wait on asynchronous library work. A benchmark that hits it reports an error instead of hanging.
 inline constexpr std::chrono::milliseconds CompletionTimeout{5000};
 
+// The same bound for load benchmarks, whose single waits cover whole bursts, streams or swarms
+inline constexpr std::chrono::milliseconds LoadTimeout{60000};
+
+// Size units for argument lists
+inline constexpr int64_t				   KiB = 1024;
+inline constexpr int64_t				   MiB = 1024 * KiB;
+
 
 // Deterministic bytes, so runs stay comparable across builds and machines
 inline std::vector<uint8_t>				   makePayload(const size_t size, const uint32_t seed = 0x4E4C)
@@ -74,6 +81,21 @@ public:
 	{
 		std::unique_lock<std::mutex> lock(mMutex);
 		return mChanged.wait_for(lock, timeout, [&] { return mCount >= target; });
+	}
+
+	// Blocks until at least target completions were counted, as long as the count keeps moving. False once it stalled for `stall`.
+	bool waitWhileProgressing(const uint64_t target, const std::chrono::milliseconds stall)
+	{
+		std::unique_lock<std::mutex> lock(mMutex);
+
+		while (mCount < target)
+		{
+			const uint64_t before = mCount;
+			if (!mChanged.wait_for(lock, stall, [&] { return mCount != before; }))
+				return false;
+		}
+
+		return true;
 	}
 
 	uint64_t value() const

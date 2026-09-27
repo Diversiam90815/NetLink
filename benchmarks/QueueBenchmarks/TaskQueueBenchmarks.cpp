@@ -1,7 +1,8 @@
 /*
   ==============================================================================
 	Module:         TaskQueueBenchmarks
-	Description:    Serial worker queue used by ConnectionService and NetLinkCore
+	Description:    Serial worker queue used by ConnectionService and NetLinkCore.
+					Load: a million tasks from several producers at once.
   ==============================================================================
 */
 
@@ -9,8 +10,10 @@
 
 #include <array>
 #include <atomic>
+#include <latch>
 #include <memory>
 #include <thread>
+#include <vector>
 
 #include "BenchUtil.h"
 #include "Util/TaskQueue.h"
@@ -117,5 +120,63 @@ static void BM_TaskQueue_Drain(benchmark::State &state)
 	state.SetItemsProcessed(static_cast<int64_t>(state.iterations() * batch));
 }
 BENCHMARK(BM_TaskQueue_Drain)->ArgName("batch")->Arg(1)->Arg(64)->Arg(1024)->UseRealTime();
+
+
+// One million tasks posted by 1..8 producers at once, without throttling. Timed until the worker executed all of them.
+static void BM_TaskQueue_Load_Burst(benchmark::State &state)
+{
+	constexpr uint64_t		 Total		 = 1'000'000;
+	const auto				 producers	 = static_cast<size_t>(state.range(0));
+	const uint64_t			 perProducer = Total / producers;
+
+	std::atomic<uint64_t>	 executed{0};
+	bench::CompletionCounter done;
+	uint64_t				 target = 0;
+	uint64_t				 rounds = 0;
+
+	TaskQueue				 queue; // declared last: stopped before the state its tasks reference
+	queue.start();
+
+	for (auto _ : state)
+	{
+		target += perProducer * producers;
+
+		std::latch				 go(1);
+		std::vector<std::thread> threads;
+
+		for (size_t p = 0; p < producers; ++p)
+		{
+			threads.emplace_back(
+				[&]
+				{
+					go.wait();
+					for (uint64_t i = 0; i < perProducer; ++i)
+						queue.post(
+							[&executed, &done, target]
+							{
+								if (executed.fetch_add(1, std::memory_order_relaxed) + 1 == target)
+									done.notify();
+							});
+				});
+		}
+
+		const auto start = bench::Clock::now();
+		go.count_down();
+
+		for (auto &thread : threads)
+			thread.join();
+
+		if (!done.waitFor(++rounds, bench::LoadTimeout))
+		{
+			state.SkipWithError("The queue did not drain");
+			break;
+		}
+
+		state.SetIterationTime(bench::secondsSince(start));
+	}
+
+	state.SetItemsProcessed(static_cast<int64_t>(state.iterations() * perProducer * producers));
+}
+BENCHMARK(BM_TaskQueue_Load_Burst)->ArgName("producers")->Arg(1)->Arg(4)->Arg(8)->UseManualTime()->Unit(benchmark::kMillisecond);
 
 } // namespace QueueBenchmarks

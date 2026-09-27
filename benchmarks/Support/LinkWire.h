@@ -31,6 +31,15 @@ public:
 
 	explicit LinkWire(const netlink::channel::ReliabilityConfig &config = {}) : a(config), b(config) {}
 
+	// Loses every n-th Data packet on the way, retransmissions included (deterministic). n <= 0: lossless.
+	static Drop dropEveryNth(const int64_t n)
+	{
+		if (n <= 0)
+			return {};
+
+		return [n, count = int64_t{0}](const PacketHeader &header) mutable { return header.flags.kind() == netlink::channel::PacketKind::Data && ++count % n == 0; };
+	}
+
 	// Carries everything `from` produced so far into `to`. Returns the number of datagrams moved (lost ones included).
 	size_t transfer(ReliableLink &from, ReliableLink &to, const Drop &drop = {}) const
 	{

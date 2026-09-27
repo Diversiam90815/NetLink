@@ -2,6 +2,7 @@
   ==============================================================================
 	Module:         ReliableLinkBenchmarks
 	Description:    The reliability protocol itself without sockets or threads.
+					Load: 16 MiB messages under loss, 100k queued messages.
   ==============================================================================
 */
 
@@ -12,6 +13,7 @@
 
 #include "BenchUtil.h"
 #include "LinkWire.h"
+#include "NetLinkConstants.h"
 
 using namespace netlink;
 using namespace netlink::channel;
@@ -21,16 +23,6 @@ using bench::LinkWire;
 namespace ChannelBenchmarks
 {
 
-// Loses every n-th Data packet on the way (retransmissions included), deterministic
-static LinkWire::Drop dropEveryNth(const int64_t n)
-{
-	if (n <= 0)
-		return {};
-
-	return [n, count = int64_t{0}](const PacketHeader &header) mutable { return header.flags.kind() == PacketKind::Data && ++count % n == 0; };
-}
-
-
 // Moves batches of messages a -> b until all are acknowledged; args: message bytes, drop every n-th Data packet (0 = lossless)
 static void BM_ReliableLink_Transfer(benchmark::State &state)
 {
@@ -39,7 +31,7 @@ static void BM_ReliableLink_Transfer(benchmark::State &state)
 	const auto	 payload = bench::makePayload(size);
 
 	LinkWire	 wire;
-	const auto	 drop = dropEveryNth(state.range(1));
+	const auto	 drop = LinkWire::dropEveryNth(state.range(1));
 
 	for (auto _ : state)
 	{
@@ -65,7 +57,12 @@ static void BM_ReliableLink_Transfer(benchmark::State &state)
 	state.SetItemsProcessed(static_cast<int64_t>(state.iterations() * batch));
 	state.SetBytesProcessed(static_cast<int64_t>(state.iterations() * batch * size));
 }
-BENCHMARK(BM_ReliableLink_Transfer)->ArgNames({"bytes", "dropEvery"})->ArgsProduct({{64, 1024, 64 * 1024, 1024 * 1024}, {0, 20, 5}});
+BENCHMARK(BM_ReliableLink_Transfer)->ArgNames({"bytes", "dropEvery"})->ArgsProduct({{64, bench::KiB, 64 * bench::KiB, bench::MiB}, {0, 20, 5}});
+BENCHMARK(BM_ReliableLink_Transfer)
+	->Name("BM_ReliableLink_Load_Transfer")
+	->ArgNames({"bytes", "dropEvery"})
+	->ArgsProduct({{4 * bench::MiB, static_cast<int64_t>(internal::MaxMessagePayload)}, {0, 20, 5}})
+	->Unit(benchmark::kMillisecond);
 
 
 // A full window of unacknowledged packets comes due: onTimer() retransmits all of them
@@ -134,5 +131,33 @@ static void BM_ReliableLink_SendUnreliable(benchmark::State &state)
 	state.SetBytesProcessed(static_cast<int64_t>(state.iterations()) * state.range(0));
 }
 BENCHMARK(BM_ReliableLink_SendUnreliable)->ArgName("bytes")->Arg(64)->Arg(512)->Arg(1100);
+
+
+// 10k / 100k small messages queued at once behind a send queue sized for them (NetLinkConfig::sendQueueCapacity)
+static void BM_ReliableLink_Load_DeepQueue(benchmark::State &state)
+{
+	const auto		  messages = static_cast<size_t>(state.range(0));
+	const auto		  payload  = bench::makePayload(64);
+
+	ReliabilityConfig config;
+	config.sendQueueCapacity = messages;
+
+	LinkWire wire(config);
+
+	for (auto _ : state)
+	{
+		for (size_t i = 0; i < messages; ++i)
+			wire.a.queueReliable(ChannelId::Application, payload, wire.now);
+
+		if (!wire.settle() || wire.takeDeliveredBytesAtB() != messages * payload.size())
+		{
+			state.SkipWithError("Not every message was delivered");
+			break;
+		}
+	}
+
+	state.SetItemsProcessed(static_cast<int64_t>(state.iterations() * messages));
+}
+BENCHMARK(BM_ReliableLink_Load_DeepQueue)->ArgName("messages")->Arg(10'000)->Arg(100'000)->Unit(benchmark::kMillisecond);
 
 } // namespace ChannelBenchmarks
