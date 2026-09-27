@@ -212,7 +212,7 @@ NetworkInformation::~NetworkInformation()
 }
 
 
-bool NetworkInformation::init()
+bool NetworkInformation::init() const
 {
 	return mImpl->getNetworkInformationFromOS();
 }
