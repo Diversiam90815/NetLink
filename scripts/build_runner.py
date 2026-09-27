@@ -1,3 +1,5 @@
+import os
+from datetime import datetime
 from pathlib import Path
 
 from .enums import Architecture, Configuration, Platform
@@ -106,3 +108,47 @@ class BuildRunner:
                 ],
                 "CMake: Running C++ unit tests",
             )
+
+
+    def run_cpp_benchmarks(self, build_dir: Path, target: str, benchmark_filter: str | None = None) -> None:
+        # Numbers of unoptimized code say nothing: benchmarks always run in Release
+        configuration = Configuration.Release
+
+        BuildUtils.execute_command(
+            [
+                "cmake",
+                "--build", str(build_dir),
+                "--config", str(configuration),
+                "--target", str(target),
+            ],
+            f"CMake: Build C++ benchmarks ({configuration})",
+        )
+
+        executable = self._find_executable(build_dir / "benchmarks", target, configuration)
+
+        results_dir = build_dir / "benchmarks" / "results"
+        results_dir.mkdir(parents=True, exist_ok=True)
+        results_file = results_dir / f"{target}_{datetime.now():%Y%m%d_%H%M%S}.json"
+
+        command = [
+            str(executable),
+            f"--benchmark_out={results_file}",
+            "--benchmark_out_format=json",
+        ]
+        if benchmark_filter:
+            command.append(f"--benchmark_filter={benchmark_filter}")
+
+        BuildUtils.execute_streaming(command, "Running C++ benchmarks")
+        print(f"\nResults written to {results_file}")
+
+
+    @staticmethod
+    def _find_executable(directory: Path, target: str, configuration: Configuration) -> Path:
+        # Multi-config generators (Visual Studio) put binaries into a per-configuration folder, Ninja does not
+        name = f"{target}.exe" if os.name == "nt" else target
+
+        for candidate in (directory / str(configuration) / name, directory / name):
+            if candidate.is_file():
+                return candidate
+
+        raise FileNotFoundError(f"{name} not found in {directory}")
