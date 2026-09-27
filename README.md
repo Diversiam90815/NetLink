@@ -79,7 +79,7 @@ Key design goals:
 | `DiscoveryService`      | UDP broadcast - advertises presence and collects peer announcements                                                |
 | `ConnectionService`     | Orchestrates the connection lifecycle (invite → answer → ready flags) with per-state timeouts                      |
 | `PeerChannel`           | Owns the dedicated UDP socket and its I/O thread; routes control signals and application messages                  |
-| `ReliableLink`          | Per-peer reliability state machine: message keys, `Data`/`DataAck`/`AckAck`, retransmission, ordering, send window |
+| `ReliableLink`          | Per-peer reliability: `seq`, stream IDs, `Data`/`DataAck`/`AckAck`, retransmit, ordering, send window              |
 | `FragmentationService`  | Splits messages larger than one datagram and reassembles them                                                      |
 | `HeartbeatService`      | Keeps an idle session alive and detects a silent peer                                                              |
 | `PeerValidationService` | Validates shared secret and protocol version before a connection is accepted                                       |
@@ -96,16 +96,16 @@ stream ID, 64-bit sequence number), extended by 4 bytes for fragments:
 flags: bit 0-2 kind (Data, DataAck, AckAck, Heartbeat) · 3 reliable · 4 fragmented · 5 last fragment · 6 application channel
 ```
 
-- **Message key** = `seq`, a per-peer 64-bit counter that never wraps. Every packet also carries a random **stream ID**:
-  it identifies one lifetime of a peer's stream, so a restarted peer (whose `seq` starts at 1 again) is detected and
-  stale packets are ignored.
+- **Sequencing**: every packet carries a per-peer 64-bit `seq` that never wraps, plus a random **stream ID**:
+  the stream ID identifies one lifetime of a peer's stream, so a restarted peer (whose `seq` starts at 1 again)
+  is detected and stale packets are ignored.
 - **Three-way confirmation**: the sender retransmits `Data` until the `DataAck` arrives (RFC 6298 RTO with backoff);
   the receiver retransmits the `DataAck` until the `AckAck` arrives. Duplicates are acknowledged again but delivered
   once.
 - **Ordering and flow control**: one ordered stream per peer with a 256-packet send/receive window. Control signals
   (validation, connection flow) take priority over queued application messages.
 - **Fragmentation**: messages above one datagram (1200 bytes on the wire, below the Ethernet MTU) are split into
-  fragments, each with its own key.
+  fragments, each with its own `seq`.
 - **Loss of the peer**: a packet that stays unacknowledged after all retransmissions, a session peer that stays silent
   for 5 s, or a peer restart ends the session.
 
