@@ -6,6 +6,7 @@
 */
 
 #include "NetworkInformation.h"
+#include "NetLinkLog.h"
 
 #include <arpa/inet.h>
 #include <ifaddrs.h>

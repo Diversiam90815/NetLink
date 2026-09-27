@@ -6,6 +6,7 @@
 */
 
 #include "NetworkInformation.h"
+#include "NetLinkLog.h"
 
 #include <arpa/inet.h>
 #include <ifaddrs.h>
@@ -260,9 +261,7 @@ void NetworkInformation::processAdapter()
 }
 
 
-void NetworkInformation::Impl::saveAdapter(std::vector<NetworkAdapterInternal>	 &adapters,
-										   const ifaddrs						 *ifa,
-										   const int							  ID,
+void NetworkInformation::Impl::saveAdapter(std::vector<NetworkAdapterInternal> &adapters, const ifaddrs *ifa, const int ID,
 										   const std::unordered_set<std::string> &defaultRouteIfNames)
 {
 	if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET)
