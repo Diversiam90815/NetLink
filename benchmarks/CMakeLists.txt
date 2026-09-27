@@ -40,6 +40,9 @@ set(Connection_Benchmarks
 set(Discovery_Benchmarks
         ${Benchmark_Directory}/DiscoveryBenchmarks/DiscoveryBenchmarks.cpp
 )
+
+set(Integration_Benchmarks
+        ${Benchmark_Directory}/IntegrationBenchmarks/NetLinkCoreBenchmarks.cpp
 )
 
 set(Benchmark_Support
@@ -57,7 +60,10 @@ set(All_Benchmarks
         ${Validation_Benchmarks}
         ${Connection_Benchmarks}
         ${Discovery_Benchmarks}
+        ${Integration_Benchmarks}
 )
+
+
 add_executable(NetLinkBenchmarks ${All_Benchmarks} ${Benchmark_Support})
 
 target_link_libraries(NetLinkBenchmarks PRIVATE NetLinkInternal)
