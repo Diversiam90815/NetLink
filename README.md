@@ -273,8 +273,7 @@ python build.py --benchmark --benchmark-repetitions=5            # every benchma
 ```
 
 Benchmarks are named `BM_<Module>_<Operation>`, or `BM_<Module>/<Operation>` for fixtures. The binary accepts all Google
-Benchmark flags. To compare two runs, use `compare.py` from Google Benchmark's `tools/` folder. The
-`NetLinkBenchmarks.Smoke` ctest runs every benchmark except the load benchmarks once, so they keep working.
+Benchmark flags. To compare two runs, use `compare.py` from Google Benchmark's `tools/` folder.
 
 ## Design Highlights
 
