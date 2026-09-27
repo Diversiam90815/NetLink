@@ -14,6 +14,20 @@ set(Channel_Benchmarks
         ${Benchmark_Directory}/ChannelBenchmarks/HeartbeatRttBenchmarks.cpp
         ${Benchmark_Directory}/ChannelBenchmarks/PeerChannelBenchmarks.cpp
 )
+
+set(Validation_Benchmarks
+        ${Benchmark_Directory}/ValidationBenchmarks/CompatibilityCheckBenchmarks.cpp
+        ${Benchmark_Directory}/ValidationBenchmarks/ValidationStoreBenchmarks.cpp
+        ${Benchmark_Directory}/ValidationBenchmarks/PeerValidationBenchmarks.cpp
+)
+
+set(Connection_Benchmarks
+        ${Benchmark_Directory}/ConnectionBenchmarks/ConnectionServiceBenchmarks.cpp
+)
+
+set(Discovery_Benchmarks
+        ${Benchmark_Directory}/DiscoveryBenchmarks/DiscoveryBenchmarks.cpp
+)
 )
 
 set(Benchmark_Support
@@ -24,6 +38,9 @@ set(Benchmark_Support
 set(All_Benchmarks
         ${Timeout_Benchmarks}
         ${Channel_Benchmarks}
+        ${Validation_Benchmarks}
+        ${Connection_Benchmarks}
+        ${Discovery_Benchmarks}
 )
 add_executable(NetLinkBenchmarks ${All_Benchmarks} ${Benchmark_Support})
 
