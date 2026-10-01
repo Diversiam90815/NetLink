@@ -144,6 +144,30 @@ BENCHMARK(BM_PeerChannel_RoundTrip)
 	->Unit(benchmark::kMicrosecond);
 
 
+// Time: one reliable message until flush() saw it acknowledged: what a graceful shutdown waits for its goodbye
+static void BM_PeerChannel_Flush(benchmark::State &state)
+{
+	const auto	   payload = bench::makePayload(64);
+
+	SenderReceiver channels;
+	if (!channels.open())
+	{
+		state.SkipWithError("Could not bind the channels to 127.0.0.1");
+		return;
+	}
+
+	for (auto _ : state)
+	{
+		if (!channels.send(payload, DataType) || !channels.peers.hub().flush(channels.peers.peerName(0), bench::WaitTimeout))
+		{
+			state.SkipWithError("The message was not acknowledged");
+			break;
+		}
+	}
+}
+BENCHMARK(BM_PeerChannel_Flush)->UseRealTime()->MeasureProcessCPUTime()->Unit(benchmark::kMicrosecond);
+
+
 // Time: N peers each stream 500 messages of 1 KiB to the hub at once, until the last one arrived (or delivery stopped).
 // delivered_pct: messages that reached the hub. links_lost: links reset per round after exhausting their retransmissions,
 // which discards the messages still queued on them.

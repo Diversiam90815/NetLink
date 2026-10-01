@@ -43,7 +43,7 @@ public:
 	// Carries everything `from` produced so far into `to`. Returns the number of datagrams moved (lost ones included).
 	size_t transfer(ReliableLink &from, ReliableLink &to, const Drop &drop = {}) const
 	{
-		const auto datagrams = from.takeOutgoing();
+		const auto datagrams = from.takeOutgoing(now);
 
 		for (const auto &datagram : datagrams)
 		{
