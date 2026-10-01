@@ -88,8 +88,8 @@ struct BindOptions
 {
 	bool enableBroadcast   = false;
 	bool reuseAddress	   = false; // Allow several sockets on the same port (needed for LAN discovery)
-	int	 receiveBufferSize = 0;		// 0 = OS default
-	int	 sendBufferSize	   = 0;		// 0 = OS default
+	int	 receiveBufferSize = 0;		// 0 = OS default. A hint: the OS may cap it, which does not fail the bind
+	int	 sendBufferSize	   = 0;		// 0 = OS default. A hint, like receiveBufferSize
 };
 
 

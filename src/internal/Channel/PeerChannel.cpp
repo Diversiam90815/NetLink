@@ -81,7 +81,7 @@ void netlink::PeerChannel::setLocalIPv4(const net::IPv4Address &localIPv4)
 	if (localIPv4.isUnspecified())
 		return;
 
-	auto socket = mSocketFactory({.ip = localIPv4, .port = 0}, {});
+	auto socket = mSocketFactory({.ip = localIPv4, .port = 0}, {.receiveBufferSize = internal::ChannelReceiveBufferSize, .sendBufferSize = internal::ChannelSendBufferSize});
 
 	if (!socket)
 	{
