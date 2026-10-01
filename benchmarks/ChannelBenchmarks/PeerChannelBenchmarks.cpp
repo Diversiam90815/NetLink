@@ -1,206 +1,224 @@
 /*
   ==============================================================================
 	Module:         PeerChannelBenchmarks
-	Description:    Two production PeerChannels on real UDP loopback sockets
+	Description:    Production PeerChannels on real UDP loopback sockets:
+					throughput, request/reply latency and many senders into one
+					receiver
   ==============================================================================
 */
 
 #include <benchmark/benchmark.h>
 
 #include <algorithm>
-#include <memory>
+#include <atomic>
+#include <latch>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "BenchUtil.h"
-#include "LoopbackChannelPair.h"
+#include "Loopback.h"
+#include "NetLinkConstants.h"
 
 using namespace netlink;
-using bench::LoopbackChannelPair;
+using bench::LoopbackPeers;
 
 
 namespace ChannelBenchmarks
 {
 
-class BM_PeerChannel : public benchmark::Fixture
+static constexpr uint32_t DataType = 1;
+static constexpr uint32_t EchoType = 2;
+
+
+// The hub sends to peer 0. Peer 0 counts every message and answers those of EchoType; the hub counts the answers.
+class SenderReceiver
 {
 public:
-	static constexpr uint32_t DataType = 1; // counted by b
-	static constexpr uint32_t EchoType = 2; // counted and sent back by b
-
-	using benchmark::Fixture::SetUp;
-	using benchmark::Fixture::TearDown;
-
-	void SetUp(benchmark::State &state) override
+	bool open()
 	{
-		pair = std::make_unique<LoopbackChannelPair>();
+		if (!peers.open())
+			return false;
 
-		if (!pair->open())
-		{
-			state.SkipWithError("Could not bind the peer channels to 127.0.0.1");
-			return;
-		}
-
-		receivedAtB.reset();
-		repliesAtA.reset();
-		signalsAtA.reset();
-
-		pair->b.setMessageCallback(
+		peers.peer(0).setMessageCallback(
 			[this](const std::string &sender, const uint32_t type, std::vector<uint8_t> data)
 			{
 				if (type == EchoType)
-					pair->b.sendMessage(sender, EchoType, data, DeliveryMode::ReliableOrdered);
+					peers.peer(0).sendMessage(sender, EchoType, data, DeliveryMode::ReliableOrdered);
 
-				receivedAtB.notify();
+				received.notify();
 			});
 
-		pair->a.setMessageCallback([this](const std::string &, uint32_t, std::vector<uint8_t>) { repliesAtA.notify(); });
+		peers.hub().setMessageCallback([this](const std::string &, uint32_t, std::vector<uint8_t>) { replies.notify(); });
 
-		// b answers every ready flag with its own
-		ChannelConnectionCallbacks atB;
-		atB.onReadyFlagReceived = [this](const std::string &sender) { pair->b.sendReadyFlag(sender); };
-		pair->b.setConnectionCallbacks(atB);
-
-		ChannelConnectionCallbacks atA;
-		atA.onReadyFlagReceived = [this](const std::string &) { signalsAtA.notify(); };
-		pair->a.setConnectionCallbacks(atA);
-
-		pair->start();
+		peers.start();
+		return true;
 	}
 
-	void TearDown(benchmark::State &) override { pair.reset(); }
+	bool send(const std::vector<uint8_t> &payload, const uint32_t type) { return bench::sendWithBackpressure(peers.hub(), peers.peerName(0), type, payload); }
 
-protected:
-	bool send(const std::vector<uint8_t> &payload, const uint32_t type, const DeliveryMode mode) const
-	{
-		return pair->a.sendMessage(LoopbackChannelPair::NameB, type, payload, mode);
-	}
-
-	// Declared before the pair: its I/O threads report into them until the pair is gone
-	bench::CompletionCounter			 receivedAtB;
-	bench::CompletionCounter			 repliesAtA;
-	bench::CompletionCounter			 signalsAtA;
-
-	std::unique_ptr<LoopbackChannelPair> pair;
+	// Declared before the channels: their threads report into these until the channels are gone
+	bench::CompletionCounter received;
+	bench::CompletionCounter replies;
+	LoopbackPeers			 peers{1};
 };
 
 
-// Reliable, ordered messages a -> b; one iteration is a batch of about 1 MiB, timed until b received all of it
-BENCHMARK_DEFINE_F(BM_PeerChannel, Reliable)(benchmark::State &state)
+// Time: a batch of `messages` reliable messages sent (waiting whenever the send queue is full) until all arrived.
+// Read items_per_second as messages/s and bytes_per_second as payload throughput.
+static void BM_PeerChannel_Throughput(benchmark::State &state)
 {
-	const auto	 size	  = static_cast<size_t>(state.range(0));
-	const size_t batch	  = bench::batchFor(size);
-	const auto	 payload  = bench::makePayload(size);
-	uint64_t	 expected = 0;
+	const auto	   size		= static_cast<size_t>(state.range(0));
+	const auto	   messages = static_cast<uint64_t>(state.range(1));
+	const auto	   payload	= bench::makePayload(size);
+
+	SenderReceiver channels;
+	if (!channels.open())
+	{
+		state.SkipWithError("Could not bind the channels to 127.0.0.1");
+		return;
+	}
+
+	uint64_t expected = 0;
 
 	for (auto _ : state)
 	{
-		for (size_t i = 0; i < batch; ++i)
-		{
-			if (!send(payload, DataType, DeliveryMode::ReliableOrdered))
-			{
-				state.SkipWithError("sendMessage refused a reliable message");
-				return;
-			}
-		}
+		bool sent = true;
+		for (uint64_t i = 0; i < messages && sent; ++i)
+			sent = channels.send(payload, DataType);
 
-		expected += batch;
+		expected += messages;
 
-		if (!receivedAtB.waitFor(expected))
+		if (!sent || !channels.received.waitFor(expected))
 		{
-			state.SkipWithError("Not every reliable message arrived");
-			return;
+			state.SkipWithError("Not every message arrived");
+			break;
 		}
 	}
 
-	state.SetItemsProcessed(static_cast<int64_t>(state.iterations() * batch));
-	state.SetBytesProcessed(static_cast<int64_t>(state.iterations() * batch * size));
+	state.SetItemsProcessed(static_cast<int64_t>(state.iterations() * messages));
+	state.SetBytesProcessed(static_cast<int64_t>(state.iterations() * messages * size));
 }
-BENCHMARK_REGISTER_F(BM_PeerChannel, Reliable)->Apply(bench::messageSizes)->UseRealTime();
+BENCHMARK(BM_PeerChannel_Throughput)
+	->ArgNames({"bytes", "messages"})
+	->Args({64, 20'000})
+	->Args({bench::KiB, 20'000})
+	->Args({64 * bench::KiB, 256})
+	->Args({bench::MiB, 16})
+	->Args({static_cast<int64_t>(internal::MaxMessagePayload) - 4, 2}) // the largest message the channel accepts
+	->UseRealTime()
+	->MeasureProcessCPUTime()
+	->Unit(benchmark::kMillisecond);
 
 
-// Unreliable messages: timed is the send path. arrived: share that reached b (loopback may drop under load).
-BENCHMARK_DEFINE_F(BM_PeerChannel, Unreliable)(benchmark::State &state)
+// Time: one reliable request until its reply arrived back (the receiver answers from its message callback)
+static void BM_PeerChannel_RoundTrip(benchmark::State &state)
 {
-	const auto payload = bench::makePayload(static_cast<size_t>(state.range(0)));
-	uint64_t   refused = 0;
+	const auto	   payload = bench::makePayload(static_cast<size_t>(state.range(0)));
 
-	for (auto _ : state)
+	SenderReceiver channels;
+	if (!channels.open())
 	{
-		if (!send(payload, DataType, DeliveryMode::UnreliableSequenced))
-			++refused;
+		state.SkipWithError("Could not bind the channels to 127.0.0.1");
+		return;
 	}
 
-	const auto sent = static_cast<uint64_t>(state.iterations()) - refused;
-	receivedAtB.waitFor(sent, std::chrono::milliseconds{200}); // untimed grace period for datagrams still on their way
-
-	state.counters["refused"] = static_cast<double>(refused);
-	state.counters["arrived"] = static_cast<double>(receivedAtB.value()) / static_cast<double>(std::max<uint64_t>(sent, 1));
-	state.SetItemsProcessed(static_cast<int64_t>(state.iterations()));
-	state.SetBytesProcessed(static_cast<int64_t>(state.iterations()) * state.range(0));
-}
-BENCHMARK_REGISTER_F(BM_PeerChannel, Unreliable)->ArgName("bytes")->Arg(64)->Arg(512)->Arg(1176)->UseRealTime();
-
-
-// Request/reply: a sends reliably, b answers from its message callback, timed until the reply is back at a
-BENCHMARK_DEFINE_F(BM_PeerChannel, RoundTrip)(benchmark::State &state)
-{
-	const auto payload = bench::makePayload(static_cast<size_t>(state.range(0)));
-	uint64_t   replies = 0;
+	uint64_t replies = 0;
 
 	for (auto _ : state)
 	{
-		if (!send(payload, EchoType, DeliveryMode::ReliableOrdered) || !repliesAtA.waitFor(++replies))
+		if (!channels.send(payload, EchoType) || !channels.replies.waitFor(++replies))
 		{
 			state.SkipWithError("No reply arrived");
-			return;
+			break;
 		}
 	}
-
-	state.SetItemsProcessed(static_cast<int64_t>(state.iterations()));
 }
-BENCHMARK_REGISTER_F(BM_PeerChannel, RoundTrip)->ArgName("bytes")->Arg(64)->Arg(1024)->Arg(64 * 1024)->UseRealTime();
+BENCHMARK(BM_PeerChannel_RoundTrip)
+	->ArgName("bytes")
+	->Arg(64)
+	->Arg(bench::KiB)
+	->Arg(64 * bench::KiB)
+	->UseRealTime()
+	->MeasureProcessCPUTime()
+	->Unit(benchmark::kMicrosecond);
 
 
-// A control signal (JSON on the control channel) and its answer
-BENCHMARK_DEFINE_F(BM_PeerChannel, SignalRoundTrip)(benchmark::State &state)
+// Time: N peers each stream 500 messages of 1 KiB to the hub at once, until the last one arrived (or delivery stopped).
+// delivered_pct: messages that reached the hub. links_lost: links reset per round after exhausting their retransmissions,
+// which discards the messages still queued on them.
+static void BM_PeerChannel_FanIn(benchmark::State &state)
 {
-	uint64_t answers = 0;
+	constexpr uint64_t	  PerSender = 500;
+	const auto			  senders	= static_cast<size_t>(state.range(0));
+	const auto			  payload	= bench::makePayload(bench::KiB);
+
+	// Declared before the channels: their threads report into these
+	bench::CompletionCounter received;
+	std::atomic<uint64_t> linksLost{0};
+	std::atomic<int64_t>  lastArrival{0}; // steady clock ticks of the latest message at the hub
+
+	LoopbackPeers		  peers(senders);
+	if (!peers.open())
+	{
+		state.SkipWithError("Could not bind the channels to 127.0.0.1");
+		return;
+	}
+
+	peers.hub().setMessageCallback(
+		[&](const std::string &, uint32_t, std::vector<uint8_t>)
+		{
+			lastArrival.store(bench::Clock::now().time_since_epoch().count());
+			received.notify();
+		});
+
+	auto countLoss = [&linksLost](const std::string &, const std::string &) { ++linksLost; };
+	peers.hub().setOnPeerLost(countLoss);
+	for (size_t s = 0; s < senders; ++s)
+		peers.peer(s).setOnPeerLost(countLoss);
+
+	peers.start();
+
+	uint64_t delivered = 0;
 
 	for (auto _ : state)
 	{
-		if (!pair->a.sendReadyFlag(LoopbackChannelPair::NameB) || !signalsAtA.waitFor(++answers))
+		std::latch				 go(1);
+		std::vector<std::thread> threads;
+
+		for (size_t s = 0; s < senders; ++s)
 		{
-			state.SkipWithError("No answer to the ready flag arrived");
-			return;
+			threads.emplace_back(
+				[&, s]
+				{
+					go.wait();
+					for (uint64_t i = 0; i < PerSender; ++i)
+						bench::sendWithBackpressure(peers.peer(s), LoopbackPeers::HubName, DataType, payload);
+				});
 		}
+
+		const uint64_t base	 = received.value();
+		const auto	   start = bench::Clock::now();
+		go.count_down();
+
+		for (auto &thread : threads)
+			thread.join();
+
+		// Done when everything arrived, or when nothing arrived for 5 s: the rest was lost with failed links
+		received.waitWhileProgressing(base + senders * PerSender, std::chrono::milliseconds{5000});
+		delivered += received.value() - base;
+
+		const auto finished = bench::Clock::time_point(bench::Clock::duration(lastArrival.load()));
+		state.SetIterationTime(std::chrono::duration<double>(std::max(finished, start) - start).count());
 	}
 
-	state.SetItemsProcessed(static_cast<int64_t>(state.iterations()));
+	const auto sent				    = static_cast<uint64_t>(state.iterations()) * senders * PerSender;
+	state.counters["delivered_pct"] = bench::percent(delivered, sent);
+	state.counters["links_lost"]	= benchmark::Counter(static_cast<double>(linksLost.load()), benchmark::Counter::kAvgIterations);
+	state.SetItemsProcessed(static_cast<int64_t>(delivered));
+
+	peers.stop();
 }
-BENCHMARK_REGISTER_F(BM_PeerChannel, SignalRoundTrip)->UseRealTime();
-
-
-// Queue a batch of 1 KiB messages and wait in flush() until all were acknowledged
-BENCHMARK_DEFINE_F(BM_PeerChannel, Flush)(benchmark::State &state)
-{
-	const auto payload = bench::makePayload(1024);
-	const auto batch   = static_cast<size_t>(state.range(0));
-
-	for (auto _ : state)
-	{
-		for (size_t i = 0; i < batch; ++i)
-			send(payload, DataType, DeliveryMode::ReliableOrdered);
-
-		if (!pair->a.flush(LoopbackChannelPair::NameB, bench::CompletionTimeout))
-		{
-			state.SkipWithError("flush() timed out");
-			return;
-		}
-	}
-
-	state.SetItemsProcessed(static_cast<int64_t>(state.iterations() * batch));
-}
-BENCHMARK_REGISTER_F(BM_PeerChannel, Flush)->ArgName("batch")->Arg(1)->Arg(64)->UseRealTime();
+BENCHMARK(BM_PeerChannel_FanIn)->ArgName("senders")->Arg(1)->Arg(8)->Arg(32)->Arg(128)->UseManualTime()->MeasureProcessCPUTime()->Unit(benchmark::kMillisecond);
 
 } // namespace ChannelBenchmarks

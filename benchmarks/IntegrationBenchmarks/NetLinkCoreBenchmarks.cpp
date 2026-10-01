@@ -1,8 +1,10 @@
 /*
   ==============================================================================
 	Module:         NetLinkCoreBenchmarks
-	Description:    End to end through the composition root with its default dependencies
-					Both peers run on this host: A on 127.0.0.1, B on 127.0.0.2
+	Description:    End to end through the composition root with its default
+					dependencies: discovery, validation and connection happen for
+					real, then messages go through the public send() and callbacks.
+					Both peers run on this host: A on 127.0.0.1, B on 127.0.0.2.
   ==============================================================================
 */
 
@@ -12,7 +14,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
-#include <vector>
+#include <thread>
 
 #include "BenchUtil.h"
 #include "Core/NetLinkCore.h"
@@ -25,69 +27,86 @@ namespace IntegrationBenchmarks
 {
 
 // Kept off NetLink's default port, so an application running on this machine is not disturbed
-static constexpr int	  DiscoveryPort	   = 45455;
+static constexpr int	  DiscoveryPort = 45455;
 
-// Discovery announces every 2 s: leave room for a lost first announcement
-static constexpr auto	  DiscoveryTimeout = std::chrono::milliseconds{10000};
-
-static constexpr uint32_t DataType		   = 1; // counted by B
-static constexpr uint32_t EchoType		   = 2; // counted and sent back by B
+static constexpr uint32_t DataType		= 1; // counted by B
+static constexpr uint32_t EchoType		= 2; // counted and sent back by B
 
 
-class BM_NetLinkCore : public benchmark::Fixture
+// Two NetLinkCores that discovered, validated and connected to each other. B accepts every invitation and echoes
+// messages of EchoType, both from inside its callbacks.
+class ConnectedCores
 {
 public:
-	using benchmark::Fixture::SetUp;
-	using benchmark::Fixture::TearDown;
-
-	void SetUp(benchmark::State &state) override
+	// A first: its shutdown says goodbye to B and waits for the acknowledgement
+	~ConnectedCores()
 	{
-		resetCounters();
+		a.reset();
+		b.reset();
+	}
 
+	// Empty on success, otherwise why the setup failed
+	std::string setUp()
+	{
 		if (!net::UdpSocket::bind({.ip = bench::loopback(2), .port = 0}))
-		{
-			state.SkipWithError("127.0.0.2 is not usable on this host (macOS: sudo ifconfig lo0 alias 127.0.0.2)");
-			return;
-		}
+			return "127.0.0.2 is not usable on this host (macOS: sudo ifconfig lo0 alias 127.0.0.2)";
 
-		peerA = std::make_unique<NetLinkCore>();
-		peerB = std::make_unique<NetLinkCore>();
+		a->configure(makeConfig("bench-a"), callbacksForA());
+		b->configure(makeConfig("bench-b"), callbacksForB());
 
-		peerA->configure(makeConfig("bench-a"), callbacksForA());
-		peerB->configure(makeConfig("bench-b"), callbacksForB());
+		if (!a->init() || !b->init())
+			return "NetLinkCore::init failed";
 
-		if (!peerA->init() || !peerB->init())
-		{
-			state.SkipWithError("NetLinkCore::init failed");
-			return;
-		}
+		a->setLocalAddress(bench::loopback(1).toString());
+		b->setLocalAddress(bench::loopback(2).toString());
 
-		peerA->setLocalAddress(bench::loopback(1).toString());
-		peerB->setLocalAddress(bench::loopback(2).toString());
+		if (!a->startDiscovery() || !b->startDiscovery())
+			return "Discovery could not be started";
 
-		if (!peerA->startDiscovery() || !peerB->startDiscovery())
-		{
-			state.SkipWithError("Discovery could not be started");
-			return;
-		}
+		// Discovery announces every 2 s: leave room for a lost first announcement
+		if (!discoveredByA.waitFor(1, std::chrono::seconds{10}) || !discoveredByB.waitFor(1, std::chrono::seconds{10}))
+			return "The peers did not discover each other over loopback";
 
-		if (!discoveredByA.waitFor(1, DiscoveryTimeout) || !discoveredByB.waitFor(1, DiscoveryTimeout))
-		{
-			state.SkipWithError("The peers did not discover each other over loopback within 10 s");
-			return;
-		}
-
-		if (!connect())
-			state.SkipWithError("The peers did not connect");
+		return connect() ? std::string{} : "The peers did not connect";
 	}
 
-	void TearDown(benchmark::State &) override
+	// A connects to B; true once both report Connected
+	bool connect()
 	{
-		peerA.reset();
-		peerB.reset();
+		std::optional<Endpoint> remote;
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			remote = remoteOfA;
+		}
+
+		expectedConnected += 2;
+		return remote && a->connectTo(*remote) && connected.waitFor(expectedConnected);
 	}
 
-protected:
+	// A disconnects; true once both report Disconnected
+	bool disconnect()
+	{
+		a->disconnect();
+		expectedDisconnected += 2;
+		return disconnected.waitFor(expectedDisconnected);
+	}
+
+	// Declared before the cores: their event threads report into these until the cores are gone
+	std::mutex					 mutex;
+	std::optional<Endpoint>		 remoteOfA;
+	bench::CompletionCounter	 discoveredByA;
+	bench::CompletionCounter	 discoveredByB;
+	bench::CompletionCounter	 connected;
+	bench::CompletionCounter	 disconnected;
+	bench::CompletionCounter	 receivedAtB;
+	bench::CompletionCounter	 repliesAtA;
+	uint64_t					 expectedConnected{0};
+	uint64_t					 expectedDisconnected{0};
+
+	std::unique_ptr<NetLinkCore> a = std::make_unique<NetLinkCore>();
+	std::unique_ptr<NetLinkCore> b = std::make_unique<NetLinkCore>();
+
+private:
 	static NetLinkConfig makeConfig(const std::string &name)
 	{
 		NetLinkConfig config;
@@ -114,7 +133,6 @@ protected:
 		return callbacks;
 	}
 
-	// B accepts every invitation and echoes messages of EchoType, both from inside its callbacks
 	NetLinkCallbacks callbacksForB()
 	{
 		NetLinkCallbacks callbacks;
@@ -122,14 +140,14 @@ protected:
 		callbacks.onConnectionChanged = [this](const ConnectionEvent &event)
 		{
 			if (event.state == ConnectionState::PendingInbound)
-				peerB->respondToConnection(true);
+				b->respondToConnection(true);
 
 			countConnectionEvent(event);
 		};
 		callbacks.onMessageReceived = [this](const Message &message)
 		{
 			if (message.type == EchoType)
-				peerB->send(message.type, message.data, DeliveryMode::ReliableOrdered);
+				b->send(message.type, message.data, DeliveryMode::ReliableOrdered);
 
 			receivedAtB.notify();
 		};
@@ -143,137 +161,121 @@ protected:
 		else if (event.state == ConnectionState::Disconnected)
 			disconnected.notify();
 	}
-
-	// A connects to B; true once both report Connected
-	bool connect()
-	{
-		std::optional<Endpoint> remote;
-		{
-			std::lock_guard<std::mutex> lock(mutex);
-			remote = remoteOfA;
-		}
-
-		if (!remote || !peerA->connectTo(*remote))
-			return false;
-
-		expectedConnected += 2;
-		return connected.waitFor(expectedConnected);
-	}
-
-	// A disconnects; true once both report Disconnected
-	bool disconnect()
-	{
-		peerA->disconnect();
-		expectedDisconnected += 2;
-		return disconnected.waitFor(expectedDisconnected);
-	}
-
-	void resetCounters()
-	{
-		discoveredByA.reset();
-		discoveredByB.reset();
-		connected.reset();
-		disconnected.reset();
-		receivedAtB.reset();
-		repliesAtA.reset();
-		expectedConnected	 = 0;
-		expectedDisconnected = 0;
-		remoteOfA.reset();
-	}
-
-	// Declared before the peers: their event threads report into these until the peers are gone
-	std::mutex					 mutex;
-	std::optional<Endpoint>		 remoteOfA;
-	bench::CompletionCounter	 discoveredByA;
-	bench::CompletionCounter	 discoveredByB;
-	bench::CompletionCounter	 connected;
-	bench::CompletionCounter	 disconnected;
-	bench::CompletionCounter	 receivedAtB;
-	bench::CompletionCounter	 repliesAtA;
-	uint64_t					 expectedConnected{0};
-	uint64_t					 expectedDisconnected{0};
-
-	std::unique_ptr<NetLinkCore> peerA;
-	std::unique_ptr<NetLinkCore> peerB;
 };
 
 
-// Reliable messages A -> B through send() and onMessageReceived; batches of about 1 MiB
-BENCHMARK_DEFINE_F(BM_NetLinkCore, Send)(benchmark::State &state)
+// Time: a batch of `messages` reliable messages through send() until B's callback received all of them.
+// Read items_per_second as messages/s and bytes_per_second as payload throughput.
+static void BM_NetLinkCore_Throughput(benchmark::State &state)
 {
-	const auto	 size	  = static_cast<size_t>(state.range(0));
-	const size_t batch	  = bench::batchFor(size);
-	const auto	 payload  = bench::makePayload(size);
-	uint64_t	 expected = 0;
+	const auto	   size		= static_cast<size_t>(state.range(0));
+	const auto	   messages = static_cast<uint64_t>(state.range(1));
+	const auto	   payload	= bench::makePayload(size);
+
+	ConnectedCores cores;
+	if (const auto error = cores.setUp(); !error.empty())
+	{
+		state.SkipWithError(error);
+		return;
+	}
+
+	uint64_t expected = 0;
 
 	for (auto _ : state)
 	{
-		for (size_t i = 0; i < batch; ++i)
+		for (uint64_t i = 0; i < messages; ++i)
 		{
-			if (!peerA->send(DataType, payload, DeliveryMode::ReliableOrdered))
-			{
-				state.SkipWithError("send() refused a message");
-				return;
-			}
+			// send() refuses while the send queue is full: wait like an application respecting backpressure
+			const auto deadline = bench::Clock::now() + bench::WaitTimeout;
+			while (!cores.a->send(DataType, payload, DeliveryMode::ReliableOrdered) && bench::Clock::now() < deadline)
+				std::this_thread::yield();
 		}
 
-		expected += batch;
+		expected += messages;
 
-		if (!receivedAtB.waitFor(expected))
+		if (!cores.receivedAtB.waitFor(expected))
 		{
 			state.SkipWithError("Not every message arrived");
-			return;
+			break;
 		}
 	}
 
-	state.SetItemsProcessed(static_cast<int64_t>(state.iterations() * batch));
-	state.SetBytesProcessed(static_cast<int64_t>(state.iterations() * batch * size));
+	state.SetItemsProcessed(static_cast<int64_t>(state.iterations() * messages));
+	state.SetBytesProcessed(static_cast<int64_t>(state.iterations() * messages * size));
 }
-BENCHMARK_REGISTER_F(BM_NetLinkCore, Send)->Apply(bench::messageSizes)->UseRealTime();
+BENCHMARK(BM_NetLinkCore_Throughput)
+	->ArgNames({"bytes", "messages"})
+	->Args({64, 20'000})
+	->Args({bench::KiB, 20'000})
+	->Args({64 * bench::KiB, 256})
+	->Args({bench::MiB, 16})
+	->UseRealTime()
+	->MeasureProcessCPUTime()
+	->Unit(benchmark::kMillisecond);
 
 
-// A sends, B answers from its callback, timed until A's callback saw the answer
-BENCHMARK_DEFINE_F(BM_NetLinkCore, RoundTrip)(benchmark::State &state)
+// Time: A sends, B answers from its callback, until A's callback saw the answer
+static void BM_NetLinkCore_RoundTrip(benchmark::State &state)
 {
-	const auto payload = bench::makePayload(static_cast<size_t>(state.range(0)));
-	uint64_t   replies = 0;
+	const auto	   payload = bench::makePayload(static_cast<size_t>(state.range(0)));
+
+	ConnectedCores cores;
+	if (const auto error = cores.setUp(); !error.empty())
+	{
+		state.SkipWithError(error);
+		return;
+	}
+
+	uint64_t replies = 0;
 
 	for (auto _ : state)
 	{
-		if (!peerA->send(EchoType, payload, DeliveryMode::ReliableOrdered) || !repliesAtA.waitFor(++replies))
+		if (!cores.a->send(EchoType, payload, DeliveryMode::ReliableOrdered) || !cores.repliesAtA.waitFor(++replies))
 		{
 			state.SkipWithError("No reply arrived");
-			return;
+			break;
 		}
 	}
-
-	state.SetItemsProcessed(static_cast<int64_t>(state.iterations()));
 }
-BENCHMARK_REGISTER_F(BM_NetLinkCore, RoundTrip)->ArgName("bytes")->Arg(64)->Arg(1024)->Arg(64 * 1024)->UseRealTime();
+BENCHMARK(BM_NetLinkCore_RoundTrip)
+	->ArgName("bytes")
+	->Arg(64)
+	->Arg(bench::KiB)
+	->Arg(64 * bench::KiB)
+	->UseRealTime()
+	->MeasureProcessCPUTime()
+	->Unit(benchmark::kMicrosecond);
 
 
-// Connecting two validated peers: connectTo() until both report Connected. Disconnecting before each round is not timed.
-BENCHMARK_DEFINE_F(BM_NetLinkCore, Connect)(benchmark::State &state)
+// Time: connectTo() between two validated peers until both report Connected (the disconnect before each round is not timed)
+static void BM_NetLinkCore_Connect(benchmark::State &state)
 {
+	ConnectedCores cores;
+	if (const auto error = cores.setUp(); !error.empty())
+	{
+		state.SkipWithError(error);
+		return;
+	}
+
 	for (auto _ : state)
 	{
-		if (!disconnect())
+		if (!cores.disconnect())
 		{
 			state.SkipWithError("The peers did not disconnect");
-			return;
+			break;
 		}
 
 		const auto start = bench::Clock::now();
 
-		if (!connect())
+		if (!cores.connect())
 		{
 			state.SkipWithError("The peers did not connect");
-			return;
+			break;
 		}
 
 		state.SetIterationTime(bench::secondsSince(start));
 	}
 }
-BENCHMARK_REGISTER_F(BM_NetLinkCore, Connect)->UseManualTime();
+BENCHMARK(BM_NetLinkCore_Connect)->UseManualTime()->MeasureProcessCPUTime()->Unit(benchmark::kMicrosecond);
 
 } // namespace IntegrationBenchmarks

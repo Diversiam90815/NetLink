@@ -1,14 +1,13 @@
 /*
   ==============================================================================
 	Module:         UdpSocketBenchmarks
-	Description:    Real UDP sockets on the loopback interface.
-					Load: many senders flooding one receiver.
+	Description:    Raw UDP on the loopback interface: the operating system's
+					floor underneath every NetLink measurement
   ==============================================================================
 */
 
 #include <benchmark/benchmark.h>
 
-#include <algorithm>
 #include <atomic>
 #include <latch>
 #include <optional>
@@ -18,8 +17,8 @@
 #include <vector>
 
 #include "BenchUtil.h"
-#include "Socket/UdpSocket.h"
 #include "NetLinkConstants.h"
+#include "Socket/UdpSocket.h"
 
 using namespace netlink::net;
 
@@ -41,7 +40,7 @@ static std::optional<UdpSocket> bindLoopback(benchmark::State &state)
 }
 
 
-// Receives on a socket in the background until stopped. With echo, every datagram is sent back to its sender.
+// Receives on a socket in the background until destroyed. With echo, every datagram is sent back to its sender.
 class Responder
 {
 public:
@@ -65,7 +64,7 @@ private:
 
 		while (!mStop.load())
 		{
-			const auto datagram = mSocket.receiveFrom(buffer, std::chrono::milliseconds{10});
+			auto datagram = mSocket.receiveFrom(buffer, std::chrono::milliseconds{10});
 			if (!datagram)
 				continue;
 
@@ -84,37 +83,8 @@ private:
 };
 
 
-// Send-side throughput. A background receiver drains the socket; what the OS drops under load shows in the delivered counter.
-static void BM_UdpSocket_SendTo(benchmark::State &state)
-{
-	auto receiver = bindLoopback(state);
-	auto sender	  = bindLoopback(state);
-	if (!receiver || !sender)
-		return;
-
-	const auto		payload = bench::makePayload(static_cast<size_t>(state.range(0)));
-	const auto		target	= receiver->localAddress();
-	uint64_t		failed	= 0;
-
-	const Responder drain(*receiver, false);
-
-	for (auto _ : state)
-	{
-		if (!sender->sendTo(target, payload))
-			++failed;
-	}
-
-	const auto sent			  = static_cast<int64_t>(state.iterations());
-	state.counters["failed"]  = static_cast<double>(failed);
-	state.counters["arrived"] = benchmark::Counter(static_cast<double>(drain.received()) / static_cast<double>(std::max<int64_t>(sent, 1)));
-	state.SetItemsProcessed(sent);
-	state.SetBytesProcessed(sent * state.range(0));
-}
-BENCHMARK(BM_UdpSocket_SendTo)->Apply(bench::datagramSizes)->UseRealTime();
-
-
-// Round trip: send, the peer echoes, block until the echo arrived
-static void BM_UdpSocket_PingPong(benchmark::State &state)
+// Time: one datagram to an echoing socket and back
+static void BM_UdpSocket_RoundTrip(benchmark::State &state)
 {
 	auto server = bindLoopback(state);
 	auto client = bindLoopback(state);
@@ -129,63 +99,18 @@ static void BM_UdpSocket_PingPong(benchmark::State &state)
 
 	for (auto _ : state)
 	{
-		if (auto sent = client->sendTo(target, payload); !sent)
+		if (!client->sendTo(target, payload) || !client->receiveFrom(buffer, bench::WaitTimeout))
 		{
-			state.SkipWithError("sendTo failed: " + std::string(toString(sent.error())));
-			break;
-		}
-
-		if (auto reply = client->receiveFrom(buffer, bench::CompletionTimeout); !reply)
-		{
-			state.SkipWithError("No echo received: " + std::string(toString(reply.error())));
+			state.SkipWithError("No echo arrived");
 			break;
 		}
 	}
-
-	state.SetItemsProcessed(static_cast<int64_t>(state.iterations()));
-	state.SetBytesProcessed(static_cast<int64_t>(state.iterations()) * state.range(0) * 2);
 }
-BENCHMARK(BM_UdpSocket_PingPong)->Apply(bench::datagramSizes)->UseRealTime();
+BENCHMARK(BM_UdpSocket_RoundTrip)->ArgName("bytes")->Arg(64)->Arg(1200)->UseRealTime()->MeasureProcessCPUTime()->Unit(benchmark::kMicrosecond);
 
 
-// An idle wait: what every I/O loop pays per poll interval when nothing arrives
-static void BM_UdpSocket_ReceiveTimeout(benchmark::State &state)
-{
-	auto socket = bindLoopback(state);
-	if (!socket)
-		return;
-
-	std::vector<uint8_t> buffer(64);
-	const auto			 timeout = std::chrono::milliseconds{state.range(0)};
-
-	for (auto _ : state)
-	{
-		auto result = socket->receiveFrom(buffer, timeout);
-		benchmark::DoNotOptimize(result);
-	}
-}
-BENCHMARK(BM_UdpSocket_ReceiveTimeout)->ArgName("timeoutMs")->Arg(0)->Arg(1)->UseRealTime();
-
-
-// Socket creation, option setup and bind, and closing it again
-static void BM_UdpSocket_Bind(benchmark::State &state)
-{
-	for (auto _ : state)
-	{
-		auto socket = UdpSocket::bind({.ip = bench::loopback(), .port = 0});
-		if (!socket)
-		{
-			state.SkipWithError("bind failed: " + std::string(toString(socket.error())));
-			break;
-		}
-		benchmark::DoNotOptimize(socket);
-	}
-}
-BENCHMARK(BM_UdpSocket_Bind)->UseRealTime();
-
-
-// N sockets each send 10k datagrams of the channel's datagram size to one receiver as fast as they can: the raw OS limit
-// underneath PeerChannel's fan-in. Timed is the send phase; arrived: share the receiver actually got (the OS dropped the rest).
+// Time: N sockets each fire 10k datagrams of the channel's datagram size at one receiver.
+// delivered_pct: share the receiver got; the operating system drops the rest when its receive buffer overflows.
 static void BM_UdpSocket_FanIn(benchmark::State &state)
 {
 	constexpr uint64_t PerSender = 10'000;
@@ -205,15 +130,12 @@ static void BM_UdpSocket_FanIn(benchmark::State &state)
 		sockets.push_back(std::move(*socket));
 	}
 
-	const auto target	 = receiver->localAddress();
-	uint64_t   failed	 = 0;
-
+	const auto target = receiver->localAddress();
 	Responder  drain(*receiver, false);
 
 	for (auto _ : state)
 	{
 		std::latch				 go(1);
-		std::atomic<uint64_t>	 sendErrors{0};
 		std::vector<std::thread> threads;
 
 		for (auto &socket : sockets)
@@ -223,10 +145,7 @@ static void BM_UdpSocket_FanIn(benchmark::State &state)
 				{
 					go.wait();
 					for (uint64_t i = 0; i < PerSender; ++i)
-					{
-						if (!socket.sendTo(target, payload))
-							sendErrors.fetch_add(1, std::memory_order_relaxed);
-					}
+						static_cast<void>(socket.sendTo(target, payload));
 				});
 		}
 
@@ -237,17 +156,15 @@ static void BM_UdpSocket_FanIn(benchmark::State &state)
 			thread.join();
 
 		state.SetIterationTime(bench::secondsSince(start));
-		failed += sendErrors.load();
 	}
 
 	std::this_thread::sleep_for(std::chrono::milliseconds{200}); // untimed: let the receiver drain what is still queued
 
-	const double sent		  = static_cast<double>(state.iterations() * senders * PerSender);
-	state.counters["arrived"] = static_cast<double>(drain.received()) / std::max(sent, 1.0);
-	state.counters["failed"]  = static_cast<double>(failed);
+	const auto sent				    = static_cast<uint64_t>(state.iterations()) * senders * PerSender;
+	state.counters["delivered_pct"] = bench::percent(drain.received(), sent);
 	state.SetItemsProcessed(static_cast<int64_t>(sent));
-	state.SetBytesProcessed(static_cast<int64_t>(sent) * static_cast<int64_t>(payload.size()));
+	state.SetBytesProcessed(static_cast<int64_t>(sent * payload.size()));
 }
-BENCHMARK(BM_UdpSocket_FanIn)->ArgName("senders")->Arg(1)->Arg(8)->Arg(32)->UseManualTime()->Unit(benchmark::kMillisecond);
+BENCHMARK(BM_UdpSocket_FanIn)->ArgName("senders")->Arg(1)->Arg(8)->Arg(32)->UseManualTime()->MeasureProcessCPUTime()->Unit(benchmark::kMillisecond);
 
 } // namespace SocketBenchmarks

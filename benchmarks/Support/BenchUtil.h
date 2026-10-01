@@ -1,8 +1,7 @@
 /*
   ==============================================================================
 	Module:         BenchUtil
-	Description:    Measurement helpers shared by all benchmarks: deterministic
-					payloads, completion waiting and common argument sets.
+	Description:    Measurement helpers shared by all benchmarks
   ==============================================================================
 */
 
@@ -12,6 +11,7 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <mutex>
 #include <random>
 #include <vector>
@@ -26,13 +26,9 @@ using namespace std::chrono_literals;
 
 using Clock = std::chrono::steady_clock;
 
-// Upper bound for any single wait on asynchronous library work. A benchmark that hits it reports an error instead of hanging.
-inline constexpr std::chrono::milliseconds CompletionTimeout{5000};
+// Upper bound for one wait on library work. A benchmark that hits it reports an error instead of hanging.
+inline constexpr std::chrono::milliseconds WaitTimeout{30'000};
 
-// The same bound for load benchmarks, whose single waits cover whole bursts, streams or swarms
-inline constexpr std::chrono::milliseconds LoadTimeout{60000};
-
-// Size units for argument lists
 inline constexpr int64_t				   KiB = 1024;
 inline constexpr int64_t				   MiB = 1024 * KiB;
 
@@ -63,27 +59,33 @@ inline double secondsSince(const Clock::time_point start)
 }
 
 
+inline double percent(const uint64_t part, const uint64_t whole)
+{
+	return whole == 0 ? 0.0 : 100.0 * static_cast<double>(part) / static_cast<double>(whole);
+}
+
+
 // Counts completions reported from library threads (callbacks) and lets the benchmark thread wait for them
 class CompletionCounter
 {
 public:
-	void notify(const uint64_t count = 1)
+	void notify()
 	{
 		{
 			std::lock_guard<std::mutex> lock(mMutex);
-			mCount += count;
+			++mCount;
 		}
 		mChanged.notify_all();
 	}
 
 	// Blocks until at least target completions were counted. False on timeout.
-	bool waitFor(const uint64_t target, const std::chrono::milliseconds timeout = CompletionTimeout)
+	bool waitFor(const uint64_t target, const std::chrono::milliseconds timeout = WaitTimeout)
 	{
 		std::unique_lock<std::mutex> lock(mMutex);
 		return mChanged.wait_for(lock, timeout, [&] { return mCount >= target; });
 	}
 
-	// Blocks until at least target completions were counted, as long as the count keeps moving. False once it stalled for `stall`.
+	// Like waitFor(), but gives up once the count did not move for `stall`: for flows that may lose work for good
 	bool waitWhileProgressing(const uint64_t target, const std::chrono::milliseconds stall)
 	{
 		std::unique_lock<std::mutex> lock(mMutex);
@@ -104,55 +106,10 @@ public:
 		return mCount;
 	}
 
-	void reset()
-	{
-		std::lock_guard<std::mutex> lock(mMutex);
-		mCount = 0;
-	}
-
 private:
 	mutable std::mutex		mMutex;
 	std::condition_variable mChanged;
 	uint64_t				mCount{0};
 };
-
-
-// ---------------------------------------------------------------------------
-// Common argument sets (->Apply(...))
-// ---------------------------------------------------------------------------
-
-// Single datagrams: tiny, typical, the channel's MTU-safe maximum, and large loopback datagrams
-inline void datagramSizes(benchmark::internal::Benchmark *b)
-{
-	b->ArgName("bytes");
-	for (const int64_t size : {64, 512, 1200, 8 * 1024, 60 * 1024})
-		b->Arg(size);
-}
-
-
-// Whole messages: single datagram, a few fragments, many fragments
-inline void messageSizes(benchmark::internal::Benchmark *b)
-{
-	b->ArgName("bytes");
-	for (const int64_t size : {64, 1024, 64 * 1024, 1024 * 1024})
-		b->Arg(size);
-}
-
-
-// Number of entries held by a container or service
-inline void populations(benchmark::internal::Benchmark *b)
-{
-	b->ArgName("entries");
-	for (const int64_t count : {8, 64, 512, 4096})
-		b->Arg(count);
-}
-
-
-// Messages per timed batch: keeps the data per iteration around 1 MiB, at least 1 and at most 64 messages
-inline size_t batchFor(const size_t messageSize)
-{
-	const size_t batch = (size_t{1024} * 1024) / (messageSize == 0 ? 1 : messageSize);
-	return batch < 1 ? 1 : (batch > 64 ? 64 : batch);
-}
 
 } // namespace bench

@@ -5,32 +5,20 @@ set(Benchmark_Directory ${CMAKE_CURRENT_SOURCE_DIR})
 
 set(Socket_Benchmarks
         ${Benchmark_Directory}/SocketBenchmarks/UdpSocketBenchmarks.cpp
-        ${Benchmark_Directory}/SocketBenchmarks/IPv4AddressBenchmarks.cpp
-)
-
-set(Queue_Benchmarks
-        ${Benchmark_Directory}/QueueBenchmarks/BoundedQueueBenchmarks.cpp
-        ${Benchmark_Directory}/QueueBenchmarks/SequenceBufferBenchmarks.cpp
-        ${Benchmark_Directory}/QueueBenchmarks/TaskQueueBenchmarks.cpp
-)
-
-set(Timeout_Benchmarks
-        ${Benchmark_Directory}/TimeoutBenchmarks/TimeoutServiceBenchmarks.cpp
 )
 
 set(Channel_Benchmarks
-        ${Benchmark_Directory}/ChannelBenchmarks/PacketCodecBenchmarks.cpp
-        ${Benchmark_Directory}/ChannelBenchmarks/SignalPacketBenchmarks.cpp
-        ${Benchmark_Directory}/ChannelBenchmarks/FragmentationBenchmarks.cpp
         ${Benchmark_Directory}/ChannelBenchmarks/ReliableLinkBenchmarks.cpp
-        ${Benchmark_Directory}/ChannelBenchmarks/HeartbeatRttBenchmarks.cpp
+        ${Benchmark_Directory}/ChannelBenchmarks/FragmentationBenchmarks.cpp
         ${Benchmark_Directory}/ChannelBenchmarks/PeerChannelBenchmarks.cpp
-        ${Benchmark_Directory}/ChannelBenchmarks/PeerChannelLoadBenchmarks.cpp
+)
+
+set(Utils_Benchmarks
+        ${Benchmark_Directory}/UtilsBenchmarks/TimeoutServiceBenchmarks.cpp
+        ${Benchmark_Directory}/UtilsBenchmarks/TaskQueueBenchmarks.cpp
 )
 
 set(Validation_Benchmarks
-        ${Benchmark_Directory}/ValidationBenchmarks/CompatibilityCheckBenchmarks.cpp
-        ${Benchmark_Directory}/ValidationBenchmarks/ValidationStoreBenchmarks.cpp
         ${Benchmark_Directory}/ValidationBenchmarks/PeerValidationBenchmarks.cpp
 )
 
@@ -48,19 +36,16 @@ set(Integration_Benchmarks
 
 set(Benchmark_Support
         ${Benchmark_Directory}/Support/BenchUtil.h
-        ${Benchmark_Directory}/Support/LinkWire.h
-        ${Benchmark_Directory}/Support/LoopbackChannelPair.h
-        ${Benchmark_Directory}/Support/LoopbackSwarm.h
+        ${Benchmark_Directory}/Support/Loopback.h
         ${Benchmark_Directory}/Support/ServiceWiring.h
-        ${Benchmark_Directory}/Support/Traffic.h
+        ${Benchmark_Directory}/Support/LinkWire.h
 )
 
 
 set(All_Benchmarks
         ${Socket_Benchmarks}
-        ${Queue_Benchmarks}
-        ${Timeout_Benchmarks}
         ${Channel_Benchmarks}
+        ${Utils_Benchmarks}
         ${Validation_Benchmarks}
         ${Connection_Benchmarks}
         ${Discovery_Benchmarks}
