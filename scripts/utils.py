@@ -40,6 +40,17 @@ class BuildUtils:
         sys.stdout.flush()
         return process.stdout
 
+    @staticmethod
+    def execute_streaming(command: Iterable[str], description: str) -> None:
+        """Execute a long-running system command with its output going straight to the console."""
+        print(f"\t{description}")
+        sys.stdout.flush()
+
+        process = subprocess.run(list(command))
+
+        if process.returncode != 0:
+            sys.exit(process.returncode)
+
 
 @contextmanager
 def working_directory(path: Path):

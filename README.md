@@ -74,18 +74,18 @@ Key design goals:
 
 ### Internal Services
 
-| Module                  | Responsibility                                                                                                     |
-|-------------------------|--------------------------------------------------------------------------------------------------------------------|
-| `DiscoveryService`      | UDP broadcast - advertises presence and collects peer announcements                                                |
-| `ConnectionService`     | Orchestrates the connection lifecycle (invite → answer → ready flags) with per-state timeouts                      |
-| `PeerChannel`           | Owns the dedicated UDP socket and its I/O thread; routes control signals and application messages                  |
-| `ReliableLink`          | Per-peer reliability: `seq`, stream IDs, `Data`/`DataAck`/`AckAck`, retransmit, ordering, send window              |
-| `FragmentationService`  | Splits messages larger than one datagram and reassembles them                                                      |
-| `HeartbeatService`      | Keeps an idle session alive and detects a silent peer                                                              |
-| `PeerValidationService` | Validates shared secret and protocol version before a connection is accepted                                       |
-| `NetworkInformation`    | Adapter enumeration (Windows / Linux / macOS backends); fires adapter-change events                                |
-| Socket layer            | `UdpSocket` with `std::expected` error handling; OS specifics isolated in `Socket/Platform`                        |
-| `TimeoutService`        | Configurable timeout management across all async operations                                                        |
+| Module                  | Responsibility                                                                                        |
+|-------------------------|-------------------------------------------------------------------------------------------------------|
+| `DiscoveryService`      | UDP broadcast - advertises presence and collects peer announcements                                   |
+| `ConnectionService`     | Orchestrates the connection lifecycle (invite → answer → ready flags) with per-state timeouts         |
+| `PeerChannel`           | Owns the dedicated UDP socket and its I/O thread; routes control signals and application messages     |
+| `ReliableLink`          | Per-peer reliability: `seq`, stream IDs, `Data`/`DataAck`/`AckAck`, retransmit, ordering, send window |
+| `FragmentationService`  | Splits messages larger than one datagram and reassembles them                                         |
+| `HeartbeatService`      | Keeps an idle session alive and detects a silent peer                                                 |
+| `PeerValidationService` | Validates shared secret and protocol version before a connection is accepted                          |
+| `NetworkInformation`    | Adapter enumeration (Windows / Linux / macOS backends); fires adapter-change events                   |
+| Socket layer            | `UdpSocket` with `std::expected` error handling; OS specifics isolated in `Socket/Platform`           |
+| `TimeoutService`        | Configurable timeout management across all async operations                                           |
 
 ### Reliable UDP channel
 
@@ -237,10 +237,11 @@ set(NETLINK_BUILD_TESTS ON CACHE BOOL "" FORCE)
 
 Fetched automatically at configure time via [CPM](https://github.com/cpm-cmake/CPM.cmake).
 
-| Library                                            | Version | Role                                       |
-|----------------------------------------------------|---------|--------------------------------------------|
-| [nlohmann/json](https://github.com/nlohmann/json)  | 3.11.3  | Discovery and control signal serialization |
-| [GoogleTest](https://github.com/google/googletest) | 1.15.2  | Unit testing (standalone builds only)      |
+| Library                                                 | Version | Role                                       |
+|---------------------------------------------------------|---------|--------------------------------------------|
+| [nlohmann/json](https://github.com/nlohmann/json)       | 3.11.3  | Discovery and control signal serialization |
+| [GoogleTest](https://github.com/google/googletest)      | 1.15.2  | Unit testing (standalone builds only)      |
+| [Google Benchmark](https://github.com/google/benchmark) | 1.9.4   | Benchmarks (standalone builds only)        |
 
 ## Standalone Build
 
@@ -253,6 +254,43 @@ Run tests:
 ```bash
 ctest --test-dir build
 ```
+
+## Benchmarks
+
+`NetLinkBenchmarks` measures the library's production code as it ships: the unmodified `NetLink` target, real UDP
+sockets on loopback, and services wired the same way `NetLinkCore` wires them. Each benchmark answers one question:
+
+| Benchmark | Question | Time is |
+|---|---|---|
+| `BM_UdpSocket_RoundTrip` | What is the operating system's floor for a round trip? | one datagram there and back (µs) |
+| `BM_UdpSocket_FanIn` | How much does the OS drop when many senders flood one socket? | all senders' bursts sent (ms) |
+| `BM_ReliableLink_Transfer` | What does the reliability protocol cost in CPU, with and without loss? | one message, no sockets (µs) |
+| `BM_Fragmentation_Reassemble` | What does reassembling a large message cost? | one message (µs) |
+| `BM_PeerChannel_Throughput` | How many messages and MiB/s get through a channel? | a batch until all arrived (ms) |
+| `BM_PeerChannel_RoundTrip` | How long does a reliable request/reply take? | one request and its reply (µs) |
+| `BM_PeerChannel_FanIn` | Does a hub keep up with many peers sending at once? | all messages arrived or delivery stopped (ms) |
+| `BM_TimeoutService_StartCancel` | What does arming and cancelling a timeout cost with many active? | one arm + cancel (µs) |
+| `BM_TimeoutService_FireLatency` | How quickly does a due timeout fire with many active? | arming until the callback ran (µs) |
+| `BM_TimeoutService_TimerResolution` | How precisely do short timeouts fire? | the whole timeout (ms) |
+| `BM_TimeoutService_MassExpiry` | What happens when thousands of timeouts expire together? | until every callback ran (ms) |
+| `BM_TaskQueue_Latency` / `_Throughput` | How fast is the event queue? | one hand-off (µs) / 100k tasks (ms) |
+| `BM_PeerValidation_Validate` | How long does validating a peer take, per check? | both peers validated each other (µs) |
+| `BM_PeerValidation_Swarm` | Does validation scale when many peers appear at once? | all peers validated (ms) |
+| `BM_ConnectionService_Establish` | How long does session setup take, idle and on a saturated channel? | invitation until both sides are connected (ms) |
+| `BM_ConnectionService_InvitationStorm` | What if many peers invite one host at once? | every peer answered (ms) |
+| `BM_DiscoveryRegistry_Announcement` | What does one discovery announcement cost with many known peers? | one announcement (ns) |
+| `BM_NetLinkCore_Throughput` / `_RoundTrip` / `_Connect` | The same, end to end through the public API | as for `PeerChannel` / connect (µs) |
+
+
+```bash
+python build.py --benchmark                                      # everything, Release, JSON written to build/<arch>/benchmarks/results
+python build.py --benchmark --benchmark-filter=TimeoutService    # one module (regex on the name)
+python build.py --benchmark --benchmark-repetitions=5            # every benchmark 5 times: mean, median, stddev, cv
+```
+
+The binary accepts all Google Benchmark flags. To compare two runs, use `compare.py` from Google Benchmark's `tools/`
+folder. The target is built with the project like the tests (`NETLINK_BUILD_BENCHMARKS`, ON for top-level builds), but it
+is never run by CI or ctest.
 
 ## Design Highlights
 

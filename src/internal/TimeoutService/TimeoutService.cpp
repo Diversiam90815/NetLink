@@ -16,6 +16,7 @@ TimeoutService::~TimeoutService()
 		std::lock_guard<std::mutex> lock(mMutex);
 		mStopping = true;
 		mActiveTimeouts.clear();
+		mDeadlines.clear();
 	}
 	mWakeUp.notify_all();
 
@@ -37,8 +38,20 @@ void TimeoutService::startTimeout(const TimeoutKey &key, const int timeoutMS, Ti
 		if (mStopping)
 			return;
 
+		const auto deadline = Clock::now() + std::chrono::milliseconds(std::max(timeoutMS, 0));
+
 		// Replacing an entry also discards a pending (not yet running) callback for the same key
-		mActiveTimeouts[key] = Entry{.deadline = Clock::now() + std::chrono::milliseconds(std::max(timeoutMS, 0)), .callback = std::move(callback)};
+		if (const auto it = mActiveTimeouts.find(key); it != mActiveTimeouts.end())
+		{
+			mDeadlines.erase({it->second.deadline, key});
+			it->second = Entry{.deadline = deadline, .callback = std::move(callback)};
+		}
+		else
+		{
+			mActiveTimeouts.emplace(key, Entry{.deadline = deadline, .callback = std::move(callback)});
+		}
+
+		mDeadlines.emplace(deadline, key);
 
 		if (!mWorker.joinable())
 			mWorker = std::thread(&TimeoutService::run, this);
@@ -51,7 +64,15 @@ void TimeoutService::startTimeout(const TimeoutKey &key, const int timeoutMS, Ti
 bool TimeoutService::cancelTimeout(const TimeoutKey &key)
 {
 	std::unique_lock<std::mutex> lock(mMutex);
-	return cancelIf([&key](const TimeoutKey &candidate) { return candidate == key; }, lock) > 0;
+
+	const auto					 it		 = mActiveTimeouts.find(key);
+	const bool					 removed = it != mActiveTimeouts.end();
+
+	if (removed)
+		erase(it);
+
+	waitForRunningCallback([&key](const TimeoutKey &candidate) { return candidate == key; }, lock);
+	return removed;
 }
 
 
@@ -90,16 +111,38 @@ size_t TimeoutService::activeCount() const
 }
 
 
+TimeoutService::Timeouts::iterator TimeoutService::erase(const Timeouts::iterator it)
+{
+	mDeadlines.erase({it->second.deadline, it->first});
+	return mActiveTimeouts.erase(it);
+}
+
+
 int TimeoutService::cancelIf(const std::function<bool(const TimeoutKey &)> &matches, std::unique_lock<std::mutex> &lock)
 {
-	const size_t removed = std::erase_if(mActiveTimeouts, [&matches](const auto &entry) { return matches(entry.first); });
+	int removed = 0;
 
+	for (auto it = mActiveTimeouts.begin(); it != mActiveTimeouts.end();)
+	{
+		if (matches(it->first))
+		{
+			it = erase(it);
+			++removed;
+		}
+		else
+			++it;
+	}
+
+	waitForRunningCallback(matches, lock);
+	return removed;
+}
+
+
+void TimeoutService::waitForRunningCallback(const std::function<bool(const TimeoutKey &)> &matches, std::unique_lock<std::mutex> &lock)
+{
 	// A matching callback may be executing right now: wait for it, unless we are that callback
-
 	if (const bool onWorker = mWorker.joinable() && mWorker.get_id() == std::this_thread::get_id(); !onWorker)
 		mCallbackDone.wait(lock, [&] { return !mRunningKey.has_value() || !matches(*mRunningKey); });
-
-	return static_cast<int>(removed);
 }
 
 
@@ -109,23 +152,25 @@ void TimeoutService::run()
 
 	while (!mStopping)
 	{
-		if (mActiveTimeouts.empty())
+		if (mDeadlines.empty())
 		{
-			mWakeUp.wait(lock, [this] { return mStopping || !mActiveTimeouts.empty(); });
+			mWakeUp.wait(lock, [this] { return mStopping || !mDeadlines.empty(); });
 			continue;
 		}
 
-		const auto next = std::ranges::min_element(mActiveTimeouts, {}, [](const auto &entry) { return entry.second.deadline; });
+		// A copy: the entry may be cancelled while the lock is released during the wait
+		const auto deadline = mDeadlines.begin()->first;
 
-		if (Clock::now() < next->second.deadline)
+		if (Clock::now() < deadline)
 		{
-			mWakeUp.wait_until(lock, next->second.deadline); // re-evaluated after new/cancelled timeouts
+			mWakeUp.wait_until(lock, deadline); // re-evaluated after new/cancelled timeouts
 			continue;
 		}
 
-		TimeoutKey		key		 = next->first;
-		TimeoutCallback callback = std::move(next->second.callback);
-		mActiveTimeouts.erase(next);
+		const auto		it		 = mActiveTimeouts.find(mDeadlines.begin()->second);
+		TimeoutKey		key		 = it->first;
+		TimeoutCallback callback = std::move(it->second.callback);
+		erase(it);
 
 		mRunningKey = key;
 		lock.unlock();

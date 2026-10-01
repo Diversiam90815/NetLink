@@ -1,7 +1,10 @@
 #include <gtest/gtest.h>
 #include <atomic>
 #include <chrono>
+#include <mutex>
+#include <string>
 #include <thread>
+#include <vector>
 #include "TimeoutService/TimeoutService.h"
 
 using namespace std::chrono_literals;
@@ -194,6 +197,57 @@ TEST(TimeoutService, DestructorCancelsAll)
 	}
 	std::this_thread::sleep_for(50ms);
 	EXPECT_FALSE(fired.load()) << "The destructor must cancel all pending timeouts so no callbacks fire after the service is destroyed";
+}
+
+
+// ---------------------------------------------------------------------------
+// TimeoutService — deadline order
+// ---------------------------------------------------------------------------
+
+TEST(TimeoutService, TimeoutsFireInDeadlineOrder)
+{
+	TimeoutService			 svc;
+	std::mutex				 mutex;
+	std::vector<std::string> fired;
+	auto					 record = [&](const TimeoutKey &key)
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		fired.push_back(key.identifier);
+	};
+
+	svc.startTimeout({"cat", "late"}, 150, record);
+	svc.startTimeout({"cat", "early"}, 50, record);
+	svc.startTimeout({"cat", "middle"}, 100, record);
+	std::this_thread::sleep_for(500ms);
+
+	std::lock_guard<std::mutex> lock(mutex);
+	EXPECT_EQ(fired, (std::vector<std::string>{"early", "middle", "late"})) << "Timeouts started out of order must fire sorted by their deadline";
+}
+
+
+TEST(TimeoutService, RestartWithShorterTimeout_FiresEarlier)
+{
+	TimeoutService	  svc;
+	std::atomic<bool> fired{false};
+	TimeoutKey		  key{"cat", "id"};
+	svc.startTimeout(key, 3'600'000, [&](const TimeoutKey &) { fired.store(true); });
+	svc.startTimeout(key, 10, [&](const TimeoutKey &) { fired.store(true); });
+	std::this_thread::sleep_for(300ms);
+	EXPECT_TRUE(fired.load()) << "Restarting a key must move its deadline, also to an earlier one";
+}
+
+
+TEST(TimeoutService, CancellingTheEarliest_LaterOnesStillFire)
+{
+	TimeoutService	  svc;
+	std::atomic<bool> earlyFired{false};
+	std::atomic<bool> lateFired{false};
+	svc.startTimeout({"cat", "early"}, 20, [&](const TimeoutKey &) { earlyFired.store(true); });
+	svc.startTimeout({"cat", "late"}, 60, [&](const TimeoutKey &) { lateFired.store(true); });
+	svc.cancelTimeout({"cat", "early"});
+	std::this_thread::sleep_for(300ms);
+	EXPECT_FALSE(earlyFired.load()) << "The cancelled timeout must not fire";
+	EXPECT_TRUE(lateFired.load()) << "The timeout behind it must still fire";
 }
 
 } // namespace UtilsTests

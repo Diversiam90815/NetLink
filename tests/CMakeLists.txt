@@ -78,10 +78,7 @@ set(All_Tests
 add_executable(NetLinkTests ${All_Tests} ${Test_Fakes})
 
 
-target_link_libraries(NetLinkTests PRIVATE
-    NetLink
-    nlohmann_json::nlohmann_json
-)
+target_link_libraries(NetLinkTests PRIVATE NetLinkInternal)
 
 if(MSVC)
     target_compile_options(NetLinkTests PRIVATE /W4)
@@ -89,15 +86,7 @@ else()
     target_compile_options(NetLinkTests PRIVATE -Wall -Wextra)
 endif()
 
-target_include_directories(NetLinkTests PRIVATE
-    ${PROJECT_BINARY_DIR}/generated
-    ${PROJECT_SOURCE_DIR}/src/internal
-    ${PROJECT_SOURCE_DIR}/src/internal/Discovery
-    ${PROJECT_SOURCE_DIR}/src/internal/PeerValidation
-    ${PROJECT_SOURCE_DIR}/src/internal/PeerValidation/Checks
-    ${PROJECT_SOURCE_DIR}/src/internal/Util
-    ${Test_Directory}/Fakes
-)
+target_include_directories(NetLinkTests PRIVATE ${Test_Directory}/Fakes)
 
 AddTests(NetLinkTests)
 

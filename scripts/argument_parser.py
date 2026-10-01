@@ -48,4 +48,23 @@ def create_argument_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Build and run the CMake test suite."
     )
+
+    parser.add_argument(
+        "-bm", "--benchmark",
+        action="store_true",
+        help="Build the benchmarks in Release and run them. Results are also written as JSON to the build directory."
+    )
+
+    parser.add_argument(
+        "--benchmark-filter",
+        default=None,
+        help="Only run benchmarks matching this regex, e.g. 'TimeoutService' or 'PeerChannel/Reliable'."
+    )
+
+    parser.add_argument(
+        "--benchmark-repetitions",
+        type=int,
+        default=1,
+        help="Run every benchmark this many times and report mean, median, stddev and cv instead of single results."
+    )
     return parser

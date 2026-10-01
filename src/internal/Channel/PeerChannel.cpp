@@ -49,7 +49,7 @@ bool netlink::PeerChannel::init(const std::string &localComputerName)
 
 void netlink::PeerChannel::deinit()
 {
-	ThreadBase::stop();
+	stop();
 
 	{
 		std::lock_guard<std::mutex> lock(mSocketMutex);
@@ -81,7 +81,7 @@ void netlink::PeerChannel::setLocalIPv4(const net::IPv4Address &localIPv4)
 	if (localIPv4.isUnspecified())
 		return;
 
-	auto socket = mSocketFactory({.ip = localIPv4, .port = 0}, {});
+	auto socket = mSocketFactory({.ip = localIPv4, .port = 0}, {.receiveBufferSize = internal::ChannelReceiveBufferSize});
 
 	if (!socket)
 	{
@@ -121,10 +121,13 @@ std::shared_ptr<netlink::net::IDatagramSocket> netlink::PeerChannel::socket() co
 
 void netlink::PeerChannel::resetLinks()
 {
-	std::lock_guard<std::mutex> lock(mLinksMutex);
-	mLinks.clear();
-	mFragmentation.clear();
-	mHeartbeat.clear();
+	{
+		std::lock_guard<std::mutex> lock(mLinksMutex);
+		mLinks.clear();
+		mFragmentation.clear();
+		mHeartbeat.clear();
+	}
+	mLinksChanged.notify_all();
 }
 
 
@@ -150,10 +153,13 @@ void netlink::PeerChannel::registerPeer(const std::string &displayName, const ne
 	// The peer moved to another socket (restart, adapter switch): its old stream is gone
 	if (previous.isValid() && previous.address() != PeerEndpoint{.IPv4 = ipv4, .channelPort = channelPort}.address())
 	{
-		std::lock_guard<std::mutex> lock(mLinksMutex);
-		mLinks.erase(previous.address());
-		mFragmentation.reset(previous.address());
-		mHeartbeat.unwatch(previous.address());
+		{
+			std::lock_guard<std::mutex> lock(mLinksMutex);
+			mLinks.erase(previous.address());
+			mFragmentation.reset(previous.address());
+			mHeartbeat.unwatch(previous.address());
+		}
+		mLinksChanged.notify_all();
 	}
 }
 
@@ -174,10 +180,13 @@ void netlink::PeerChannel::unregisterPeer(const std::string &displayName)
 
 	if (removed.isValid())
 	{
-		std::lock_guard<std::mutex> lock(mLinksMutex);
-		mLinks.erase(removed.address());
-		mFragmentation.reset(removed.address());
-		mHeartbeat.unwatch(removed.address());
+		{
+			std::lock_guard<std::mutex> lock(mLinksMutex);
+			mLinks.erase(removed.address());
+			mFragmentation.reset(removed.address());
+			mHeartbeat.unwatch(removed.address());
+		}
+		mLinksChanged.notify_all();
 	}
 
 	NETLINK_LOG_DEBUG("Unregistered peer {}", displayName);
@@ -350,9 +359,8 @@ bool netlink::PeerChannel::queueReliable(const PeerEndpoint &peer, const channel
 		if (!link)
 			return false;
 
-		const auto now = Clock::now();
-		queued		   = link->queueReliable(channelId, std::move(body), now) != channel::PushResult::Rejected;
-		collect(peer.address(), *link, batch, now);
+		queued = link->queueReliable(channelId, std::move(body)) != channel::PushResult::Rejected;
+		collect(peer.address(), *link, batch, Clock::now());
 	}
 
 	execute(batch);
@@ -398,23 +406,29 @@ bool netlink::PeerChannel::flush(const std::string &computerName, const std::chr
 	if (!peer.isValid())
 		return true;
 
-	const auto deadline = Clock::now() + timeout;
+	std::unique_lock<std::mutex> lock(mLinksMutex);
 
-	while (true)
+	const auto					 settled = [&]
 	{
-		{
-			std::lock_guard<std::mutex> lock(mLinksMutex);
+		const auto *link = linkFor(peer.address(), false);
+		return !link || !link->hasPendingReliable();
+	};
 
-			if (const auto *link = linkFor(peer.address(), false); !link || !link->hasPendingReliable())
-				return true;
-		}
+	// Acknowledgements are only processed by the running I/O loop, which signals every change
+	mLinksChanged.wait_until(lock, Clock::now() + timeout, [&] { return settled() || !isRunning(); });
+	return settled();
+}
 
-		// Acknowledgements are only processed by the running I/O loop
-		if (!isRunning() || Clock::now() >= deadline)
-			return false;
 
-		std::this_thread::sleep_for(std::chrono::milliseconds{2});
+void netlink::PeerChannel::stop()
+{
+	ThreadBase::stop();
+
+	// Taking the lock orders this wake-up after a waiter's last check, so it cannot be missed
+	{
+		std::lock_guard<std::mutex> lock(mLinksMutex);
 	}
+	mLinksChanged.notify_all();
 }
 
 
@@ -453,7 +467,8 @@ void netlink::PeerChannel::collect(const net::SocketAddress &address, channel::R
 		batch.lostPeers.push_back({.address = address, .reason = reason});
 	}
 
-	auto datagrams = link.takeOutgoing();
+	// One send pass: at most the link's budget, the rest goes out in the next passes
+	auto datagrams = link.takeOutgoing(now);
 
 	if (!datagrams.empty())
 		mHeartbeat.onSent(address, now);
@@ -492,6 +507,10 @@ std::chrono::milliseconds netlink::PeerChannel::nextWait()
 
 		for (const auto &link : mLinks | std::views::values)
 		{
+			// Datagrams still waiting for a send pass: only poll the socket, then make the next pass
+			if (link->hasOutgoing())
+				return std::chrono::milliseconds{0};
+
 			if (auto due = link->nextDeadline(); due && (!next || *due < *next))
 				next = due;
 		}
@@ -558,6 +577,7 @@ void netlink::PeerChannel::handleDatagram(const net::SocketAddress &from, const 
 		collect(from, *link, batch, now);
 	}
 
+	mLinksChanged.notify_all(); // an acknowledgement may have completed a flush()
 	execute(batch);
 }
 
@@ -592,6 +612,7 @@ void netlink::PeerChannel::serviceTimers()
 			batch.lostPeers.push_back({.address = address, .reason = "no traffic from the peer anymore"});
 	}
 
+	mLinksChanged.notify_all(); // a failed link was reset: nothing is pending on it anymore
 	execute(batch);
 }
 

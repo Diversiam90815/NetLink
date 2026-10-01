@@ -7,6 +7,7 @@
 
 #include "SocketPlatform.h"
 #include "SocketCommon.h"
+#include "NetLinkLog.h"
 
 #include <algorithm>
 #include <limits>
@@ -87,16 +88,17 @@ Result<void> applyBindOptions(const NativeHandle handle, const BindOptions &opti
 			return result;
 	}
 
+	// Buffer sizes are hints: the OS may cap them (Linux: net.core.rmem_max / wmem_max), so a refusal does not fail the socket
 	if (options.receiveBufferSize > 0)
 	{
 		if (auto result = setIntOption(handle, SOL_SOCKET, SO_RCVBUF, options.receiveBufferSize); !result)
-			return result;
+			NETLINK_LOG_WARNING("Receive buffer of {} bytes not applied: {}", options.receiveBufferSize, toString(result.error()));
 	}
 
 	if (options.sendBufferSize > 0)
 	{
 		if (auto result = setIntOption(handle, SOL_SOCKET, SO_SNDBUF, options.sendBufferSize); !result)
-			return result;
+			NETLINK_LOG_WARNING("Send buffer of {} bytes not applied: {}", options.sendBufferSize, toString(result.error()));
 	}
 
 	return {};

@@ -13,8 +13,10 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <thread>
+#include <utility>
 
 
 /**
@@ -108,14 +110,23 @@ private:
 		TimeoutCallback	  callback;
 	};
 
-	void						run();
-	int							cancelIf(const std::function<bool(const TimeoutKey &)> &matches, std::unique_lock<std::mutex> &lock);
+	using Timeouts = std::map<TimeoutKey, Entry>;
 
-	mutable std::mutex			mMutex;
-	std::condition_variable		mWakeUp;	   // new timeout / stop
-	std::condition_variable		mCallbackDone; // a callback finished
-	std::map<TimeoutKey, Entry> mActiveTimeouts;
-	std::optional<TimeoutKey>	mRunningKey;   // key whose callback is executing right now
+	void										   run();
+
+	// Removes an entry together with its deadline (caller holds mMutex)
+	Timeouts::iterator							   erase(Timeouts::iterator it);
+	int											   cancelIf(const std::function<bool(const TimeoutKey &)> &matches, std::unique_lock<std::mutex> &lock);
+
+	// Waits until no matching callback is running anymore, unless called from inside that callback
+	void										   waitForRunningCallback(const std::function<bool(const TimeoutKey &)> &matches, std::unique_lock<std::mutex> &lock);
+
+	mutable std::mutex							   mMutex;
+	std::condition_variable						   mWakeUp;		  // new timeout / stop
+	std::condition_variable						   mCallbackDone; // a callback finished
+	Timeouts									   mActiveTimeouts;
+	std::set<std::pair<Clock::time_point, TimeoutKey>> mDeadlines; // the same timeouts, ordered by deadline: the next one is begin()
+	std::optional<TimeoutKey>					   mRunningKey;	  // key whose callback is executing right now
 
 	std::thread					mWorker;
 	bool						mStopping{false};
