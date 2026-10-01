@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <future>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -385,6 +386,34 @@ TEST_F(PeerChannelTest, Flush_WaitsUntilEverythingIsAcknowledged)
 
 	EXPECT_TRUE(pcA->flush("pc-b", 3s));
 	EXPECT_EQ(atB.messageCount(), 20u) << "Acknowledged means delivered";
+}
+
+
+TEST_F(PeerChannelTest, Flush_ReturnsWhenTheLoopStops)
+{
+	pcB->deinit(); // nobody acknowledges anymore
+	ASSERT_TRUE(pcA->sendMessage("pc-b", 1, payload(4, 0), DeliveryMode::ReliableOrdered));
+
+	auto flushed = std::async(std::launch::async, [this] { return pcA->flush("pc-b", 5s); });
+	std::this_thread::sleep_for(50ms);
+	pcA->stop();
+
+	ASSERT_EQ(flushed.wait_for(1s), std::future_status::ready) << "Stopping the I/O loop must wake a waiting flush";
+	EXPECT_FALSE(flushed.get()) << "Nothing was acknowledged";
+}
+
+
+TEST_F(PeerChannelTest, BurstLargerThanTheSendBudget_IsDeliveredCompletely)
+{
+	constexpr uint32_t Messages = 2000; // far more than one send pass may push
+	for (uint32_t i = 0; i < Messages; ++i)
+		ASSERT_TRUE(pcA->sendMessage("pc-b", i, payload(16, 3), DeliveryMode::ReliableOrdered));
+
+	ASSERT_TRUE(waitUntilTrue([this] { return atB.messageCount() == Messages; }, 10s)) << "The I/O loop sends the backlog pass by pass";
+
+	const auto received = atB.receivedMessages();
+	for (uint32_t i = 0; i < Messages; ++i)
+		EXPECT_EQ(received[i].type, i) << "in order at " << i;
 }
 
 

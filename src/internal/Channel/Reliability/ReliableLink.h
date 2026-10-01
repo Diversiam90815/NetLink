@@ -85,9 +85,9 @@ public:
 	// --- Sending --------------------------------------------------------------
 
 	// Queues a whole message; it is fragmented and sent as the send window allows. Rejected when too large or the queue is full.
-	PushResult						  queueReliable(ChannelId channel, std::vector<uint8_t> body, TimePoint now);
+	PushResult						  queueReliable(ChannelId channel, std::vector<uint8_t> body);
 
-	// Sends right away without acknowledgement. False when the body does not fit into one datagram.
+	// Sent with the next send pass, without acknowledgement. False when the body does not fit into one datagram.
 	bool							  sendUnreliable(ChannelId channel, std::span<const uint8_t> body);
 
 	void							  sendHeartbeat();
@@ -104,7 +104,9 @@ public:
 
 	// --- Output ----------------------------------------------------------------
 
-	std::vector<std::vector<uint8_t>> takeOutgoing() { return std::exchange(mOutgoing, {}); }
+	// One send pass: at most sendBudget() datagrams for the socket, signals first, then unreliable, then reliable data.
+	// The rest waits for the next pass. Reliable fragments start their retransmission timer now.
+	std::vector<std::vector<uint8_t>> takeOutgoing(TimePoint now);
 	std::vector<DeliveredPacket>	  takeDelivered() { return std::exchange(mDelivered, {}); }
 	std::vector<LinkEvent>			  takeEvents() { return std::exchange(mEvents, {}); }
 
@@ -112,6 +114,10 @@ public:
 
 	// Something reliable is still in flight or waiting to be sent
 	bool							  hasPendingReliable() const;
+
+	// Datagrams are waiting for a send pass
+	bool							  hasOutgoing() const;
+	size_t							  sendBudget() const { return mSendBudget; }
 	size_t							  inFlightCount() const { return mInFlight.size(); }
 	size_t							  queuedMessageCount() const;
 
@@ -132,9 +138,10 @@ private:
 	{
 		PacketHeader		 header;
 		std::vector<uint8_t> body;
-		TimePoint			 firstSent{};
+		TimePoint			 firstSent{}; // set by the first send pass that pushes it
 		TimePoint			 deadline{};
 		int					 transmissions{0};
+		bool				 queued{false}; // waiting in mDataQueue for a send pass; its timer is not running
 	};
 
 	struct AckRecord
@@ -162,11 +169,15 @@ private:
 	void									 handleDataAck(const PacketHeader &header, TimePoint now);
 
 	// Moves queued fragments into the send window while there is room
-	void									 pump(TimePoint now);
+	void									 pump();
 	std::optional<OutboundMessage>			 nextQueuedMessage();
 	void									 advanceSendBase();
 
-	void									 transmit(const PacketHeader &header, std::span<const uint8_t> body);
+	// The budget of the coming send pass, from what the link learned since the last one
+	void									 adaptSendBudget();
+
+	// Encodes with the current stream IDs: they may have become known since the packet was created
+	std::vector<uint8_t>					 encode(const PacketHeader &header, std::span<const uint8_t> body) const;
 	void									 sendAck(PacketKind kind, uint64_t seq);
 	PacketHeader							 makeHeader(PacketFlags flags, uint64_t seq) const;
 	void									 scheduleDeadline(TimePoint deadline);
@@ -198,7 +209,14 @@ private:
 
 	std::optional<TimePoint>				 mNextDeadline;
 
-	std::vector<std::vector<uint8_t>>		 mOutgoing;
+	// Output stage, drained by send passes in this order
+	BoundedQueue<std::vector<uint8_t>>		 mSignalQueue;	   // DataAck, AckAck, heartbeat
+	BoundedQueue<std::vector<uint8_t>>		 mUnreliableQueue; // unreliable Data, the oldest dropped when full
+	BoundedQueue<uint64_t>					 mDataQueue;	   // seqs of reliable fragments due for (re)transmission
+	size_t									 mSendBudget;
+	bool									 mLossSinceLastPass{false};
+	bool									 mLastPassFull{false};
+
 	std::vector<DeliveredPacket>			 mDelivered;
 	std::vector<LinkEvent>					 mEvents;
 	LinkStats								 mStats;

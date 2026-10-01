@@ -9,6 +9,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <functional>
 #include <map>
 #include <memory>
@@ -93,7 +94,9 @@ public:
 
 	// I/O loop: receiving, retransmissions and heartbeats
 	using ThreadBase::start;
-	using ThreadBase::stop;
+
+	// Also wakes flush() calls: without the loop no acknowledgement can arrive anymore
+	void stop() override;
 
 	int	 getBoundPort() const { return mBoundPort.load(); }
 
@@ -206,6 +209,7 @@ private:
 
 	// Reliability state, guarded by mLinksMutex
 	mutable std::mutex					  mLinksMutex;
+	std::condition_variable				  mLinksChanged; // signalled after links changed (acknowledgements, resets); flush() waits on it
 	PeerChannelConfig					  mConfig;
 	std::map<net::SocketAddress, std::unique_ptr<channel::ReliableLink>> mLinks;
 	channel::FragmentationService										 mFragmentation;

@@ -8,6 +8,7 @@
 
 #include "ReliableLink.h"
 
+#include <algorithm>
 #include <random>
 
 #include "Channel/Fragmentation/FragmentationService.h"
@@ -34,7 +35,9 @@ uint32_t makeStreamID(const uint32_t different)
 
 ReliableLink::ReliableLink(const ReliabilityConfig &config, const uint32_t localStreamID)
 	: mConfig(config), mLocalStreamID(localStreamID != 0 ? localStreamID : makeStreamID()), mRtt(config.initialRto, config.minRto, config.maxRto),
-	  mControlQueue(ControlQueueCapacity, OverflowPolicy::DropNewest), mApplicationQueue(config.sendQueueCapacity, config.sendQueueOverflow)
+	  mControlQueue(ControlQueueCapacity, OverflowPolicy::DropNewest), mApplicationQueue(config.sendQueueCapacity, config.sendQueueOverflow),
+	  mSignalQueue(2 * WindowSize, OverflowPolicy::DropOldest), mUnreliableQueue(config.unreliableQueueCapacity, OverflowPolicy::DropOldest),
+	  mDataQueue(2 * WindowSize, OverflowPolicy::DropNewest), mSendBudget(config.initialSendBudget)
 {
 }
 
@@ -56,7 +59,7 @@ size_t ReliableLink::maxUnreliableBody() const
 // Sending
 // ---------------------------------------------------------------------------
 
-PushResult ReliableLink::queueReliable(const ChannelId channel, std::vector<uint8_t> body, const TimePoint now)
+PushResult ReliableLink::queueReliable(const ChannelId channel, std::vector<uint8_t> body)
 {
 	if (body.size() > mConfig.maxMessageSize || FragmentationService::fragmentCount(body.size(), maxFragmentBody()) == 0)
 	{
@@ -73,7 +76,7 @@ PushResult ReliableLink::queueReliable(const ChannelId channel, std::vector<uint
 	else if (result == PushResult::EvictedOldest)
 		NETLINK_LOG_WARNING("Send queue full ({} messages), dropped the oldest unsent message", queue.capacity());
 
-	pump(now);
+	pump();
 	return result;
 }
 
@@ -83,14 +86,83 @@ bool ReliableLink::sendUnreliable(const ChannelId channel, const std::span<const
 	if (body.size() > maxUnreliableBody())
 		return false;
 
-	transmit(makeHeader(PacketFlags::data(channel, false), mNextUnreliableSeq++), body);
+	mUnreliableQueue.push(encode(makeHeader(PacketFlags::data(channel, false), mNextUnreliableSeq++), body));
 	return true;
 }
 
 
 void ReliableLink::sendHeartbeat()
 {
-	transmit(makeHeader(PacketFlags::heartbeat(), 0), {});
+	mSignalQueue.push(encode(makeHeader(PacketFlags::heartbeat(), 0), {}));
+}
+
+
+std::vector<std::vector<uint8_t>> ReliableLink::takeOutgoing(const TimePoint now)
+{
+	adaptSendBudget();
+
+	std::vector<std::vector<uint8_t>> pass;
+
+	while (pass.size() < mSendBudget)
+	{
+		if (auto signal = mSignalQueue.pop())
+		{
+			pass.push_back(std::move(*signal));
+			continue;
+		}
+
+		if (auto unreliable = mUnreliableQueue.pop())
+		{
+			pass.push_back(std::move(*unreliable));
+			continue;
+		}
+
+		const auto seq = mDataQueue.pop();
+		if (!seq)
+			break;
+
+		// Acknowledged while it was waiting (a queued retransmission)
+		InFlight *entry = mInFlight.find(*seq);
+		if (!entry || !entry->queued)
+			continue;
+
+		if (entry->transmissions == 0)
+		{
+			entry->firstSent = now;
+			++mStats.dataSent;
+		}
+		else
+		{
+			++mStats.retransmissions;
+		}
+
+		// The timer runs from the moment the fragment really goes out
+		entry->queued	= false;
+		entry->deadline = now + mRtt.timeoutFor(entry->transmissions);
+		++entry->transmissions;
+		scheduleDeadline(entry->deadline);
+
+		pass.push_back(encode(entry->header, entry->body));
+	}
+
+	mLastPassFull = hasOutgoing();
+	return pass;
+}
+
+
+void ReliableLink::adaptSendBudget()
+{
+	if (mLossSinceLastPass)
+	{
+		mSendBudget = std::max(mSendBudget / 2, mConfig.minSendBudget);
+	}
+	else if (mLastPassFull)
+	{
+		const size_t step = std::max<size_t>(mSendBudget / 8, 1);
+		mSendBudget		  = mSendBudget > mConfig.maxSendBudget - step ? mConfig.maxSendBudget : mSendBudget + step;
+	}
+
+	mLossSinceLastPass = false;
 }
 
 
@@ -104,10 +176,10 @@ std::optional<OutboundMessage> ReliableLink::nextQueuedMessage()
 }
 
 
-void ReliableLink::pump(const TimePoint now)
+void ReliableLink::pump()
 {
 	// All in-flight seqs stay within one window, which keeps the SequenceBuffer slots unique
-	while (mNextSendSeq - mSendBase < WindowSize)
+	while (mNextSendSeq - mSendBase < WindowSize && !mDataQueue.full())
 	{
 		if (!mCursor)
 		{
@@ -130,16 +202,12 @@ void ReliableLink::pump(const TimePoint now)
 		}
 
 		InFlight entry;
-		entry.header		= header;
-		entry.body			= std::vector<uint8_t>(fragment.body.begin(), fragment.body.end());
-		entry.firstSent		= now;
-		entry.deadline		= now + mRtt.timeoutFor(0);
-		entry.transmissions = 1;
+		entry.header = header;
+		entry.body	 = std::vector<uint8_t>(fragment.body.begin(), fragment.body.end());
+		entry.queued = true;
 
-		transmit(entry.header, entry.body);
-		++mStats.dataSent;
-		scheduleDeadline(entry.deadline);
 		mInFlight.insert(header.seq, std::move(entry));
+		mDataQueue.push(header.seq);
 
 		if (++mCursor->next >= mCursor->count)
 			mCursor.reset();
@@ -276,7 +344,7 @@ void ReliableLink::handleDataAck(const PacketHeader &header, const TimePoint now
 		mRtt.addSample(std::chrono::duration_cast<RttEstimator::Duration>(now - entry->firstSent));
 
 	advanceSendBase();
-	pump(now);
+	pump();
 }
 
 
@@ -293,9 +361,13 @@ void ReliableLink::onTimer(const TimePoint now)
 	bool failed = false;
 
 	mInFlight.forEach(
-		[&](uint64_t, InFlight &entry)
+		[&](const uint64_t seq, InFlight &entry)
 		{
 			if (failed)
+				return true;
+
+			// A fragment still waiting for a send pass has no running timer
+			if (entry.queued)
 				return true;
 
 			if (now >= entry.deadline)
@@ -306,10 +378,14 @@ void ReliableLink::onTimer(const TimePoint now)
 					return true;
 				}
 
-				entry.deadline = now + mRtt.timeoutFor(entry.transmissions);
-				++entry.transmissions;
-				++mStats.retransmissions;
-				transmit(entry.header, entry.body);
+				mLossSinceLastPass = true;
+
+				// Queued for the next send pass; if the queue is full it stays due and is retried with the next timer check
+				if (mDataQueue.push(seq) == PushResult::Accepted)
+				{
+					entry.queued = true;
+					return true;
+				}
 			}
 
 			scheduleDeadline(entry.deadline);
@@ -371,20 +447,20 @@ PacketHeader ReliableLink::makeHeader(const PacketFlags flags, const uint64_t se
 }
 
 
-void ReliableLink::transmit(const PacketHeader &header, const std::span<const uint8_t> body)
+std::vector<uint8_t> ReliableLink::encode(const PacketHeader &header, const std::span<const uint8_t> body) const
 {
 	// Re-stamped on every transmission: stream IDs may have become known since the first one
 	PacketHeader stamped = header;
 	stamped.srcStreamID	 = mLocalStreamID;
 	stamped.dstStreamID	 = mRemoteStreamID.value_or(0);
 
-	mOutgoing.push_back(encodePacket(stamped, body));
+	return encodePacket(stamped, body);
 }
 
 
 void ReliableLink::sendAck(const PacketKind kind, const uint64_t seq)
 {
-	transmit(makeHeader(PacketFlags::ack(kind), seq), {});
+	mSignalQueue.push(encode(makeHeader(PacketFlags::ack(kind), seq), {}));
 
 	if (kind == PacketKind::DataAck)
 		++mStats.dataAcksSent;
@@ -396,6 +472,12 @@ void ReliableLink::sendAck(const PacketKind kind, const uint64_t seq)
 bool ReliableLink::hasPendingReliable() const
 {
 	return !mInFlight.empty() || mCursor.has_value() || !mControlQueue.empty() || !mApplicationQueue.empty();
+}
+
+
+bool ReliableLink::hasOutgoing() const
+{
+	return !mSignalQueue.empty() || !mUnreliableQueue.empty() || !mDataQueue.empty();
 }
 
 
@@ -425,6 +507,14 @@ void ReliableLink::resetSendState()
 	mSendBase		   = 1;
 	mNextUnreliableSeq = 1;
 	mRtt.reset();
+
+	// Nothing of the old stream may still go out, and the new stream learns the connection quality anew
+	mSignalQueue.clear();
+	mUnreliableQueue.clear();
+	mDataQueue.clear();
+	mSendBudget		   = mConfig.initialSendBudget;
+	mLossSinceLastPass = false;
+	mLastPassFull	   = false;
 }
 
 

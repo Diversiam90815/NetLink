@@ -18,7 +18,7 @@ namespace netlink::channel
 {
 
 // Maximum number of unacknowledged fragments per link and direction (also the receive reorder window)
-inline constexpr size_t WindowSize = 256;
+inline constexpr size_t WindowSize = 1024;
 
 
 struct ReliabilityConfig
@@ -36,6 +36,15 @@ struct ReliabilityConfig
 	int						  maxAckRetransmits{5};	// DataAck retransmissions while waiting for the AckAck
 	size_t					  maxDatagramSize{internal::MaxDatagramSize};	// Largest datagram put on the wire, header included
 	size_t					  maxMessageSize{internal::MaxMessagePayload};	// Largest reassembled message
+
+	// Datagrams one send pass may push into the socket. Adapts per link between min and max: halves after a loss,
+	// grows while passes have more waiting than they may send.
+	size_t					  initialSendBudget{700};
+	size_t					  minSendBudget{16};
+	size_t					  maxSendBudget{WindowSize};
+
+	// Unreliable datagrams waiting for a send pass; when full, the oldest is dropped
+	size_t					  unreliableQueueCapacity{128};
 };
 
 } // namespace netlink::channel
