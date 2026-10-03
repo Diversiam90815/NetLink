@@ -128,7 +128,7 @@ protected:
 			return mCut->load() ? net::Result<size_t>(data.size()) : mInner->sendTo(destination, data);
 		}
 
-		net::Result<net::Datagram> receiveFrom(std::span<uint8_t> buffer, std::chrono::milliseconds timeout) override
+		net::Result<net::Datagram> receiveFrom(std::span<uint8_t> buffer, std::chrono::microseconds timeout) override
 		{
 			auto datagram = mInner->receiveFrom(buffer, timeout);
 			if (datagram && mCut->load())
@@ -136,6 +136,8 @@ protected:
 			return datagram;
 		}
 
+		net::Result<void>  waitReadable(std::chrono::microseconds timeout) override { return mInner->waitReadable(timeout); }
+		void			   interrupt() override { mInner->interrupt(); }
 		net::SocketAddress localAddress() const override { return mInner->localAddress(); }
 		void			   shutdown() override { mInner->shutdown(); }
 
@@ -392,7 +394,7 @@ protected:
 
 		NetLinkCoreDependencies dependencies;
 		dependencies.datagramSocketFactory					  = FakeNet::LossyDatagramSocket::wrap(cuttable(network->factory(address), address), profile);
-		dependencies.channelConfig.reliability.maxRetransmits = 20;
+		dependencies.channelConfig.reliability.failureTimeout = std::chrono::seconds{20};
 		return dependencies;
 	}
 };

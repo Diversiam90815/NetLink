@@ -102,22 +102,12 @@ private:
 };
 
 
-// Sends like an application that respects backpressure: while the send queue is full, it retries.
+// Sends like an application that respects backpressure: while the send queue is full, the send waits for room.
 // False if the message could not be queued within the timeout.
 inline bool sendWithBackpressure(netlink::PeerChannel &channel, const std::string &to, const uint32_t type, std::span<const uint8_t> payload,
 								 const std::chrono::milliseconds timeout = WaitTimeout)
 {
-	const auto deadline = Clock::now() + timeout;
-
-	while (!channel.sendMessage(to, type, payload, netlink::DeliveryMode::ReliableOrdered))
-	{
-		if (Clock::now() >= deadline)
-			return false;
-
-		std::this_thread::yield();
-	}
-
-	return true;
+	return channel.sendMessage(to, type, payload, netlink::DeliveryMode::ReliableOrdered, timeout);
 }
 
 

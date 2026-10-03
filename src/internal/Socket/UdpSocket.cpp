@@ -56,17 +56,40 @@ Result<size_t> UdpSocket::sendTo(const SocketAddress &destination, const std::sp
 }
 
 
-Result<Datagram> UdpSocket::receiveFrom(const std::span<uint8_t> buffer, const std::chrono::milliseconds timeout)
+Result<size_t> UdpSocket::sendParts(const SocketAddress &destination, const std::span<const uint8_t> head, const std::span<const uint8_t> body)
 {
-	if (auto ready = mHandle.wait(WaitFor::Readable, timeout); !ready)
-		return std::unexpected(ready.error());
+	return platform::sendDatagram(mHandle.get(), destination, head, body);
+}
 
-	auto datagram = platform::receiveDatagram(mHandle.get(), buffer);
 
-	if (!datagram && datagram.error() == SocketError::WouldBlock)
-		return std::unexpected(SocketError::Timeout);
+Result<Datagram> UdpSocket::receiveFrom(const std::span<uint8_t> buffer, const std::chrono::microseconds timeout)
+{
+	const auto deadline = SocketHandle::Clock::now() + timeout;
 
-	return datagram;
+	while (true)
+	{
+		if (mHandle.isShutdown())
+			return std::unexpected(SocketError::Closed);
+
+		// Reading comes first: under load a datagram is already waiting, and the wait would only cost a second system call
+		mHandle.noteReceiveAttempt();
+		auto datagram = platform::receiveDatagram(mHandle.get(), buffer);
+
+		if (datagram || datagram.error() != SocketError::WouldBlock)
+			return datagram;
+
+		if (timeout <= std::chrono::microseconds::zero())
+			return std::unexpected(SocketError::Timeout);
+
+		if (auto ready = mHandle.waitReadable(deadline); !ready)
+			return std::unexpected(ready.error());
+	}
+}
+
+
+Result<void> UdpSocket::waitReadable(const std::chrono::microseconds timeout)
+{
+	return mHandle.waitReadable(SocketHandle::Clock::now() + timeout);
 }
 
 } // namespace netlink::net

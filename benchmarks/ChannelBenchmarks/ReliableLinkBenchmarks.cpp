@@ -34,7 +34,7 @@ static void BM_ReliableLink_Transfer(benchmark::State &state)
 
 	for (auto _ : state)
 	{
-		wire.a.queueReliable(ChannelId::Application, payload);
+		wire.a.queueReliable(ChannelId::Application, 0, payload);
 
 		if (!wire.settle(drop) || wire.takeDeliveredBytesAtB() != size)
 		{

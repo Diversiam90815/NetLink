@@ -5,7 +5,7 @@
 
 cmake_minimum_required(VERSION 4.0)
 
-set(PROJECT_VERSION 0.3.0)
+set(PROJECT_VERSION 0.4.0)
 set(NETLINK_BUILD_NUMBER "0" CACHE STRING "Build number")
 
 project(NetLink VERSION ${PROJECT_VERSION} LANGUAGES CXX)
@@ -41,24 +41,28 @@ file(GLOB_RECURSE NETWORKING_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp)
 file(GLOB_RECURSE NETWORKING_HEADERS ${CMAKE_CURRENT_SOURCE_DIR}/include/*.h)
 file(GLOB_RECURSE NETWORKING_INTERNAL_HEADERS ${CMAKE_CURRENT_SOURCE_DIR}/src/*.h)
 
-# NetworkInformation and the socket platform shim have one backend per platform
+# NetworkInformation, the socket platform shim and the deadline timer have one backend per platform
 list(FILTER NETWORKING_SOURCES EXCLUDE REGEX ".*NetworkInformation(Windows|Linux)\\.cpp$")
 list(FILTER NETWORKING_SOURCES EXCLUDE REGEX ".*SocketPlatform(Windows|Posix)\\.cpp$")
+list(FILTER NETWORKING_SOURCES EXCLUDE REGEX ".*DeadlineTimer(Windows|Std)\\.cpp$")
 
 if (WIN32)
     list(APPEND NETWORKING_SOURCES
             ${CMAKE_CURRENT_SOURCE_DIR}/src/internal/Network/NetworkInformationWindows.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/src/internal/Socket/Platform/SocketPlatformWindows.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/internal/Util/Timing/DeadlineTimerWindows.cpp
     )
 elseif (APPLE)
     list(APPEND NETWORKING_SOURCES
             ${CMAKE_CURRENT_SOURCE_DIR}/src/internal/Network/NetworkInformationMac.mm
             ${CMAKE_CURRENT_SOURCE_DIR}/src/internal/Socket/Platform/SocketPlatformPosix.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/internal/Util/Timing/DeadlineTimerStd.cpp
     )
 elseif (UNIX)
     list(APPEND NETWORKING_SOURCES
             ${CMAKE_CURRENT_SOURCE_DIR}/src/internal/Network/NetworkInformationLinux.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/src/internal/Socket/Platform/SocketPlatformPosix.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/internal/Util/Timing/DeadlineTimerStd.cpp
     )
 endif ()
 
@@ -106,7 +110,7 @@ endif ()
 target_link_libraries(${PROJECT_NAME} PRIVATE $<BUILD_INTERFACE:nlohmann_json::nlohmann_json>)
 
 if (WIN32)
-    target_link_libraries(${PROJECT_NAME} PRIVATE iphlpapi ws2_32 wlanapi)
+    target_link_libraries(${PROJECT_NAME} PRIVATE iphlpapi ws2_32 wlanapi winmm)
 elseif (APPLE)
     target_link_libraries(${PROJECT_NAME} PRIVATE
             "-framework CoreWLAN"

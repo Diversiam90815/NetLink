@@ -6,8 +6,6 @@
 */
 
 
-#include <future>
-
 #include "PeerValidationService.h"
 #include "Checks/SecretCompatibilityCheck.h"
 #include "Checks/VersionCompatibilityCheck.h"
@@ -134,26 +132,17 @@ netlink::ValidationResult netlink::PeerValidationService::performValidation(cons
 
 	result.remoteEndpoint = pending->remoteEndpoint;
 
-	// Evaluate every registered check concurrently
-	std::vector<std::pair<ICompatibilityCheck *, std::future<bool>>> futures;
+	// Every check only compares data it already holds, so they are evaluated right here
+	const ICompatibilityCheck *firstFailure = nullptr;
 
 	{
 		std::lock_guard<std::mutex> lock(mChecksMutex);
-		futures.reserve(mChecks.size());
 
-		for (auto &check : mChecks)
+		for (const auto &check : mChecks)
 		{
-			ICompatibilityCheck *checkPtr = check.get();
-			futures.emplace_back(checkPtr, std::async(std::launch::async, [checkPtr, computerName] { return checkPtr->evaluate(computerName); }));
+			if (!check->evaluate(computerName) && firstFailure == nullptr)
+				firstFailure = check.get();
 		}
-	}
-
-	const ICompatibilityCheck *firstFailure = nullptr;
-
-	for (auto &[check, future] : futures)
-	{
-		if (const bool passed = future.get(); !passed && firstFailure == nullptr)
-			firstFailure = check;
 	}
 
 	// Pull remote version (if that check ran) for reporting purposes, regardless of pass/fail

@@ -70,7 +70,7 @@ public:
 
 	ConnectionState		  getConnectionState() const { return mState.load(); }
 
-	bool				  send(uint32_t type, const std::vector<uint8_t> &payload, DeliveryMode mode);
+	bool				  send(uint32_t type, const std::vector<uint8_t> &payload, DeliveryMode mode, std::chrono::milliseconds timeout = {});
 
 	// Queues a public callback invocation onto the event thread
 	void				  postEvent(Event event);

@@ -153,6 +153,53 @@ Result<size_t> sendDatagram(const NativeHandle handle, const SocketAddress &to, 
 }
 
 
+Result<size_t> sendDatagram(const NativeHandle handle, const SocketAddress &to, const std::span<const uint8_t> head, const std::span<const uint8_t> body)
+{
+	auto addr = toSockaddr(to);
+	if (!addr)
+		return std::unexpected(addr.error());
+
+	while (true)
+	{
+#if defined(_WIN32)
+		WSABUF buffers[2];
+		buffers[0].buf = const_cast<char *>(reinterpret_cast<const char *>(head.data()));
+		buffers[0].len = static_cast<ULONG>(head.size());
+		buffers[1].buf = const_cast<char *>(reinterpret_cast<const char *>(body.data()));
+		buffers[1].len = static_cast<ULONG>(body.size());
+
+		DWORD	   sent	  = 0;
+		const bool failed = WSASendTo(toNative(handle), buffers, body.empty() ? 1 : 2, &sent, 0, reinterpret_cast<sockaddr *>(&*addr), sizeof(sockaddr_in), nullptr, nullptr) == SOCKET_ERROR;
+#else
+		iovec parts[2];
+		parts[0].iov_base = const_cast<uint8_t *>(head.data());
+		parts[0].iov_len  = head.size();
+		parts[1].iov_base = const_cast<uint8_t *>(body.data());
+		parts[1].iov_len  = body.size();
+
+		msghdr message{};
+		message.msg_name	= &*addr;
+		message.msg_namelen = sizeof(sockaddr_in);
+		message.msg_iov		= parts;
+		message.msg_iovlen	= body.empty() ? 1 : 2;
+
+		const auto result = ::sendmsg(toNative(handle), &message, SendFlags);
+		const bool failed = result == SocketErrorRet;
+		const auto sent	  = result;
+#endif
+
+		if (!failed)
+			return static_cast<size_t>(sent);
+
+		const int code = lastNativeError();
+		if (isInterrupted(code))
+			continue;
+
+		return std::unexpected(isWouldBlock(code) ? SocketError::WouldBlock : mapNativeError(code));
+	}
+}
+
+
 Result<Datagram> receiveDatagram(const NativeHandle handle, std::span<uint8_t> buffer)
 {
 	while (true)

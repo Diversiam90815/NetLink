@@ -18,6 +18,8 @@
 #include <thread>
 #include <utility>
 
+#include "Util/Timing/DeadlineTimer.h"
+
 
 /**
  * @brief	Identifies a specific timeout instance
@@ -54,7 +56,8 @@ using TimeoutCallback = std::function<void(const TimeoutKey &key)>;
 class TimeoutService
 {
 public:
-	TimeoutService() = default;
+	// The timer decides how precisely timeouts fire; the default is the platform's high resolution timer
+	explicit TimeoutService(std::unique_ptr<netlink::IDeadlineTimer> timer = netlink::makeDeadlineTimer());
 	~TimeoutService();
 
 	TimeoutService(const TimeoutService &)			  = delete;
@@ -122,7 +125,7 @@ private:
 	void										   waitForRunningCallback(const std::function<bool(const TimeoutKey &)> &matches, std::unique_lock<std::mutex> &lock);
 
 	mutable std::mutex							   mMutex;
-	std::condition_variable						   mWakeUp;		  // new timeout / stop
+	std::unique_ptr<netlink::IDeadlineTimer>	   mTimer;		  // the worker waits on it; woken by a new timeout / stop
 	std::condition_variable						   mCallbackDone; // a callback finished
 	Timeouts									   mActiveTimeouts;
 	std::set<std::pair<Clock::time_point, TimeoutKey>> mDeadlines; // the same timeouts, ordered by deadline: the next one is begin()

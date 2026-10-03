@@ -7,13 +7,12 @@
 
 #include <benchmark/benchmark.h>
 
-#include <algorithm>
-#include <random>
 #include <span>
 #include <vector>
 
 #include "BenchUtil.h"
 #include "Channel/Fragmentation/FragmentationService.h"
+#include "Channel/Fragmentation/MessageAssembler.h"
 #include "Channel/Reliability/ReliableLink.h"
 #include "NetLinkConstants.h"
 
@@ -59,34 +58,27 @@ static std::vector<Arrival> arrivalsOf(std::span<const uint8_t> message)
 }
 
 
-// Time: all fragments of one message fed into accept() until the whole message comes out, in order or shuffled
+// Time: all fragments of one message fed into the assembler, in the order their stream delivers them, until the whole
+// message comes out. Reordering is not a case here: the link's reorder buffer sorts that out before.
 static void BM_Fragmentation_Reassemble(benchmark::State &state)
 {
-	const auto	   message	= bench::makePayload(static_cast<size_t>(state.range(0)));
-	constexpr auto peer		= net::SocketAddress{.ip = bench::loopback(), .port = 50000};
-	auto		   arrivals = arrivalsOf(message);
+	const auto		 message  = bench::makePayload(static_cast<size_t>(state.range(0)));
+	const auto		 arrivals = arrivalsOf(message);
 
-	if (state.range(1) != 0)
-		std::ranges::shuffle(arrivals, std::mt19937{7});
-
-	FragmentationService service;
+	MessageAssembler assembler;
 
 	for (auto _ : state)
 	{
-		// A completed message leaves no partial state behind, so the same seqs can be fed again
 		for (const auto &[header, body] : arrivals)
 		{
-			auto reassembled = service.accept(peer, header, body);
+			auto reassembled = assembler.accept(header, body);
 			benchmark::DoNotOptimize(reassembled);
 		}
 	}
 
 	state.SetBytesProcessed(static_cast<int64_t>(state.iterations() * message.size()));
 }
-BENCHMARK(BM_Fragmentation_Reassemble)->ArgNames({"bytes", "shuffled"})->ArgsProduct({{64 * bench::KiB}, {0, 1}})->Unit(benchmark::kMicrosecond);
-BENCHMARK(BM_Fragmentation_Reassemble)
-	->ArgNames({"bytes", "shuffled"})
-	->ArgsProduct({{bench::MiB, static_cast<int64_t>(internal::MaxMessagePayload)}, {0, 1}})
-	->Unit(benchmark::kMillisecond);
+BENCHMARK(BM_Fragmentation_Reassemble)->ArgName("bytes")->Arg(64 * bench::KiB)->Unit(benchmark::kMicrosecond);
+BENCHMARK(BM_Fragmentation_Reassemble)->ArgName("bytes")->Arg(bench::MiB)->Arg(static_cast<int64_t>(internal::MaxMessagePayload))->Unit(benchmark::kMillisecond);
 
 } // namespace ChannelBenchmarks

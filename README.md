@@ -28,13 +28,16 @@ Key design goals:
 - **Peer Expiry**: a peer that stops announcing is dropped and reported via `onRemoteLost`
 - **Peer Validation**: shared-secret and protocol-version checking before a connection is accepted
 - **Reliable UDP Channel**: one dedicated UDP socket carries validation, the connection flow and application data. Every
-  message has a unique key and is confirmed by a `Data → DataAck → AckAck` exchange; anything unconfirmed is
-  retransmitted
+  packet has a unique key and is confirmed by a `Data → DataAck → AckAck` exchange; anything unconfirmed is
+  retransmitted. One acknowledgement datagram confirms everything that arrived since the last one
+- **Congestion and Flow Control**: the sending rate adapts to the path (a lost packet is resent as soon as later ones
+  are acknowledged), and an application that falls behind slows its sender down instead of piling up memory
 - **Ordered, Exactly-Once Delivery**: `DeliveryMode::ReliableOrdered` messages arrive once and in send order, up to 16
   MiB (larger messages are fragmented transparently)
 - **Unreliable Mode**: `DeliveryMode::UnreliableSequenced` for high-rate state updates: no acknowledgements, stale
   messages are dropped
-- **Backpressure**: a bounded send queue per peer with a configurable `OverflowPolicy` (`DropNewest` / `DropOldest`)
+- **Backpressure**: a bounded send queue per peer with a configurable `OverflowPolicy` (`DropNewest` / `DropOldest`);
+  `send()` can wait for room instead of failing
 - **Connection Loss Detection**: heartbeats supervise an idle session; a remote that stops acknowledging or goes silent
   is reported as `ConnectionState::Disconnected`; a declined invitation carries the remote's reason
 - **Typed Messages**: opaque `Message` envelope with a `uint32_t` type tag and binary payload
@@ -58,7 +61,7 @@ Key design goals:
 │         │         ┌───────▼──────────────────────┐   │
 │         │         │ PeerChannel (1 UDP socket)   │   │
 │         │         │  ReliableLink per peer       │   │
-│         │         │  FragmentationService        │   │
+│         │         │  MessageAssembler per stream │   │
 │         │         │  HeartbeatService            │   │
 │         │         └───────┬──────────────────────┘   │
 │  ┌──────▼─────────────────▼───────────────────────┐  │
@@ -78,36 +81,60 @@ Key design goals:
 |-------------------------|-------------------------------------------------------------------------------------------------------|
 | `DiscoveryService`      | UDP broadcast - advertises presence and collects peer announcements                                   |
 | `ConnectionService`     | Orchestrates the connection lifecycle (invite → answer → ready flags) with per-state timeouts         |
-| `PeerChannel`           | Owns the dedicated UDP socket and its I/O thread; routes control signals and application messages     |
-| `ReliableLink`          | Per-peer reliability: `seq`, stream IDs, `Data`/`DataAck`/`AckAck`, retransmit, ordering, send window |
-| `FragmentationService`  | Splits messages larger than one datagram and reassembles them                                         |
+| `PeerChannel`           | Owns the dedicated UDP socket, its I/O thread and the delivery thread that runs the callbacks         |
+| `ReliableLink`          | Per-peer reliability: `seq`, stream IDs, `Data`/`DataAck`/`AckAck`, retransmit, ordering, windows     |
+| `FragmentationService`  | Splits messages larger than one datagram into fragments                                               |
+| `MessageAssembler`      | Puts the fragments of one stream back together, copying every byte once                               |
 | `HeartbeatService`      | Keeps an idle session alive and detects a silent peer                                                 |
 | `PeerValidationService` | Validates shared secret and protocol version before a connection is accepted                          |
 | `NetworkInformation`    | Adapter enumeration (Windows / Linux / macOS backends); fires adapter-change events                   |
 | Socket layer            | `UdpSocket` with `std::expected` error handling; OS specifics isolated in `Socket/Platform`           |
 | `TimeoutService`        | Configurable timeout management across all async operations                                           |
+| `IDeadlineTimer`        | Interruptible wait until a point in time; one implementation per platform (`Util/Timing`)             |
 
 ### Reliable UDP channel
 
 Every datagram starts with a 20-byte header (magic, version, a bit-packed flags byte, source and destination
-stream ID, 64-bit sequence number), extended by 4 bytes for fragments:
+stream ID, 64-bit sequence number), extended by 4 bytes for fragments and by 4 bytes for the message type on the
+packet that starts a message:
 
 ```
 flags: bit 0-2 kind (Data, DataAck, AckAck, Heartbeat) · 3 reliable · 4 fragmented · 5 last fragment · 6 application channel
 ```
 
-- **Sequencing**: every packet carries a per-peer 64-bit `seq` that never wraps, plus a random **stream ID**:
+- **Sequencing**: every packet carries a 64-bit `seq` that never wraps, plus a random **stream ID**:
   the stream ID identifies one lifetime of a peer's stream, so a restarted peer (whose `seq` starts at 1 again)
   is detected and stale packets are ignored.
-- **Three-way confirmation**: the sender retransmits `Data` until the `DataAck` arrives (RFC 6298 RTO with backoff);
-  the receiver retransmits the `DataAck` until the `AckAck` arrives. Duplicates are acknowledged again but delivered
-  once.
-- **Ordering and flow control**: one ordered stream per peer with a 256-packet send/receive window. Control signals
-  (validation, connection flow) take priority over queued application messages.
+- **Three-way confirmation**: the sender retransmits `Data` until the `DataAck` arrives; the receiver retransmits the
+  `DataAck` until the `AckAck` arrives. Duplicates are acknowledged again but delivered once. Acknowledgements are
+  batched: one `DataAck` lists every seq that arrived since the last one (as ranges) and one `AckAck` confirms them, so
+  the exchange costs two small datagrams per batch instead of two per packet. Both also carry the highest seq up to
+  which everything is confirmed, which makes a lost acknowledgement harmless: the next one covers it.
+- **Channels**: control signals (validation, connection flow) and application messages are two ordered streams with
+  their own seqs and a 1024-packet send/receive window each. Application data can neither delay a control signal nor
+  hold it back at the receiver.
+- **Loss recovery**: a packet is resent as soon as three packets sent after it are acknowledged (fast retransmit),
+  otherwise after its retransmission timeout (RFC 6298, backing off while nothing is acknowledged).
+- **Congestion control**: a congestion window limits the packets in flight. It doubles per round trip until the first
+  loss, then grows by one packet per round trip and halves with every round of losses.
+- **Flow control**: every `DataAck` tells the sender whether the receiver's application keeps up. While it does not,
+  the sender pauses the application channel and only asks again every 50 ms.
 - **Fragmentation**: messages above one datagram (1200 bytes on the wire, below the Ethernet MTU) are split into
-  fragments, each with its own `seq`.
-- **Loss of the peer**: a packet that stays unacknowledged after all retransmissions, a session peer that stays silent
-  for 5 s, or a peer restart ends the session.
+  fragments, each with its own `seq`. Fragments are sent straight out of the message and appended straight into the
+  reassembled one: a payload byte is copied once on each side.
+- **Loss of the peer**: data that stays unacknowledged for 5 s without any acknowledgement arriving, a session peer
+  that stays silent for 5 s, or a peer restart ends the session.
+
+### Threads
+
+| Thread            | Does                                                                                              |
+|-------------------|---------------------------------------------------------------------------------------------------|
+| I/O thread        | Reads the socket, acknowledges, retransmits, sends heartbeats. Never runs a callback.              |
+| Delivery thread   | Hands control signals to the connection and validation services                                   |
+| Event thread      | Runs the application's callbacks, one at a time                                                   |
+| Timeout thread    | Fires the timeouts of the connection and validation flow                                          |
+
+A callback that takes long therefore delays the next callback, but neither acknowledgements nor control signals.
 
 ## Public API
 
@@ -201,8 +228,8 @@ net.shutdown();
 | `respondToConnection(accepted)` | (Host) accept or reject a pending inbound connection                                                                                                                                        |
 | `disconnect()`                  | Close the active session (the remote is notified)                                                                                                                                           |
 | `getConnectionState()`          | Query the current `ConnectionState`                                                                                                                                                         |
-| `send(message, mode)`           | Send a `Message` to the connected peer (`mode` defaults to `ReliableOrdered`); false when not connected, when an unreliable message exceeds one datagram, or when the send queue refused it |
-| `send(type, payload, mode)`     | Convenience overload — constructs a `Message` inline                                                                                                                                        |
+| `send(message, mode, timeout)`  | Send a `Message` to the connected peer (`mode` defaults to `ReliableOrdered`); false when not connected, when an unreliable message exceeds one datagram, or when the send queue refused it. With a `timeout`, a reliable message waits that long for room in a full queue before it is refused |
+| `send(type, payload, mode, timeout)` | Convenience overload — constructs a `Message` inline                                                                                                                                   |
 | `getAvailableAdapters()`        | List all network adapters with their priority hints                                                                                                                                         |
 | `setActiveAdapter(id)`          | Switch the active network adapter by ID                                                                                                                                                     |
 | `getActiveAdapterID()`          | ID of the currently active adapter (0 if none)                                                                                                                                              |
@@ -297,15 +324,17 @@ is never run by CI or ctest.
 | Pattern                  | Where applied                                                                                                                                                                                  |
 |--------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | **Pimpl**                | `NetLink` exposes zero implementation headers — `struct Impl` is defined only in `src/NetLink.cpp`                                                                                             |
-| **Pure protocol core**   | `ReliableLink`, `FragmentationService` and `HeartbeatService` contain no sockets or threads and take the time as a parameter, so loss, duplication and reordering are tested deterministically |
+| **Pure protocol core**   | `ReliableLink`, `MessageAssembler` and `HeartbeatService` contain no sockets or threads and take the time as a parameter, so loss, duplication and reordering are tested deterministically     |
 | **Seams for testing**    | `IDatagramSocket` lets the whole stack run on an in-memory network with configurable loss (`tests/Fakes`)                                                                                      |
 | **Observer / Callbacks** | `NetLinkCallbacks` wires application code to async events without coupling to internals                                                                                                        |
-| **Active Object**        | `ThreadBase` backs the single I/O thread of `PeerChannel` (receive, retransmit, heartbeats)                                                                                                    |
+| **Active Object**        | `ThreadBase` backs the single I/O thread of `PeerChannel` (receive, retransmit, heartbeats); callbacks run on separate threads fed by a `TaskQueue`                                            |
+| **Platform seams**       | `IDeadlineTimer` and the socket `ReadWaiter` hide how each operating system waits precisely (high resolution waitable timer, `ppoll`, `kqueue`)                                                 |
 
 ## Platform
 
-Windows, Linux and macOS. Platform specific code is confined to `src/internal/Network/NetworkInformation*` and
-`src/internal/Socket/Platform/SocketPlatform*`; CMake selects the matching backend.
+Windows, Linux and macOS. Platform specific code is confined to `src/internal/Network/NetworkInformation*`,
+`src/internal/Socket/Platform/SocketPlatform*` and `src/internal/Util/Timing/DeadlineTimer*`; CMake selects the
+matching backend.
 
 ## Compatibility
 
@@ -316,6 +345,10 @@ versioning of its own.
 
 NetLink 0.3 replaced the TCP data connection by the reliable UDP channel. Its wire protocol is not compatible with
 0.2: peers of both versions do not validate each other.
+
+NetLink 0.4 changed the wire protocol of that channel (batched acknowledgements, separate streams for control signals
+and application messages, congestion and flow control). Peers of 0.3 and 0.4 ignore each other's channel packets and
+therefore never validate each other.
 
 Two peers are compatible when the **major and minor** components of that version match.
 The patch and trailing build number are ignored, so builds from different commits of the

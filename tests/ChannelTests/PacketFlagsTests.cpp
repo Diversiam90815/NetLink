@@ -72,8 +72,10 @@ TEST(PacketFlags, FactoriesProduceValidFlags)
 {
 	EXPECT_TRUE(PacketFlags::data(ChannelId::Control, true).isValid());
 	EXPECT_TRUE(PacketFlags::data(ChannelId::Application, false).isValid());
-	EXPECT_TRUE(PacketFlags::ack(PacketKind::DataAck).isValid());
-	EXPECT_TRUE(PacketFlags::ack(PacketKind::AckAck).isValid());
+	EXPECT_TRUE(PacketFlags::ack(PacketKind::DataAck, ChannelId::Control).isValid());
+	EXPECT_TRUE(PacketFlags::ack(PacketKind::AckAck, ChannelId::Application).isValid());
+	EXPECT_EQ(PacketFlags::ack(PacketKind::DataAck, ChannelId::Application).channel(), ChannelId::Application);
+	EXPECT_EQ(PacketFlags::ack(PacketKind::AckAck, ChannelId::Control).channel(), ChannelId::Control);
 	EXPECT_TRUE(PacketFlags::heartbeat().isValid());
 }
 
@@ -96,7 +98,7 @@ TEST(PacketFlags, ImpossibleCombinationsAreRejected)
 	unreliableFragment.set(FlagBit::Fragmented);
 	EXPECT_FALSE(unreliableFragment.isValid()) << "Only reliable data is fragmented";
 
-	PacketFlags fragmentedAck = PacketFlags::ack(PacketKind::DataAck);
+	PacketFlags fragmentedAck = PacketFlags::ack(PacketKind::DataAck, ChannelId::Control);
 	fragmentedAck.set(FlagBit::Fragmented);
 	EXPECT_FALSE(fragmentedAck.isValid()) << "Acknowledgements carry no content to fragment";
 

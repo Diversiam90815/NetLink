@@ -168,15 +168,15 @@ netlink::ConnectionState netlink::NetLink::getConnectionState() const
 // Messaging
 // ---------------------------------------------------------------------------
 
-bool netlink::NetLink::send(const Message &message, const DeliveryMode mode) const
+bool netlink::NetLink::send(const Message &message, const DeliveryMode mode, const std::chrono::milliseconds timeout) const
 {
-	return pImpl->core.send(message.type, message.data, mode);
+	return pImpl->core.send(message.type, message.data, mode, timeout);
 }
 
 
-bool netlink::NetLink::send(const uint32_t type, const std::vector<uint8_t> &payload, const DeliveryMode mode) const
+bool netlink::NetLink::send(const uint32_t type, const std::vector<uint8_t> &payload, const DeliveryMode mode, const std::chrono::milliseconds timeout) const
 {
-	return pImpl->core.send(type, payload, mode);
+	return pImpl->core.send(type, payload, mode, timeout);
 }
 
 

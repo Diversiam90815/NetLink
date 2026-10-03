@@ -10,6 +10,9 @@
 #include <algorithm>
 
 
+TimeoutService::TimeoutService(std::unique_ptr<netlink::IDeadlineTimer> timer) : mTimer(timer ? std::move(timer) : netlink::makeDeadlineTimer()) {}
+
+
 TimeoutService::~TimeoutService()
 {
 	{
@@ -18,7 +21,7 @@ TimeoutService::~TimeoutService()
 		mActiveTimeouts.clear();
 		mDeadlines.clear();
 	}
-	mWakeUp.notify_all();
+	mTimer->wake();
 
 	if (mWorker.joinable())
 	{
@@ -57,7 +60,7 @@ void TimeoutService::startTimeout(const TimeoutKey &key, const int timeoutMS, Ti
 			mWorker = std::thread(&TimeoutService::run, this);
 	}
 
-	mWakeUp.notify_all();
+	mTimer->wake();
 }
 
 
@@ -152,18 +155,13 @@ void TimeoutService::run()
 
 	while (!mStopping)
 	{
-		if (mDeadlines.empty())
-		{
-			mWakeUp.wait(lock, [this] { return mStopping || !mDeadlines.empty(); });
-			continue;
-		}
-
 		// A copy: the entry may be cancelled while the lock is released during the wait
-		const auto deadline = mDeadlines.begin()->first;
-
-		if (Clock::now() < deadline)
+		if (const auto deadline = mDeadlines.empty() ? netlink::IDeadlineTimer::Never : mDeadlines.begin()->first; mDeadlines.empty() || Clock::now() < deadline)
 		{
-			mWakeUp.wait_until(lock, deadline); // re-evaluated after new/cancelled timeouts
+			// A wake-up between unlocking and waiting is not lost: it ends this wait. Re-evaluated after new timeouts.
+			lock.unlock();
+			mTimer->waitUntil(deadline);
+			lock.lock();
 			continue;
 		}
 

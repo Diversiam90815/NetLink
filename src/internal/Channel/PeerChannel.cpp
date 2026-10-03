@@ -8,19 +8,20 @@
 #include "PeerChannel.h"
 
 #include <algorithm>
+#include <iterator>
+#include <ranges>
 #include <thread>
 
 #include "NetLinkConstants.h"
 #include "NetLinkLog.h"
-#include "Protocol/ByteOrder.h"
 #include "Socket/UdpSocket.h"
 
 using json = nlohmann::json;
 
 
-netlink::PeerChannel::PeerChannel(net::DatagramSocketFactory socketFactory, const PeerChannelConfig &config)
-	: mSocketFactory(socketFactory ? std::move(socketFactory) : net::UdpSocket::factory()), mReceiveBuffer(internal::PackageBufferSize), mConfig(config),
-	  mFragmentation(config.reliability.maxMessageSize), mHeartbeat(config.heartbeat)
+netlink::PeerChannel::PeerChannel(net::DatagramSocketFactory socketFactory, const PeerChannelConfig &config, TaskQueue *applicationQueue)
+	: mSocketFactory(socketFactory ? std::move(socketFactory) : net::UdpSocket::factory()), mReceiveBuffer(internal::PackageBufferSize), mApplicationQueue(applicationQueue),
+	  mConfig(config), mHeartbeat(config.heartbeat)
 {
 }
 
@@ -70,8 +71,7 @@ void netlink::PeerChannel::deinit()
 void netlink::PeerChannel::setConfig(const PeerChannelConfig &config)
 {
 	std::lock_guard<std::mutex> lock(mLinksMutex);
-	mConfig		   = config;
-	mFragmentation = channel::FragmentationService(config.reliability.maxMessageSize);
+	mConfig = config;
 	mHeartbeat.setConfig(config.heartbeat);
 }
 
@@ -124,8 +124,8 @@ void netlink::PeerChannel::resetLinks()
 	{
 		std::lock_guard<std::mutex> lock(mLinksMutex);
 		mLinks.clear();
-		mFragmentation.clear();
 		mHeartbeat.clear();
+		mEarliestDeadline.reset();
 	}
 	mLinksChanged.notify_all();
 }
@@ -143,9 +143,14 @@ void netlink::PeerChannel::registerPeer(const std::string &displayName, const ne
 		std::lock_guard<std::mutex> lock(mPeerRegistryMutex);
 
 		if (const auto it = mPeerRegistry.find(displayName); it != mPeerRegistry.end())
+		{
 			previous = it->second;
+			forgetAddress(previous.address(), displayName);
+		}
 
-		mPeerRegistry[displayName] = {.IPv4 = ipv4, .channelPort = channelPort};
+		const PeerEndpoint endpoint{.IPv4 = ipv4, .channelPort = channelPort};
+		mPeerRegistry[displayName]			= endpoint;
+		mNameByAddress[endpoint.address()] = displayName;
 	}
 
 	NETLINK_LOG_DEBUG("Registered peer {} -> {}:{}", displayName, ipv4.toString(), channelPort);
@@ -156,7 +161,6 @@ void netlink::PeerChannel::registerPeer(const std::string &displayName, const ne
 		{
 			std::lock_guard<std::mutex> lock(mLinksMutex);
 			mLinks.erase(previous.address());
-			mFragmentation.reset(previous.address());
 			mHeartbeat.unwatch(previous.address());
 		}
 		mLinksChanged.notify_all();
@@ -175,6 +179,7 @@ void netlink::PeerChannel::unregisterPeer(const std::string &displayName)
 		{
 			removed = it->second;
 			mPeerRegistry.erase(it);
+			forgetAddress(removed.address(), displayName);
 		}
 	}
 
@@ -183,7 +188,6 @@ void netlink::PeerChannel::unregisterPeer(const std::string &displayName)
 		{
 			std::lock_guard<std::mutex> lock(mLinksMutex);
 			mLinks.erase(removed.address());
-			mFragmentation.reset(removed.address());
 			mHeartbeat.unwatch(removed.address());
 		}
 		mLinksChanged.notify_all();
@@ -212,13 +216,28 @@ std::string netlink::PeerChannel::nameOf(const net::SocketAddress &address) cons
 {
 	std::lock_guard<std::mutex> lock(mPeerRegistryMutex);
 
+	const auto					it = mNameByAddress.find(address);
+	return it != mNameByAddress.end() ? it->second : std::string{};
+}
+
+
+void netlink::PeerChannel::forgetAddress(const net::SocketAddress &address, const std::string &displayName)
+{
+	const auto it = mNameByAddress.find(address);
+	if (it == mNameByAddress.end() || it->second != displayName)
+		return;
+
+	mNameByAddress.erase(it);
+
+	// Another peer registered under the same address keeps resolving
 	for (const auto &[name, endpoint] : mPeerRegistry)
 	{
-		if (endpoint.address() == address)
-			return name;
+		if (name != displayName && endpoint.address() == address)
+		{
+			mNameByAddress[address] = name;
+			return;
+		}
 	}
-
-	return {};
 }
 
 
@@ -290,7 +309,7 @@ bool netlink::PeerChannel::sendSignal(const std::string &computerName, SignalTyp
 	}
 
 	const std::string encoded = json(packet).dump();
-	const bool		  queued  = queueReliable(peer, channel::ChannelId::Control, std::vector<uint8_t>(encoded.begin(), encoded.end()));
+	const bool		  queued  = queueReliable(peer, channel::ChannelId::Control, 0, std::vector<uint8_t>(encoded.begin(), encoded.end()));
 
 	if (queued)
 		NETLINK_LOG_DEBUG("Signal queued for {} (type={})", computerName, static_cast<int>(type));
@@ -299,19 +318,16 @@ bool netlink::PeerChannel::sendSignal(const std::string &computerName, SignalTyp
 }
 
 
-bool netlink::PeerChannel::sendMessage(const std::string &computerName, const uint32_t type, std::span<const uint8_t> data, const DeliveryMode mode)
+bool netlink::PeerChannel::sendMessage(const std::string &computerName, const uint32_t type, std::span<const uint8_t> data, const DeliveryMode mode,
+									   const std::chrono::milliseconds timeout)
 {
 	const auto peer = resolvePeer(computerName);
 	if (!peer.isValid())
 		return false;
 
-	// Application body: [u32 type][data]
-	std::vector<uint8_t> body(sizeof(uint32_t) + data.size());
-	channel::writeUint32(body.data(), type);
-	std::ranges::copy(data, body.begin() + sizeof(uint32_t));
-
+	// The type travels as the tag of the message: the payload is copied once, into the buffer its fragments are sent from
 	if (mode == DeliveryMode::ReliableOrdered)
-		return queueReliable(peer, channel::ChannelId::Application, std::move(body));
+		return queueReliable(peer, channel::ChannelId::Application, type, std::vector<uint8_t>(data.begin(), data.end()), timeout);
 
 	if (!mInitialized.load() || !socket())
 		return false;
@@ -326,8 +342,8 @@ bool netlink::PeerChannel::sendMessage(const std::string &computerName, const ui
 		if (!link)
 			return false;
 
-		sent = link->sendUnreliable(channel::ChannelId::Application, body);
-		collect(peer.address(), *link, batch, Clock::now());
+		sent = link->sendUnreliable(channel::ChannelId::Application, type, data);
+		collectOutgoing(peer.address(), *link, batch, Clock::now());
 	}
 
 	execute(batch);
@@ -335,7 +351,8 @@ bool netlink::PeerChannel::sendMessage(const std::string &computerName, const ui
 }
 
 
-bool netlink::PeerChannel::queueReliable(const PeerEndpoint &peer, const channel::ChannelId channelId, std::vector<uint8_t> body)
+bool netlink::PeerChannel::queueReliable(const PeerEndpoint &peer, const channel::ChannelId channelId, const uint32_t tag, std::vector<uint8_t> body,
+										 const std::chrono::milliseconds timeout)
 {
 	if (!mInitialized.load())
 	{
@@ -353,14 +370,28 @@ bool netlink::PeerChannel::queueReliable(const PeerEndpoint &peer, const channel
 	bool  queued = false;
 
 	{
-		std::lock_guard<std::mutex> lock(mLinksMutex);
+		std::unique_lock<std::mutex> lock(mLinksMutex);
 
-		auto					   *link = linkFor(peer.address(), true);
+		auto						*link = linkFor(peer.address(), true);
 		if (!link)
 			return false;
 
-		queued = link->queueReliable(channelId, std::move(body)) != channel::PushResult::Rejected;
-		collect(peer.address(), *link, batch, Clock::now());
+		// Backpressure: acknowledgements make room, and the I/O loop signals every one of them
+		if (timeout > std::chrono::milliseconds::zero() && !link->hasRoomFor(channelId))
+		{
+			mLinksChanged.wait_for(lock, timeout,
+								   [&]
+								   {
+									   link = linkFor(peer.address(), true); // the link may have been replaced while waiting
+									   return !link || link->hasRoomFor(channelId) || !isRunning();
+								   });
+
+			if (!link)
+				return false;
+		}
+
+		queued = link->queueReliable(channelId, tag, std::move(body)) != channel::PushResult::Rejected;
+		collectOutgoing(peer.address(), *link, batch, Clock::now());
 	}
 
 	execute(batch);
@@ -374,16 +405,27 @@ void netlink::PeerChannel::setKeepAlive(const std::string &computerName, const b
 	if (!peer.isValid())
 		return;
 
-	std::lock_guard<std::mutex> lock(mLinksMutex);
+	bool wake = false;
 
-	if (enabled)
 	{
-		// Heartbeats need a link, also towards a peer nothing was exchanged with yet
-		linkFor(peer.address(), true);
-		mHeartbeat.watch(peer.address(), Clock::now());
+		std::lock_guard<std::mutex> lock(mLinksMutex);
+
+		if (enabled)
+		{
+			// Heartbeats need a link, also towards a peer nothing was exchanged with yet
+			linkFor(peer.address(), true);
+			mHeartbeat.watch(peer.address(), Clock::now());
+			wake = noteDeadline(mHeartbeat.nextDeadline());
+		}
+		else
+			mHeartbeat.unwatch(peer.address());
 	}
-	else
-		mHeartbeat.unwatch(peer.address());
+
+	if (wake)
+	{
+		if (const auto socket = this->socket())
+			socket->interrupt();
+	}
 }
 
 
@@ -420,6 +462,13 @@ bool netlink::PeerChannel::flush(const std::string &computerName, const std::chr
 }
 
 
+void netlink::PeerChannel::start()
+{
+	mDelivery.start();
+	ThreadBase::start();
+}
+
+
 void netlink::PeerChannel::stop()
 {
 	ThreadBase::stop();
@@ -429,6 +478,16 @@ void netlink::PeerChannel::stop()
 		std::lock_guard<std::mutex> lock(mLinksMutex);
 	}
 	mLinksChanged.notify_all();
+
+	// After the I/O loop: nothing new is handed over anymore
+	mDelivery.stop();
+}
+
+
+void netlink::PeerChannel::interruptWork()
+{
+	if (const auto socket = this->socket())
+		socket->interrupt();
 }
 
 
@@ -459,28 +518,35 @@ void netlink::PeerChannel::collect(const net::SocketAddress &address, channel::R
 {
 	for (const auto &event : link.takeEvents())
 	{
-		// Partial messages of the old stream can never complete
-		mFragmentation.reset(address);
 		mHeartbeat.unwatch(address);
 
 		const char *reason = event == channel::LinkEvent::Failed ? "the peer stopped acknowledging messages" : "the peer restarted";
 		batch.lostPeers.push_back({.address = address, .reason = reason});
 	}
 
-	// One send pass: at most the link's budget, the rest goes out in the next passes
+	collectOutgoing(address, link, batch, now);
+
+	for (auto &message : link.takeDelivered())
+		batch.messages.push_back({.from = address, .message = std::move(message)});
+}
+
+
+void netlink::PeerChannel::collectOutgoing(const net::SocketAddress &address, channel::ReliableLink &link, Batch &batch, const TimePoint now)
+{
+	// The acknowledgements of this pass tell the remote whether the application keeps up with what it sends
+	link.setApplicationReceiving(mDeliveryBacklog->load() < mConfig.deliveryBacklogLimit);
+
+	// One send pass: acknowledgements, and as much data as the link's windows allow
 	auto datagrams = link.takeOutgoing(now);
 
 	if (!datagrams.empty())
 		mHeartbeat.onSent(address, now);
 
 	for (auto &datagram : datagrams)
-		batch.datagrams.push_back({.to = address, .bytes = std::move(datagram)});
+		batch.datagrams.push_back({.to = address, .datagram = std::move(datagram)});
 
-	for (auto &[header, body] : link.takeDelivered())
-	{
-		if (auto message = mFragmentation.accept(address, header, body))
-			batch.messages.push_back({.from = address, .message = std::move(*message)});
-	}
+	if (noteDeadline(link.nextDeadline()))
+		batch.wakeIoThread = true;
 }
 
 
@@ -492,63 +558,68 @@ void netlink::PeerChannel::run()
 {
 	while (ThreadBase::isRunning())
 	{
-		receiveDatagram();
+		const auto socket = mInitialized.load() ? this->socket() : nullptr;
+
+		if (!socket)
+		{
+			waitForEvent(static_cast<unsigned long>(internal::SocketPollInterval.count()));
+			continue;
+		}
+
+		receivePending(*socket);
 		serviceTimers();
+		waitForWork(*socket);
 	}
 }
 
 
-std::chrono::milliseconds netlink::PeerChannel::nextWait()
+bool netlink::PeerChannel::noteDeadline(const std::optional<TimePoint> due)
 {
-	std::optional<TimePoint> next;
+	if (!due || (mEarliestDeadline && *mEarliestDeadline <= *due))
+		return false;
+
+	mEarliestDeadline = due;
+	return mWaitingUntil && *due < *mWaitingUntil;
+}
+
+
+void netlink::PeerChannel::receivePending(net::IDatagramSocket &socket)
+{
+	mTouched.clear();
+
+	// Everything that is waiting is taken in before anything is answered: one send pass and one hand-over for all of it
+	for (size_t received = 0; received < MaxDatagramsPerPass; ++received)
+	{
+		const auto datagram = socket.receiveFrom(mReceiveBuffer, std::chrono::microseconds::zero());
+		if (!datagram)
+			break;
+
+		handleDatagram(datagram->from, std::span<const uint8_t>(mReceiveBuffer.data(), datagram->size));
+	}
+
+	if (mTouched.empty())
+		return;
+
+	std::ranges::sort(mTouched);
+	const auto duplicates = std::ranges::unique(mTouched);
+	mTouched.erase(duplicates.begin(), duplicates.end());
+
+	Batch batch;
 
 	{
 		std::lock_guard<std::mutex> lock(mLinksMutex);
 
-		for (const auto &link : mLinks | std::views::values)
+		const auto					now = Clock::now();
+
+		for (const auto &address : mTouched)
 		{
-			// Datagrams still waiting for a send pass: only poll the socket, then make the next pass
-			if (link->hasOutgoing())
-				return std::chrono::milliseconds{0};
-
-			if (auto due = link->nextDeadline(); due && (!next || *due < *next))
-				next = due;
+			if (auto *link = linkFor(address, false))
+				collect(address, *link, batch, now);
 		}
-
-		if (const auto due = mHeartbeat.nextDeadline(); due && (!next || *due < *next))
-			next = due;
 	}
 
-	if (!next)
-		return internal::SocketPollInterval;
-
-	const auto wait = std::chrono::ceil<std::chrono::milliseconds>(*next - Clock::now());
-	return std::clamp(wait, std::chrono::milliseconds{1}, internal::SocketPollInterval);
-}
-
-
-void netlink::PeerChannel::receiveDatagram()
-{
-	const auto socket = mInitialized.load() ? this->socket() : nullptr;
-
-	if (!socket)
-	{
-		waitForEvent(static_cast<unsigned long>(internal::SocketPollInterval.count()));
-		return;
-	}
-
-	auto datagram = socket->receiveFrom(mReceiveBuffer, nextWait());
-
-	if (!datagram)
-	{
-		// Timeouts are the normal idle case; anything else is retried on the next cycle
-		if (datagram.error() != net::SocketError::Timeout)
-			waitForEvent(static_cast<unsigned long>(internal::SocketPollInterval.count()));
-
-		return;
-	}
-
-	handleDatagram(datagram->from, std::span<const uint8_t>(mReceiveBuffer.data(), datagram->size));
+	mLinksChanged.notify_all(); // acknowledgements may have completed a flush() or made room in a send queue
+	execute(batch);
 }
 
 
@@ -562,23 +633,16 @@ void netlink::PeerChannel::handleDatagram(const net::SocketAddress &from, const 
 		return;
 	}
 
-	Batch batch;
+	std::lock_guard<std::mutex> lock(mLinksMutex);
 
-	{
-		std::lock_guard<std::mutex> lock(mLinksMutex);
+	auto					   *link = linkFor(from, true);
+	if (!link)
+		return;
 
-		auto					   *link = linkFor(from, true);
-		if (!link)
-			return;
-
-		const auto now = Clock::now();
-		link->onPacket(*packet, now);
-		mHeartbeat.onReceived(from, now);
-		collect(from, *link, batch, now);
-	}
-
-	mLinksChanged.notify_all(); // an acknowledgement may have completed a flush()
-	execute(batch);
+	const auto now = Clock::now();
+	link->onPacket(*packet, now);
+	mHeartbeat.onReceived(from, now);
+	mTouched.push_back(from);
 }
 
 
@@ -590,6 +654,12 @@ void netlink::PeerChannel::serviceTimers()
 		std::lock_guard<std::mutex> lock(mLinksMutex);
 
 		const auto					now = Clock::now();
+
+		if (!mEarliestDeadline || now < *mEarliestDeadline)
+			return;
+
+		// Rebuilt from what the links and the heartbeats report below
+		mEarliestDeadline.reset();
 
 		for (auto &[address, link] : mLinks)
 		{
@@ -610,59 +680,136 @@ void netlink::PeerChannel::serviceTimers()
 
 		for (const auto &address : silentPeers)
 			batch.lostPeers.push_back({.address = address, .reason = "no traffic from the peer anymore"});
+
+		noteDeadline(mHeartbeat.nextDeadline());
 	}
 
+	batch.wakeIoThread = false; // this is the I/O thread
 	mLinksChanged.notify_all(); // a failed link was reset: nothing is pending on it anymore
 	execute(batch);
 }
 
 
-// ---------------------------------------------------------------------------
-// Carrying out collected work (no lock held)
-// ---------------------------------------------------------------------------
-
-void netlink::PeerChannel::execute(Batch &batch) const
+void netlink::PeerChannel::waitForWork(net::IDatagramSocket &socket)
 {
-	if (!batch.datagrams.empty())
+	std::chrono::microseconds timeout{0};
+
 	{
-		if (const auto socket = this->socket())
-		{
-			for (const auto &[to, bytes] : batch.datagrams)
-			{
-				// A lost datagram is recovered by retransmission, a failed send is no different
-				if (auto sent = socket->sendTo(to, bytes); !sent)
-					NETLINK_LOG_DEBUG("Sending to {} failed: {}", to.toString(), net::toString(sent.error()));
-			}
-		}
+		std::lock_guard<std::mutex> lock(mLinksMutex);
+
+		// A timer that is still due after serviceTimers() is retried shortly, without spinning
+		const auto now	 = Clock::now();
+		const auto until = std::clamp(mEarliestDeadline.value_or(TimePoint::max()), now + std::chrono::milliseconds{1}, now + internal::SocketPollInterval);
+
+		mWaitingUntil = until;
+		timeout		  = std::chrono::ceil<std::chrono::microseconds>(until - now);
 	}
 
-	for (auto &[from, message] : batch.messages)
+	const auto ready = socket.waitReadable(timeout);
+
 	{
-		if (message.channel == channel::ChannelId::Control)
-			routeControl(from, message.body);
-		else
-			routeApplication(from, message.body);
+		std::lock_guard<std::mutex> lock(mLinksMutex);
+		mWaitingUntil.reset();
 	}
 
-	for (const auto &[address, reason] : batch.lostPeers)
-	{
-		const std::string name = nameOf(address);
-		NETLINK_LOG_WARNING("Lost peer {} ({}): {}", name.empty() ? "<unknown>" : name, address.toString(), reason);
-
-		if (!name.empty() && mOnPeerLost)
-			mOnPeerLost(name, reason);
-	}
+	// A broken socket fails right away: do not spin on it
+	if (!ready && ready.error() != net::SocketError::Timeout && ready.error() != net::SocketError::Cancelled)
+		waitForEvent(static_cast<unsigned long>(internal::SocketPollInterval.count()));
 }
 
 
-void netlink::PeerChannel::routeApplication(const net::SocketAddress &from, std::span<const uint8_t> body) const
+// ---------------------------------------------------------------------------
+// Carrying out collected work (mLinksMutex not held)
+// ---------------------------------------------------------------------------
+
+void netlink::PeerChannel::execute(Batch &batch)
 {
-	if (body.size() < sizeof(uint32_t))
+	if (!batch.datagrams.empty() || batch.wakeIoThread)
 	{
-		NETLINK_LOG_WARNING("Dropping truncated application message from {}", from.toString());
-		return;
+		if (const auto socket = this->socket())
+		{
+			for (const auto &[to, datagram] : batch.datagrams)
+			{
+				// A lost datagram is recovered by retransmission, a failed send is no different
+				if (auto sent = socket->sendParts(to, datagram.header(), datagram.body()); !sent)
+					NETLINK_LOG_DEBUG("Sending to {} failed: {}", to.toString(), net::toString(sent.error()));
+			}
+
+			if (batch.wakeIoThread)
+				socket->interrupt();
+		}
 	}
 
+	if (!batch.messages.empty() || !batch.lostPeers.empty())
+		deliver(batch);
+}
+
+
+void netlink::PeerChannel::deliver(Batch &batch)
+{
+	// What waits for the application is accounted for until its task is gone
+	const auto shareOf = [this](const std::vector<InboundMessage> &messages)
+	{
+		size_t bytes = 0;
+		for (const auto &[from, message] : messages)
+			bytes += message.channel == channel::ChannelId::Application ? message.body.size() : 0;
+
+		return std::make_shared<BacklogShare>(mDeliveryBacklog, bytes);
+	};
+
+	std::vector<InboundMessage> application;
+
+	// Application messages may have a thread of their own, so a slow application cannot hold up control signals
+	if (mApplicationQueue)
+	{
+		const auto moved = std::ranges::stable_partition(batch.messages, [](const InboundMessage &inbound) { return inbound.message.channel == channel::ChannelId::Control; });
+
+		application.assign(std::make_move_iterator(moved.begin()), std::make_move_iterator(moved.end()));
+		batch.messages.erase(moved.begin(), moved.end());
+	}
+
+	if (!application.empty())
+	{
+		mApplicationQueue->post(
+			[this, share = shareOf(application), messages = std::move(application)]() mutable
+			{
+				for (auto &[from, message] : messages)
+					routeApplication(from, message.tag, std::move(message.body));
+			});
+	}
+
+	if (batch.messages.empty() && batch.lostPeers.empty())
+		return;
+
+	mDelivery.post(
+		[this, share = shareOf(batch.messages), messages = std::move(batch.messages), lostPeers = std::move(batch.lostPeers)]() mutable
+		{
+			for (auto &[from, message] : messages)
+			{
+				if (message.channel == channel::ChannelId::Control)
+					routeControl(from, message.body);
+				else
+					routeApplication(from, message.tag, std::move(message.body));
+			}
+
+			for (const auto &lost : lostPeers)
+				reportLostPeer(lost);
+		});
+}
+
+
+void netlink::PeerChannel::reportLostPeer(const LostPeer &lost) const
+{
+	const std::string name = nameOf(lost.address);
+	NETLINK_LOG_WARNING("Lost peer {} ({}): {}", name.empty() ? "<unknown>" : name, lost.address.toString(), lost.reason);
+
+	if (!name.empty() && mOnPeerLost)
+		mOnPeerLost(name, lost.reason);
+}
+
+
+void netlink::PeerChannel::routeApplication(const net::SocketAddress &from, const uint32_t type, std::vector<uint8_t> body) const
+{
 	const std::string name = nameOf(from);
 
 	if (name.empty())
@@ -671,8 +818,9 @@ void netlink::PeerChannel::routeApplication(const net::SocketAddress &from, std:
 		return;
 	}
 
+	// The payload stays in the buffer it was reassembled in
 	if (mMessageCallback)
-		mMessageCallback(name, channel::readUint32(body.data()), std::vector<uint8_t>(body.begin() + sizeof(uint32_t), body.end()));
+		mMessageCallback(name, type, std::move(body));
 }
 
 

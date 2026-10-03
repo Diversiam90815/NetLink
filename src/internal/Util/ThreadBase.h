@@ -8,12 +8,13 @@
 #pragma once
 
 #include <thread>
-#include <mutex>
 #include <atomic>
-#include <condition_variable>
+#include <chrono>
 #include <exception>
+#include <memory>
 
 #include "NetLinkLog.h"
+#include "Timing/DeadlineTimer.h"
 
 
 class ThreadBase
@@ -30,7 +31,7 @@ public:
 			mThread.join();
 	}
 
-	void start()
+	virtual void start()
 	{
 		if (mRunning.exchange(true))
 			return; // already running
@@ -63,19 +64,14 @@ public:
 
 		mRunning.store(false);
 		triggerEvent(); // Wake up the thread
+		interruptWork();
 
 		if (mThread.joinable())
 			mThread.join();
 	}
 
-	void triggerEvent()
-	{
-		{
-			std::lock_guard<std::mutex> lock(mMutex);
-			mEventTriggered = true;
-		}
-		cv.notify_one();
-	}
+	// Ends the current waitForEvent(), or the next one if the thread is not waiting right now
+	void triggerEvent() { mTimer->wake(); }
 
 	bool isRunning() const { return mRunning.load(); }
 
@@ -83,29 +79,24 @@ public:
 protected:
 	virtual void run() = 0;
 
-	bool		 waitForEvent(const unsigned long timeoutMS = 0)
+	// Called by stop() once isRunning() is false: wakes the thread from whatever it blocks in besides waitForEvent()
+	virtual void interruptWork() {}
+
+	// Waits for triggerEvent(), at most timeoutMS (0 = no limit). True if an event was triggered and the thread is still running.
+	bool		 waitForEvent(const unsigned long timeoutMS = 0) const
 	{
-		std::unique_lock<std::mutex> lock(mMutex);
+		if (!isRunning())
+			return false;
 
-		if (timeoutMS > 0)
-		{
-			cv.wait_for(lock, std::chrono::milliseconds(timeoutMS), [this] { return mEventTriggered || !isRunning(); });
-		}
-		else
-		{
-			cv.wait(lock, [this] { return mEventTriggered || !isRunning(); });
-		}
-		const bool wasTriggered = mEventTriggered;
-		mEventTriggered			= false;	// Reset the flag
+		const auto deadline		= timeoutMS > 0 ? netlink::IDeadlineTimer::Clock::now() + std::chrono::milliseconds(timeoutMS) : netlink::IDeadlineTimer::Never;
+		const bool wasTriggered = mTimer->waitUntil(deadline) == netlink::WaitResult::Woken;
 
-		return wasTriggered && isRunning(); // Return true if event was triggered and thread is still running
+		return wasTriggered && isRunning();
 	}
 
 
 private:
-	std::thread				mThread;				// Worker thread instance
-	std::atomic<bool>		mRunning{false};		// Running state flag (set by start()/stop() )
-	std::mutex				mMutex;					// Protect event flag
-	std::condition_variable cv;						// Condition variable for event signaling
-	bool					mEventTriggered{false}; // Indicates an event has been triggerd
+	std::thread								 mThread;							   // Worker thread instance
+	std::atomic<bool>						 mRunning{false};					   // Running state flag (set by start()/stop() )
+	std::unique_ptr<netlink::IDeadlineTimer> mTimer{netlink::makeDeadlineTimer()}; // Event signaling: the worker waits on it
 };

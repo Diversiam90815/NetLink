@@ -2,7 +2,6 @@
   ==============================================================================
 	Module:         ReliabilityConfig
 	Description:    Tunables of the reliable datagram channel.
-					Injectable so tests can run with short timers.
   ==============================================================================
 */
 
@@ -17,7 +16,7 @@
 namespace netlink::channel
 {
 
-// Maximum number of unacknowledged fragments per link and direction (also the receive reorder window)
+// Maximum number of unacknowledged fragments per link, channel and direction (also the receive reorder window)
 inline constexpr size_t WindowSize = 1024;
 
 
@@ -28,20 +27,28 @@ struct ReliabilityConfig
 	std::chrono::milliseconds minRto{20};
 	std::chrono::milliseconds maxRto{1000};
 
-	// Whole messages waiting for room in the send window
-	size_t					  sendQueueCapacity{1024};
+	// Whole messages waiting to be sent
+	size_t					  sendQueueCapacity{2048};
 	OverflowPolicy			  sendQueueOverflow{OverflowPolicy::DropNewest};
 
-	int						  maxRetransmits{8}; // Data retransmissions before the link is considered failed
-	int						  maxAckRetransmits{5};	// DataAck retransmissions while waiting for the AckAck
-	size_t					  maxDatagramSize{internal::MaxDatagramSize};	// Largest datagram put on the wire, header included
-	size_t					  maxMessageSize{internal::MaxMessagePayload};	// Largest reassembled message
+	// Data is waiting for its acknowledgement and none at all arrived for this long
+	std::chrono::milliseconds failureTimeout{5000};
 
-	// Datagrams one send pass may push into the socket. Adapts per link between min and max: halves after a loss,
-	// grows while passes have more waiting than they may send.
-	size_t					  initialSendBudget{700};
-	size_t					  minSendBudget{16};
-	size_t					  maxSendBudget{WindowSize};
+	int						  maxAckRetransmits{5};						   // DataAck retransmissions while waiting for the AckAck
+	size_t					  maxDatagramSize{internal::MaxDatagramSize};  // Largest datagram put on the wire, header included
+	size_t					  maxMessageSize{internal::MaxMessagePayload}; // Largest reassembled message
+
+	// Congestion window: Data packets that may be unacknowledged at the same time
+	size_t					  initialCongestionWindow{16};
+	size_t					  minCongestionWindow{8};
+	size_t					  maxCongestionWindow{WindowSize};
+
+	// A packet counts as lost once this many packets that were sent after it are acknowledged (fast retransmit)
+	size_t					  reorderThreshold{3};
+	std::chrono::microseconds reorderDelay{1000};
+
+	// How often the sender asks again while the receiver's window is closed (its application is not keeping up)
+	std::chrono::milliseconds windowProbeInterval{50};
 
 	// Unreliable datagrams waiting for a send pass; when full, the oldest is dropped
 	size_t					  unreliableQueueCapacity{128};

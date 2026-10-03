@@ -7,8 +7,9 @@
 
 #include "SocketPlatform.h"
 #include "SocketCommon.h"
+#include "Util/Timing/WaitableTimerWindows.h"
 
-#include <algorithm>
+#include <atomic>
 
 
 #ifndef SIO_UDP_CONNRESET
@@ -48,6 +49,86 @@ public:
 
 private:
 	int mStartupResult = -1;
+};
+
+
+
+class ReadWaiterWindows final : public ReadWaiter
+{
+public:
+	explicit ReadWaiterWindows(const NativeSocket socket)
+		: mSocket(socket), mReadable(CreateEventW(nullptr, FALSE, FALSE, nullptr)), mInterrupt(CreateEventW(nullptr, FALSE, FALSE, nullptr))
+	{
+		// Also puts the socket into non-blocking mode, which it already is
+		if (mReadable && WSAEventSelect(mSocket, mReadable, FD_READ | FD_CLOSE) == SOCKET_ERROR)
+		{
+			CloseHandle(mReadable);
+			mReadable = nullptr;
+		}
+	}
+
+	~ReadWaiterWindows() override
+	{
+		if (mReadable)
+		{
+			WSAEventSelect(mSocket, nullptr, 0);
+			CloseHandle(mReadable);
+		}
+
+		if (mInterrupt)
+			CloseHandle(mInterrupt);
+	}
+
+	bool		 isValid() const { return mReadable != nullptr && mInterrupt != nullptr && mTimer.isValid(); }
+
+	Result<void> wait(const std::chrono::steady_clock::time_point deadline) override
+	{
+		// Reported as readable before and nothing was read since: still readable. Winsock only signals again after a receive call.
+		if (mReadableUnread.load())
+			return {};
+
+		// The interrupt comes first: it wins when several handles are signalled
+		const HANDLE handles[] = {mInterrupt, mReadable, mTimer.handle()};
+
+		while (true)
+		{
+			const auto now	   = std::chrono::steady_clock::now();
+			const bool expired = now >= deadline;
+
+			if (!expired)
+				mTimer.armFor(deadline, now);
+
+			switch (WaitForMultipleObjects(expired ? 2 : 3, handles, FALSE, expired ? 0 : INFINITE))
+			{
+			case WAIT_OBJECT_0: return std::unexpected(SocketError::Cancelled);
+
+			// Winsock signals the event again as soon as a receive call leaves data behind or new data arrives. A wait may
+			// therefore end although everything was read in the meantime: callers read without blocking and wait again.
+			case WAIT_OBJECT_0 + 1:
+				mReadableUnread.store(true);
+				return {};
+
+			case WAIT_OBJECT_0 + 2:
+				mTimer.onSignalled(); // possibly for an earlier deadline: the clock decides
+				continue;
+
+			case WAIT_TIMEOUT: return std::unexpected(SocketError::Timeout);
+
+			default: return std::unexpected(SocketError::Unknown);
+			}
+		}
+	}
+
+	void onReceiveAttempt() override { mReadableUnread.store(false); }
+
+	void interrupt() override { SetEvent(mInterrupt); }
+
+private:
+	NativeSocket		  mSocket;
+	HANDLE				  mReadable;  // auto-reset, signalled by Winsock when a datagram is waiting
+	HANDLE				  mInterrupt; // auto-reset: one interrupt() ends one wait
+	timing::WaitableTimer mTimer;
+	std::atomic<bool>	  mReadableUnread{false};
 };
 
 } // namespace
@@ -144,34 +225,10 @@ void shutdownHandle(const NativeHandle handle)
 }
 
 
-Result<void> waitUntil(const NativeHandle handle, const WaitFor what, const std::chrono::milliseconds timeout)
+std::unique_ptr<ReadWaiter> createReadWaiter(const NativeHandle handle)
 {
-	if (handle == InvalidNativeHandle)
-		return std::unexpected(SocketError::InvalidArgument);
-
-	fd_set primary{};
-	fd_set exceptions{};
-	FD_ZERO(&primary);
-	FD_ZERO(&exceptions);
-	FD_SET(toNative(handle), &primary);
-	FD_SET(toNative(handle), &exceptions);
-
-	const auto clamped = std::max<std::chrono::milliseconds::rep>(timeout.count(), 0);
-
-	timeval	   tv{};
-	tv.tv_sec		   = static_cast<long>(clamped / 1000);
-	tv.tv_usec		   = static_cast<long>((clamped % 1000) * 1000);
-
-	const bool reading = what == WaitFor::Readable;
-	const int  result  = ::select(0, reading ? &primary : nullptr, reading ? nullptr : &primary, &exceptions, &tv);
-
-	if (result == SOCKET_ERROR)
-		return std::unexpected(lastError());
-
-	if (result == 0)
-		return std::unexpected(SocketError::Timeout);
-
-	return {}; // ready, or an exceptional condition the following call will report
+	auto waiter = std::make_unique<ReadWaiterWindows>(toNative(handle));
+	return waiter->isValid() ? std::move(waiter) : nullptr;
 }
 
 } // namespace netlink::net::platform

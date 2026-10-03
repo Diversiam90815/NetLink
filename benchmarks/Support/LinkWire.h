@@ -47,8 +47,13 @@ public:
 
 		for (const auto &datagram : datagrams)
 		{
-			if (const auto packet = netlink::channel::decodePacket(datagram); packet && !(drop && drop(packet->header)))
-				to.onPacket(*packet, now);
+			// Like the socket, the wire takes header and body as they are: nothing is joined into one buffer first
+			auto packet = netlink::channel::decodePacket(datagram.header());
+			if (!packet || (drop && drop(packet->header)))
+				continue;
+
+			packet->body = datagram.body();
+			to.onPacket(*packet, now);
 		}
 
 		return datagrams.size();
@@ -83,8 +88,8 @@ public:
 	size_t takeDeliveredBytesAtB()
 	{
 		size_t bytes = 0;
-		for (const auto &[header, body] : b.takeDelivered())
-			bytes += body.size();
+		for (const auto &message : b.takeDelivered())
+			bytes += message.body.size();
 		return bytes;
 	}
 

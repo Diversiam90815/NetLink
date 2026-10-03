@@ -14,8 +14,8 @@
 
 
 netlink::NetLinkCore::NetLinkCore(const NetLinkCoreDependencies &dependencies)
-	: mDiscovery(dependencies.datagramSocketFactory), mChannel(dependencies.datagramSocketFactory, dependencies.channelConfig), mChannelConfig(dependencies.channelConfig),
-	  mConnectionService(mChannel)
+	: mDiscovery(dependencies.datagramSocketFactory), mChannel(dependencies.datagramSocketFactory, dependencies.channelConfig, &mEvents),
+	  mChannelConfig(dependencies.channelConfig), mConnectionService(mChannel)
 {
 	mEvents.start();
 	wireServices();
@@ -101,7 +101,8 @@ void netlink::NetLinkCore::wireServices()
 	connectionCallbacks.onStatusUpdate = [this](const ConnectionStatusUpdate &update) { onConnectionStatus(update); };
 	mConnectionService.setCallbacks(std::move(connectionCallbacks));
 
-	// Channel -> public events: only messages of the connected remote reach the application
+	// Channel -> public events: only messages of the connected remote reach the application.
+	// The channel delivers application messages on the event thread already (it was given mEvents).
 	mChannel.setMessageCallback(
 		[this](const std::string &name, const uint32_t type, std::vector<uint8_t> data)
 		{
@@ -111,12 +112,14 @@ void netlink::NetLinkCore::wireServices()
 			if (const auto remote = mConnectionService.getCurrentRemote(); !remote.has_value() || remote->displayName != name)
 				return;
 
-			postEvent(
-				[message = Message{.type = type, .data = std::move(data)}](const NetLinkCallbacks &callbacks)
-				{
-					if (callbacks.onMessageReceived)
-						callbacks.onMessageReceived(message);
-				});
+			std::shared_ptr<const NetLinkCallbacks> callbacks;
+			{
+				std::lock_guard<std::mutex> lock(mCallbacksMutex);
+				callbacks = mCallbacks;
+			}
+
+			if (callbacks && callbacks->onMessageReceived)
+				callbacks->onMessageReceived(Message{.type = type, .data = std::move(data)});
 		});
 
 	// Channel -> connection loss (unacknowledged messages, silence, peer restart)
@@ -337,7 +340,7 @@ void netlink::NetLinkCore::disconnect()
 }
 
 
-bool netlink::NetLinkCore::send(const uint32_t type, const std::vector<uint8_t> &payload, const DeliveryMode mode)
+bool netlink::NetLinkCore::send(const uint32_t type, const std::vector<uint8_t> &payload, const DeliveryMode mode, const std::chrono::milliseconds timeout)
 {
 	if (mState.load() != ConnectionState::Connected)
 		return false;
@@ -346,7 +349,7 @@ bool netlink::NetLinkCore::send(const uint32_t type, const std::vector<uint8_t> 
 	if (!remote.has_value())
 		return false;
 
-	return mChannel.sendMessage(remote->displayName, type, payload, mode);
+	return mChannel.sendMessage(remote->displayName, type, payload, mode, timeout);
 }
 
 

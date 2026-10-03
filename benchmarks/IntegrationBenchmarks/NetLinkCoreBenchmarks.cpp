@@ -183,17 +183,14 @@ static void BM_NetLinkCore_Throughput(benchmark::State &state)
 
 	for (auto _ : state)
 	{
-		for (uint64_t i = 0; i < messages; ++i)
-		{
-			// send() refuses while the send queue is full: wait like an application respecting backpressure
-			const auto deadline = bench::Clock::now() + bench::WaitTimeout;
-			while (!cores.a->send(DataType, payload, DeliveryMode::ReliableOrdered) && bench::Clock::now() < deadline)
-				std::this_thread::yield();
-		}
+		// While the send queue is full send() waits for room, like an application respecting backpressure
+		bool sent = true;
+		for (uint64_t i = 0; i < messages && sent; ++i)
+			sent = cores.a->send(DataType, payload, DeliveryMode::ReliableOrdered, bench::WaitTimeout);
 
 		expected += messages;
 
-		if (!cores.receivedAtB.waitFor(expected))
+		if (!sent || !cores.receivedAtB.waitFor(expected))
 		{
 			state.SkipWithError("Not every message arrived");
 			break;

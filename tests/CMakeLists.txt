@@ -12,10 +12,12 @@ set(Discovery_Tests
 set(Channel_Tests
     ${Test_Directory}/ChannelTests/PacketFlagsTests.cpp
     ${Test_Directory}/ChannelTests/PacketCodecTests.cpp
+    ${Test_Directory}/ChannelTests/AckRangesTests.cpp
     ${Test_Directory}/ChannelTests/BoundedQueueTests.cpp
     ${Test_Directory}/ChannelTests/SequenceBufferTests.cpp
     ${Test_Directory}/ChannelTests/RttEstimatorTests.cpp
     ${Test_Directory}/ChannelTests/FragmentationServiceTests.cpp
+    ${Test_Directory}/ChannelTests/MessageAssemblerTests.cpp
     ${Test_Directory}/ChannelTests/HeartbeatServiceTests.cpp
     ${Test_Directory}/ChannelTests/ReliableLinkTests.cpp
     ${Test_Directory}/ChannelTests/SignalPacketTests.cpp
@@ -32,6 +34,7 @@ set(Network_Tests
 )
 
 set(Utils_Tests
+    ${Test_Directory}/UtilsTests/DeadlineTimerTests.cpp
     ${Test_Directory}/UtilsTests/TaskQueueTests.cpp
     ${Test_Directory}/UtilsTests/ThreadBaseTests.cpp
     ${Test_Directory}/UtilsTests/TimeoutServiceTests.cpp
@@ -51,6 +54,7 @@ set(Test_Fakes
     ${Test_Directory}/Fakes/TestIp.h
     ${Test_Directory}/Fakes/FakeDatagramNetwork.h
     ${Test_Directory}/Fakes/LossyDatagramSocket.h
+    ${Test_Directory}/Fakes/SpyDeadlineTimer.h
 )
 
 set(Validation_Tests

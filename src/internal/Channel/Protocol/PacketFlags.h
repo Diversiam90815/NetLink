@@ -30,8 +30,8 @@ namespace netlink::channel
 enum class PacketKind : uint8_t
 {
 	Data	  = 0, // Carries a message (or one fragment of it)
-	DataAck	  = 1, // Receiver confirms a reliable Data packet
-	AckAck	  = 2, // Sender confirms it got the DataAck, the receiver can forget the key
+	DataAck	  = 1, // Receiver confirms reliable Data packets of one channel
+	AckAck	  = 2, // Sender confirms it got the DataAcks, the receiver can forget the keys
 	Heartbeat = 3, // Keepalive while a session is idle, never acknowledged
 };
 
@@ -127,7 +127,7 @@ public:
 
 	// Convenience factories for the packet types a link sends
 	static constexpr PacketFlags data(const ChannelId channel, const bool reliable) { return PacketFlags{}.setKind(PacketKind::Data).setReliable(reliable).setChannel(channel); }
-	static constexpr PacketFlags ack(const PacketKind kind) { return PacketFlags{}.setKind(kind).setReliable(); }
+	static constexpr PacketFlags ack(const PacketKind kind, const ChannelId channel) { return PacketFlags{}.setKind(kind).setReliable().setChannel(channel); }
 	static constexpr PacketFlags heartbeat() { return PacketFlags{}.setKind(PacketKind::Heartbeat); }
 
 private:

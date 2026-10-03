@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <array>
 #include <vector>
 
 #include "Channel/Protocol/PacketHeader.h"
@@ -24,10 +25,11 @@ static PacketHeader makeDataHeader(uint64_t seq)
 TEST(PacketCodec, UnfragmentedRoundTrip)
 {
 	const std::vector<uint8_t> body{1, 2, 3, 4, 5};
-	const PacketHeader		   header	= makeDataHeader(0x0102030405060708ull);
+	PacketHeader			   header = makeDataHeader(0x0102030405060708ull);
+	header.tag						  = 0xCAFE0001;
 
-	const auto				   datagram = encodePacket(header, body);
-	ASSERT_EQ(datagram.size(), BaseHeaderSize + body.size());
+	const auto datagram = encodePacket(header, body);
+	ASSERT_EQ(datagram.size(), BaseHeaderSize + TagExtensionSize + body.size()) << "An unfragmented Data packet starts a message, so it carries the tag";
 
 	auto decoded = decodePacket(datagram);
 	ASSERT_TRUE(decoded.has_value());
@@ -36,7 +38,25 @@ TEST(PacketCodec, UnfragmentedRoundTrip)
 	EXPECT_EQ(decoded->header.srcStreamID, header.srcStreamID);
 	EXPECT_EQ(decoded->header.dstStreamID, header.dstStreamID);
 	EXPECT_EQ(decoded->header.seq, header.seq) << "The full 64-bit key must survive the wire";
+	EXPECT_EQ(decoded->header.tag, 0xCAFE0001u);
 	EXPECT_EQ(std::vector<uint8_t>(decoded->body.begin(), decoded->body.end()), body);
+}
+
+
+TEST(PacketCodec, EncodeHeader_MatchesEncodePacket)
+{
+	PacketHeader header = makeDataHeader(77);
+	header.tag			= 5;
+	header.flags.setFragment(true, false);
+	header.fragIndex = 0;
+	header.fragCount = 3;
+
+	std::array<uint8_t, MaxHeaderSize> head{};
+	const size_t					   size = encodeHeader(header, head.data());
+
+	EXPECT_EQ(size, header.encodedSize());
+	EXPECT_EQ(size, MaxHeaderSize) << "The first fragment of a message carries both extensions";
+	EXPECT_EQ(std::vector<uint8_t>(head.begin(), head.begin() + size), encodePacket(header)) << "A header sent in front of a separate body is the same header";
 }
 
 
@@ -61,6 +81,8 @@ TEST(PacketCodec, FragmentExtensionRoundTrip)
 	header.fragIndex = 3;
 	header.fragCount = 7;
 
+	header.tag = 123; // not on the wire: only the first fragment carries it
+
 	const std::vector<uint8_t> body(100, 0xAB);
 	const auto				   datagram = encodePacket(header, body);
 	ASSERT_EQ(datagram.size(), BaseHeaderSize + FragmentExtensionSize + body.size());
@@ -70,23 +92,69 @@ TEST(PacketCodec, FragmentExtensionRoundTrip)
 	EXPECT_TRUE(decoded->header.flags.isFragmented());
 	EXPECT_EQ(decoded->header.fragIndex, 3);
 	EXPECT_EQ(decoded->header.fragCount, 7);
+	EXPECT_EQ(decoded->header.tag, 0u);
 	EXPECT_EQ(decoded->body.size(), body.size());
 }
 
 
-TEST(PacketCodec, AcksCarryTheAcknowledgedSeqWithoutBody)
+TEST(PacketCodec, FirstFragmentCarriesTheTag)
+{
+	PacketHeader header = makeDataHeader(42);
+	header.flags.setFragment(true, false);
+	header.fragIndex = 0;
+	header.fragCount = 7;
+	header.tag		 = 0x01020304;
+
+	const std::vector<uint8_t> body(100, 0xAB);
+	const auto				   datagram = encodePacket(header, body);
+	ASSERT_EQ(datagram.size(), BaseHeaderSize + FragmentExtensionSize + TagExtensionSize + body.size());
+
+	auto decoded = decodePacket(datagram);
+	ASSERT_TRUE(decoded.has_value());
+	EXPECT_EQ(decoded->header.tag, 0x01020304u);
+	EXPECT_EQ(decoded->body.size(), body.size());
+	EXPECT_EQ(decoded->body.front(), 0xAB) << "The body starts behind the tag";
+}
+
+
+TEST(PacketCodec, UnreliableDataCarriesTheTag)
 {
 	PacketHeader header;
-	header.flags	   = PacketFlags::ack(PacketKind::DataAck);
+	header.flags	   = PacketFlags::data(ChannelId::Application, false);
 	header.srcStreamID = 7;
-	header.seq		   = 99;
+	header.seq		   = 3;
+	header.tag		   = 99;
 
-	auto decoded	   = decodePacket(encodePacket(header));
+	auto decoded	   = decodePacket(encodePacket(header, std::vector<uint8_t>{1}));
 	ASSERT_TRUE(decoded.has_value());
-	EXPECT_EQ(decoded->header.flags.kind(), PacketKind::DataAck);
-	EXPECT_EQ(decoded->header.srcStreamID, 7u);
-	EXPECT_EQ(decoded->header.seq, 99u);
-	EXPECT_TRUE(decoded->body.empty());
+	EXPECT_FALSE(decoded->header.flags.isReliable());
+	EXPECT_EQ(decoded->header.tag, 99u);
+	EXPECT_EQ(decoded->body.size(), 1u);
+}
+
+
+TEST(PacketCodec, AcksCarryTheirSeqAndChannelWithoutATag)
+{
+	for (const PacketKind kind : {PacketKind::DataAck, PacketKind::AckAck})
+	{
+		PacketHeader header;
+		header.flags	   = PacketFlags::ack(kind, ChannelId::Application);
+		header.srcStreamID = 7;
+		header.seq		   = 99;
+		header.tag		   = 5; // not on the wire: acknowledgements start no message
+
+		const auto datagram = encodePacket(header);
+		EXPECT_EQ(datagram.size(), BaseHeaderSize);
+
+		auto decoded = decodePacket(datagram);
+		ASSERT_TRUE(decoded.has_value());
+		EXPECT_EQ(decoded->header.flags.kind(), kind);
+		EXPECT_EQ(decoded->header.flags.channel(), ChannelId::Application) << "Every channel is acknowledged on its own";
+		EXPECT_EQ(decoded->header.srcStreamID, 7u);
+		EXPECT_EQ(decoded->header.seq, 99u);
+		EXPECT_EQ(decoded->header.tag, 0u);
+		EXPECT_TRUE(decoded->body.empty());
+	}
 }
 
 
@@ -103,6 +171,13 @@ TEST(PacketCodec, RejectsForeignOrBrokenDatagrams)
 	auto badVersion = valid;
 	badVersion[2]	= ProtocolVersion + 1;
 	EXPECT_FALSE(decodePacket(badVersion).has_value());
+
+	auto olderVersion = valid;
+	olderVersion[2]	  = ProtocolVersion - 1;
+	EXPECT_FALSE(decodePacket(olderVersion).has_value()) << "Builds speaking an older wire format must not be understood by accident";
+
+	auto noTag = encodePacket(makeDataHeader(1));
+	EXPECT_FALSE(decodePacket(std::span(noTag.data(), BaseHeaderSize + 2)).has_value()) << "A Data packet that starts a message without its whole tag";
 
 	auto reservedFlags = valid;
 	reservedFlags[3] |= 0x80;

@@ -1,10 +1,14 @@
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <future>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
+#include "SpyDeadlineTimer.h"
 #include "TimeoutService/TimeoutService.h"
 
 using namespace std::chrono_literals;
@@ -248,6 +252,60 @@ TEST(TimeoutService, CancellingTheEarliest_LaterOnesStillFire)
 	std::this_thread::sleep_for(300ms);
 	EXPECT_FALSE(earlyFired.load()) << "The cancelled timeout must not fire";
 	EXPECT_TRUE(lateFired.load()) << "The timeout behind it must still fire";
+}
+
+
+// ---------------------------------------------------------------------------
+// Timer
+// ---------------------------------------------------------------------------
+
+TEST(TimeoutService, WaitsOnTheInjectedTimerUntilTheEarliestDeadline)
+{
+	using Clock				 = netlink::IDeadlineTimer::Clock;
+
+	const auto		  usage	 = std::make_shared<FakeTiming::TimerUsage>();
+	TimeoutService	  svc(std::make_unique<FakeTiming::SpyDeadlineTimer>(usage));
+	std::atomic<bool> fired{false};
+
+	const auto		  before = Clock::now();
+	svc.startTimeout({"cat", "late"}, 3'600'000, [](const TimeoutKey &) {});
+	svc.startTimeout({"cat", "early"}, 40, [&](const TimeoutKey &) { fired.store(true); });
+	const auto after = Clock::now();
+
+	std::this_thread::sleep_for(300ms);
+	ASSERT_TRUE(fired.load());
+
+	EXPECT_GE(usage->wakeCount(), 2) << "Every new timeout must wake the worker, so it re-evaluates what to wait for";
+
+	const auto deadlines = usage->deadlines();
+	const bool waitedForEarly =
+		std::ranges::any_of(deadlines, [&](const Clock::time_point deadline) { return deadline >= before + 40ms && deadline <= after + 40ms; });
+	EXPECT_TRUE(waitedForEarly) << "The worker must wait exactly until the earliest timeout is due";
+}
+
+
+TEST(TimeoutService, ShortTimeout_FiresCloseToItsDeadline)
+{
+	using Clock = std::chrono::steady_clock;
+
+	TimeoutService svc;
+
+	// The best of several attempts: a busy machine may delay single ones, a coarse timer delays all of them
+	auto		   smallestDelay = Clock::duration::max();
+
+	for (int attempt = 0; attempt < 20; ++attempt)
+	{
+		std::promise<Clock::time_point> firedAt;
+		const auto						deadline = Clock::now() + 1ms;
+
+		svc.startTimeout({"cat", "short"}, 1, [&](const TimeoutKey &) { firedAt.set_value(Clock::now()); });
+
+		auto fired = firedAt.get_future();
+		ASSERT_EQ(fired.wait_for(2s), std::future_status::ready);
+		smallestDelay = std::min(smallestDelay, fired.get() - deadline);
+	}
+
+	EXPECT_LT(smallestDelay, 5ms) << "A 1 ms timeout must not be rounded up to the scheduler tick (15.6 ms on Windows)";
 }
 
 } // namespace UtilsTests

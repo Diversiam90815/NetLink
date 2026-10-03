@@ -9,16 +9,18 @@
 #pragma once
 
 #include <algorithm>
-#include <condition_variable>
+#include <chrono>
 #include <cstring>
 #include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "Socket/IDatagramSocket.h"
 #include "TestIp.h"
+#include "Util/Timing/DeadlineTimer.h"
 
 
 namespace FakeNet
@@ -46,12 +48,52 @@ public:
 private:
 	friend class FakeDatagramSocket;
 
+	// One socket reads from an inbox, like one thread reads from a real socket
 	struct Inbox
 	{
+		// The outcome of a wait: what to do with whatever is in the inbox now
+		enum class State
+		{
+			Readable,
+			Shutdown,
+			Interrupted,
+			TimedOut,
+		};
+
+		// Waits like the real socket: as precisely as the platform's deadline timer, so tests with short protocol
+		// timers do not run on the scheduler tick of the test machine
+		State waitUntilReadable(const std::chrono::microseconds timeout)
+		{
+			const auto deadline = netlink::IDeadlineTimer::Clock::now() + timeout;
+
+			while (true)
+			{
+				{
+					std::lock_guard<std::mutex> lock(mutex);
+
+					if (shutdown)
+						return State::Shutdown;
+
+					// Like the real socket: a waiting datagram comes first, the interrupt then ends the next wait
+					if (!queue.empty())
+						return State::Readable;
+
+					if (std::exchange(interrupted, false))
+						return State::Interrupted;
+				}
+
+				if (netlink::IDeadlineTimer::Clock::now() >= deadline)
+					return State::TimedOut;
+
+				changed->waitUntil(deadline);
+			}
+		}
+
 		std::mutex												   mutex;
-		std::condition_variable									   cv;
+		std::unique_ptr<netlink::IDeadlineTimer>				   changed{netlink::makeDeadlineTimer()}; // woken with every change below
 		std::deque<std::pair<std::vector<uint8_t>, SocketAddress>> queue;
 		bool													   shutdown{false};
+		bool													   interrupted{false};
 	};
 
 	struct Binding
@@ -94,7 +136,7 @@ private:
 				std::lock_guard<std::mutex> lock(inbox->mutex);
 				inbox->queue.emplace_back(std::vector<uint8_t>(data.begin(), data.end()), from);
 			}
-			inbox->cv.notify_all();
+			inbox->changed->wake();
 		}
 	}
 
@@ -123,15 +165,16 @@ public:
 		return data.size();
 	}
 
-	Result<Datagram> receiveFrom(std::span<uint8_t> buffer, std::chrono::milliseconds timeout) override
+	Result<Datagram> receiveFrom(std::span<uint8_t> buffer, std::chrono::microseconds timeout) override
 	{
-		std::unique_lock<std::mutex> lock(mInbox->mutex);
+		if (auto ready = waitReadable(timeout); !ready)
+			return std::unexpected(ready.error());
 
-		if (!mInbox->cv.wait_for(lock, timeout, [this] { return !mInbox->queue.empty() || mInbox->shutdown; }))
+		std::lock_guard<std::mutex> lock(mInbox->mutex);
+
+		// Taken by another reader in the meantime
+		if (mInbox->queue.empty())
 			return std::unexpected(SocketError::Timeout);
-
-		if (mInbox->shutdown)
-			return std::unexpected(SocketError::Closed);
 
 		auto [payload, from] = std::move(mInbox->queue.front());
 		mInbox->queue.pop_front();
@@ -139,6 +182,30 @@ public:
 		const size_t size = std::min(payload.size(), buffer.size());
 		std::memcpy(buffer.data(), payload.data(), size);
 		return Datagram{size, from};
+	}
+
+	Result<void> waitReadable(std::chrono::microseconds timeout) override
+	{
+		using State = FakeDatagramNetwork::Inbox::State;
+
+		switch (mInbox->waitUntilReadable(timeout))
+		{
+		case State::Readable: return {};
+		case State::Shutdown: return std::unexpected(SocketError::Closed);
+		case State::Interrupted: return std::unexpected(SocketError::Cancelled);
+		case State::TimedOut: break;
+		}
+
+		return std::unexpected(SocketError::Timeout);
+	}
+
+	void interrupt() override
+	{
+		{
+			std::lock_guard<std::mutex> lock(mInbox->mutex);
+			mInbox->interrupted = true;
+		}
+		mInbox->changed->wake();
 	}
 
 	SocketAddress localAddress() const override { return mLocal; }
@@ -149,7 +216,7 @@ public:
 			std::lock_guard<std::mutex> lock(mInbox->mutex);
 			mInbox->shutdown = true;
 		}
-		mInbox->cv.notify_all();
+		mInbox->changed->wake();
 	}
 
 private:
