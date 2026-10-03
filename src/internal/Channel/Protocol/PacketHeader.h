@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "ByteOrder.h"
+#include "NetLinkConstants.h"
 #include "PacketFlags.h"
 
 
@@ -26,6 +27,12 @@ inline constexpr size_t	  BaseHeaderSize		= 20;
 inline constexpr size_t	  FragmentExtensionSize = 4;
 inline constexpr size_t	  TagExtensionSize		= 4;
 inline constexpr size_t	  MaxHeaderSize			= BaseHeaderSize + FragmentExtensionSize + TagExtensionSize;
+
+// Every fragment of a message but the last one carries this many bytes: what a full datagram leaves behind the largest header
+inline constexpr size_t	  MaxFragmentBody		= internal::MaxDatagramSize - MaxHeaderSize;
+
+// Fragments of the largest message (14,316). A packet claiming more is not part of any message a link sends.
+inline constexpr size_t	  MaxFragmentCount		= (internal::MaxMessagePayload + MaxFragmentBody - 1) / MaxFragmentBody;
 
 
 /*
@@ -119,7 +126,7 @@ inline std::vector<uint8_t> encodePacket(const PacketHeader &header, std::span<c
 // Returns nullopt for anything that is not a well-formed packet of this protocol version
 inline std::optional<DecodedPacket> decodePacket(const std::span<const uint8_t> datagram)
 {
-	if (datagram.size() < BaseHeaderSize)
+	if (datagram.size() < BaseHeaderSize || datagram.size() > internal::MaxDatagramSize)
 		return std::nullopt;
 
 	const uint8_t *in = datagram.data();
@@ -152,7 +159,7 @@ inline std::optional<DecodedPacket> decodePacket(const std::span<const uint8_t> 
 		packet.header.fragCount = readUint16(in + size + 2);
 		size += FragmentExtensionSize;
 
-		if (packet.header.fragCount == 0 || packet.header.fragIndex >= packet.header.fragCount)
+		if (packet.header.fragCount == 0 || packet.header.fragCount > MaxFragmentCount || packet.header.fragIndex >= packet.header.fragCount)
 			return std::nullopt;
 
 		// The last-fragment bit must agree with the index

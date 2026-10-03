@@ -115,8 +115,9 @@ flags: bit 0-2 kind (Data, DataAck, AckAck, Heartbeat) · 3 reliable · 4 fragme
   hold it back at the receiver.
 - **Loss recovery**: a packet is resent as soon as three packets sent after it are acknowledged (fast retransmit),
   otherwise after its retransmission timeout (RFC 6298, backing off while nothing is acknowledged).
-- **Congestion control**: a congestion window limits the packets in flight. It doubles per round trip until the first
-  loss, then grows by one packet per round trip and halves with every round of losses.
+- **Congestion control**: a congestion window limits the application packets in flight. It doubles per round trip until
+  the first loss, then grows by one packet per round trip and halves with every round of losses. Control signals do not
+  wait for it.
 - **Flow control**: every `DataAck` tells the sender whether the receiver's application keeps up. While it does not,
   the sender pauses the application channel and only asks again every 50 ms.
 - **Fragmentation**: messages above one datagram (1200 bytes on the wire, below the Ethernet MTU) are split into
@@ -296,6 +297,7 @@ sockets on loopback, and services wired the same way `NetLinkCore` wires them. E
 | `BM_PeerChannel_Throughput` | How many messages and MiB/s get through a channel? | a batch until all arrived (ms) |
 | `BM_PeerChannel_RoundTrip` | How long does a reliable request/reply take? | one request and its reply (µs) |
 | `BM_PeerChannel_FanIn` | Does a hub keep up with many peers sending at once? | all messages arrived or delivery stopped (ms) |
+| `BM_PeerChannel_FanOut` | Does one sender keep up with many peers at once? | all messages arrived or delivery stopped (ms) |
 | `BM_TimeoutService_StartCancel` | What does arming and cancelling a timeout cost with many active? | one arm + cancel (µs) |
 | `BM_TimeoutService_FireLatency` | How quickly does a due timeout fire with many active? | arming until the callback ran (µs) |
 | `BM_TimeoutService_TimerResolution` | How precisely do short timeouts fire? | the whole timeout (ms) |

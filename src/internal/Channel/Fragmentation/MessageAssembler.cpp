@@ -27,6 +27,13 @@ std::optional<AssembledMessage> MessageAssembler::accept(const PacketHeader &hea
 		return AssembledMessage{.tag = header.tag, .body = std::vector<uint8_t>(body.begin(), body.end())};
 	}
 
+	if (!header.flags.isLastFragment() && body.size() != mFragmentBody)
+	{
+		NETLINK_LOG_WARNING("Fragment {} of {} carries {} instead of {} bytes, dropping the message", header.fragIndex, header.fragCount, body.size(), mFragmentBody);
+		reset();
+		return std::nullopt;
+	}
+
 	if (header.fragIndex == 0)
 	{
 		reset();
@@ -35,8 +42,7 @@ std::optional<AssembledMessage> MessageAssembler::accept(const PacketHeader &hea
 		mFragCount	= header.fragCount;
 		mTag		= header.tag;
 
-		// Every fragment but the last one is as large as the first
-		mBody.reserve(std::min(body.size() * header.fragCount, mMaxMessageSize));
+		mBody.reserve(std::min({body.size() * header.fragCount, mMaxMessageSize, MaxInitialReserve}));
 	}
 
 	if (!mAssembling || header.fragCount != mFragCount || header.fragIndex != mNextIndex)

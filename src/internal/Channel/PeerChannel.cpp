@@ -591,6 +591,14 @@ void netlink::PeerChannel::receivePending(net::IDatagramSocket &socket)
 	for (size_t received = 0; received < MaxDatagramsPerPass; ++received)
 	{
 		const auto datagram = socket.receiveFrom(mReceiveBuffer, std::chrono::microseconds::zero());
+
+		// Larger than any datagram of a channel: the operating system dropped it, whatever waits behind it is still read
+		if (!datagram && datagram.error() == net::SocketError::MessageTooLarge)
+		{
+			NETLINK_LOG_DEBUG("Dropping a datagram that exceeds the receive buffer");
+			continue;
+		}
+
 		if (!datagram)
 			break;
 

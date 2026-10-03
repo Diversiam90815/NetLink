@@ -2,8 +2,8 @@
   ==============================================================================
 	Module:         PeerChannelBenchmarks
 	Description:    Production PeerChannels on real UDP loopback sockets:
-					throughput, request/reply latency and many senders into one
-					receiver
+					throughput, request/reply latency, many senders into one
+					receiver and one sender to many receivers
   ==============================================================================
 */
 
@@ -244,5 +244,78 @@ static void BM_PeerChannel_FanIn(benchmark::State &state)
 	peers.stop();
 }
 BENCHMARK(BM_PeerChannel_FanIn)->ArgName("senders")->Arg(1)->Arg(8)->Arg(32)->Arg(128)->UseManualTime()->MeasureProcessCPUTime()->Unit(benchmark::kMillisecond);
+
+
+// Time: the hub streams 500 messages of 1 KiB to each of N peers, one message per peer in turn, until the last one
+// arrived (or delivery stopped). delivered_pct and links_lost: as for FanIn.
+static void BM_PeerChannel_FanOut(benchmark::State &state)
+{
+	constexpr uint64_t		 PerReceiver = 500;
+	const auto				 receivers	 = static_cast<size_t>(state.range(0));
+	const auto				 payload	 = bench::makePayload(bench::KiB);
+
+	// Declared before the channels: their threads report into these
+	bench::CompletionCounter received;
+	std::atomic<uint64_t>	 linksLost{0};
+	std::atomic<int64_t>	 lastArrival{0}; // steady clock ticks of the latest message at any peer
+
+	LoopbackPeers			 peers(receivers);
+	if (!peers.open())
+	{
+		state.SkipWithError("Could not bind the channels to 127.0.0.1");
+		return;
+	}
+
+	auto countLoss = [&linksLost](const std::string &, const std::string &) { ++linksLost; };
+	peers.hub().setOnPeerLost(countLoss);
+
+	for (size_t r = 0; r < receivers; ++r)
+	{
+		peers.peer(r).setMessageCallback(
+			[&](const std::string &, uint32_t, std::vector<uint8_t>)
+			{
+				// Every peer reports from a thread of its own: the latest arrival wins
+				const int64_t arrival = bench::Clock::now().time_since_epoch().count();
+				int64_t		  latest  = lastArrival.load();
+				while (latest < arrival && !lastArrival.compare_exchange_weak(latest, arrival))
+				{
+				}
+
+				received.notify();
+			});
+		peers.peer(r).setOnPeerLost(countLoss);
+	}
+
+	peers.start();
+
+	uint64_t delivered = 0;
+
+	for (auto _ : state)
+	{
+		const uint64_t base	 = received.value();
+		const auto	   start = bench::Clock::now();
+
+		for (uint64_t i = 0; i < PerReceiver; ++i)
+		{
+			for (size_t r = 0; r < receivers; ++r)
+				bench::sendWithBackpressure(peers.hub(), peers.peerName(r), DataType, payload);
+		}
+
+		// Done when everything arrived, or when nothing arrived for 5 s: the rest was lost with failed links
+		received.waitWhileProgressing(base + receivers * PerReceiver, std::chrono::milliseconds{5000});
+		delivered += received.value() - base;
+
+		const auto finished = bench::Clock::time_point(bench::Clock::duration(lastArrival.load()));
+		state.SetIterationTime(std::chrono::duration<double>(std::max(finished, start) - start).count());
+	}
+
+	const auto sent					= static_cast<uint64_t>(state.iterations()) * receivers * PerReceiver;
+	state.counters["delivered_pct"] = bench::percent(delivered, sent);
+	state.counters["links_lost"]	= benchmark::Counter(static_cast<double>(linksLost.load()), benchmark::Counter::kAvgIterations);
+	state.SetItemsProcessed(static_cast<int64_t>(delivered));
+
+	peers.stop();
+}
+BENCHMARK(BM_PeerChannel_FanOut)->ArgName("receivers")->Arg(1)->Arg(8)->Arg(32)->UseManualTime()->MeasureProcessCPUTime()->Unit(benchmark::kMillisecond);
 
 } // namespace ChannelBenchmarks

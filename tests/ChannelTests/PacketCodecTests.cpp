@@ -189,6 +189,35 @@ TEST(PacketCodec, RejectsForeignOrBrokenDatagrams)
 }
 
 
+TEST(PacketCodec, OversizedDatagram_IsDropped)
+{
+	const PacketHeader		   header = makeDataHeader(1);
+
+	const std::vector<uint8_t> fits(netlink::internal::MaxDatagramSize - header.encodedSize());
+	EXPECT_TRUE(decodePacket(encodePacket(header, fits)).has_value()) << "A full datagram, the largest one a link sends";
+
+	const std::vector<uint8_t> tooLarge(fits.size() + 1);
+	EXPECT_FALSE(decodePacket(encodePacket(header, tooLarge)).has_value()) << "One byte more than any link sends";
+}
+
+
+TEST(PacketCodec, FragmentCountBeyondTheLargestMessage_IsRejected)
+{
+	PacketHeader header = makeDataHeader(5);
+	header.flags.setFragment(true, false);
+	header.fragIndex = 0;
+
+	header.fragCount = static_cast<uint16_t>(MaxFragmentCount);
+	EXPECT_TRUE(decodePacket(encodePacket(header)).has_value()) << "The fragments of a 16 MiB message";
+
+	header.fragCount = static_cast<uint16_t>(MaxFragmentCount + 1);
+	EXPECT_FALSE(decodePacket(encodePacket(header)).has_value());
+
+	header.fragCount = UINT16_MAX;
+	EXPECT_FALSE(decodePacket(encodePacket(header)).has_value());
+}
+
+
 TEST(PacketCodec, RejectsInconsistentFragmentExtension)
 {
 	PacketHeader header = makeDataHeader(5);

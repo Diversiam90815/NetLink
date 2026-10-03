@@ -1,3 +1,6 @@
+// First: on Windows it brings in WinSock2.h, which has to come before anything that includes windows.h
+#include "Socket/Platform/SocketCommon.h"
+
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -75,6 +78,43 @@ TEST(UdpSocket, SendParts_ArrivesAsOneDatagram)
 	auto second = receiver->receiveFrom(buffer, 2s);
 	ASSERT_TRUE(second.has_value()) << toString(second.error());
 	EXPECT_EQ(std::string(buffer.begin(), buffer.begin() + second->size), "alone") << "An empty body is allowed";
+}
+
+
+TEST(UdpSocket, DatagramLargerThanTheBuffer_IsDroppedAndReported)
+{
+	auto receiver = UdpSocket::bind({ipv4("127.0.0.1"), 0});
+	auto sender	  = UdpSocket::bind({ipv4("127.0.0.1"), 0});
+	ASSERT_TRUE(receiver && sender);
+
+	ASSERT_TRUE(sender->sendTo(receiver->localAddress(), asBytes(std::string(200, 'x'))));
+	ASSERT_TRUE(sender->sendTo(receiver->localAddress(), asBytes("next")));
+
+	std::vector<uint8_t> buffer(100);
+
+	auto				 oversized = receiver->receiveFrom(buffer, 2s);
+	ASSERT_FALSE(oversized.has_value()) << "A cut off datagram must not pass as a whole one";
+	EXPECT_EQ(oversized.error(), SocketError::MessageTooLarge);
+
+	auto next = receiver->receiveFrom(buffer, 2s);
+	ASSERT_TRUE(next.has_value()) << toString(next.error());
+	EXPECT_EQ(std::string(buffer.begin(), buffer.begin() + next->size), "next") << "The oversized datagram is gone, the one behind it is not";
+}
+
+
+TEST(UdpSocket, NoBufferSpace_IsWouldBlock)
+{
+	using namespace netlink::net::platform::common;
+
+#if defined(_WIN32)
+	EXPECT_TRUE(isWouldBlock(WSAEWOULDBLOCK));
+	EXPECT_TRUE(isWouldBlock(WSAENOBUFS)) << "A full system buffer is a reason to try again, not a failed socket";
+	EXPECT_FALSE(isWouldBlock(WSAECONNRESET));
+#else
+	EXPECT_TRUE(isWouldBlock(EAGAIN));
+	EXPECT_TRUE(isWouldBlock(ENOBUFS)) << "A full system buffer is a reason to try again, not a failed socket";
+	EXPECT_FALSE(isWouldBlock(ECONNRESET));
+#endif
 }
 
 

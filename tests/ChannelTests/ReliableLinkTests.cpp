@@ -837,6 +837,66 @@ TEST_F(ReliableLinkTest, ControlSignal_IsNotHeldUpByAFullApplicationWindow)
 }
 
 
+TEST_F(ReliableLinkTest, ControlSignal_IsNotHeldUpByAFullCongestionWindow)
+{
+	recreate(congestionConfig());
+
+	for (int i = 0; i < 100; ++i)
+		a.queueReliable(ChannelId::Application, 0, bytes({1}));
+
+	EXPECT_EQ(dataSeqs(a.takeOutgoing(now)).size(), config.initialCongestionWindow) << "The congestion window is full, and nothing of it is acknowledged";
+	EXPECT_FALSE(a.hasOutgoing());
+
+	a.queueReliable(ChannelId::Control, 0, bytes({42}));
+	EXPECT_TRUE(a.hasOutgoing()) << "The owner of the link must learn that there is something to send";
+
+	const auto pass = a.takeOutgoing(now);
+	ASSERT_EQ(pass.size(), 1u) << "The congestion window only holds application data back";
+	EXPECT_EQ(dataSeqs(pass, ChannelId::Control), (std::vector<uint64_t>{1}));
+
+	deliverPass(b, pass);
+
+	ASSERT_EQ(atB.size(), 1u);
+	EXPECT_EQ(atB[0].channel, ChannelId::Control);
+	EXPECT_EQ(atB[0].body, bytes({42}));
+}
+
+
+TEST_F(ReliableLinkTest, ControlLoss_KeepsAccountingBalanced)
+{
+	recreate(congestionConfig());
+
+	// A control signal is lost and repaired by its timeout
+	a.queueReliable(ChannelId::Control, 0, bytes({42}));
+	a.takeOutgoing(now);
+	advance(100ms);
+	settle();
+
+	ASSERT_EQ(atB.size(), 1u);
+	EXPECT_EQ(a.stats().retransmissions, 1u);
+	EXPECT_EQ(a.inFlightCount(), 0u);
+
+	// Neither the lost signal nor one that is on the wire right now takes room in the application's window
+	const size_t window = a.congestionWindow();
+
+	a.queueReliable(ChannelId::Control, 0, bytes({43}));
+	for (int i = 0; i < 100; ++i)
+		a.queueReliable(ChannelId::Application, 0, bytes({1}));
+
+	const auto pass = a.takeOutgoing(now);
+	EXPECT_EQ(dataSeqs(pass, ChannelId::Control).size(), 1u);
+	EXPECT_EQ(dataSeqs(pass, ChannelId::Application).size(), window) << "The whole window is available to application data";
+	EXPECT_TRUE(dataSeqs(a.takeOutgoing(now)).empty()) << "... and not more than that";
+
+	deliverPass(b, pass);
+	settle();
+
+	EXPECT_EQ(atB.size(), 1u + 1u + 100u);
+	EXPECT_EQ(a.inFlightCount(), 0u);
+	EXPECT_FALSE(a.hasPendingReliable());
+}
+
+
 TEST_F(ReliableLinkTest, ControlSignals_GoFirstInASendPass)
 {
 	recreate(congestionConfig());

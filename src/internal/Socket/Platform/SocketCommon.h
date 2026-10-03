@@ -44,9 +44,10 @@ inline int			 lastNativeError()
 {
 	return WSAGetLastError();
 }
+// Also when the system ran out of buffer space: nothing was sent or received, and trying again later can succeed
 inline bool isWouldBlock(const int code)
 {
-	return code == WSAEWOULDBLOCK;
+	return code == WSAEWOULDBLOCK || code == WSAENOBUFS;
 }
 inline bool isInterrupted(const int code)
 {
@@ -70,9 +71,10 @@ inline int			 lastNativeError()
 {
 	return errno;
 }
+// Also when the system ran out of buffer space: nothing was sent or received, and trying again later can succeed
 inline bool isWouldBlock(int code)
 {
-	return code == EAGAIN || code == EWOULDBLOCK;
+	return code == EAGAIN || code == EWOULDBLOCK || code == ENOBUFS;
 }
 inline bool isInterrupted(int code)
 {

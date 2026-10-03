@@ -18,7 +18,8 @@ class MessageAssemblerTest : public ::testing::Test
 protected:
 	static constexpr size_t		MaxBody = 100;
 
-	MessageAssembler			assembler;
+	// Fragments of these tests are cut small
+	MessageAssembler			assembler{internal::MaxMessagePayload, MaxBody};
 
 	static std::vector<uint8_t> makeBody(size_t size, uint8_t seed = 7)
 	{
@@ -193,7 +194,7 @@ TEST_F(MessageAssemblerTest, SkippedFragment_AbortsTheMessage)
 
 TEST_F(MessageAssemblerTest, OversizedMessage_IsDropped)
 {
-	MessageAssembler small(150);
+	MessageAssembler small(150, MaxBody);
 
 	EXPECT_FALSE(feed(small, makeBody(250)).has_value());
 	EXPECT_FALSE(small.isAssembling());
@@ -220,12 +221,54 @@ TEST_F(MessageAssemblerTest, Reset_ForgetsTheMessageInProgress)
 }
 
 
+TEST_F(MessageAssemblerTest, ShortNonLastFragment_IsRejected)
+{
+	const auto fragments = FragmentationService::split(makeBody(350), MaxBody);
+
+	EXPECT_FALSE(assembler.accept(headerFor(fragments[0]), fragments[0].body.first(MaxBody - 1)).has_value());
+	EXPECT_FALSE(assembler.isAssembling()) << "A sender fills every fragment but the last one";
+
+	EXPECT_FALSE(assembler.accept(headerFor(fragments[0]), fragments[0].body).has_value());
+	EXPECT_FALSE(assembler.accept(headerFor(fragments[1]), fragments[1].body.first(1)).has_value());
+	EXPECT_FALSE(assembler.isAssembling()) << "Also in the middle of a message";
+
+	EXPECT_FALSE(assembler.accept(headerFor(fragments[2]), fragments[2].body).has_value());
+	EXPECT_FALSE(assembler.accept(headerFor(fragments[3]), fragments[3].body).has_value()) << "The rest of the dropped message must not complete it";
+
+	const auto body	   = makeBody(350, 2);
+	const auto message = feed(assembler, body);
+	ASSERT_TRUE(message.has_value()) << "The last fragment may be shorter, and the assembler keeps working after a dropped message";
+	EXPECT_EQ(message->body, body);
+}
+
+
+TEST_F(MessageAssemblerTest, ForgedFragmentCount_DoesNotReserveTheMaximum)
+{
+	MessageAssembler		   wire; // fragments as a link really cuts them
+	const std::vector<uint8_t> body(MaxFragmentBody);
+
+	// The first fragment of what claims to be the largest message there is
+	PacketHeader			   header;
+	header.flags	   = PacketFlags::data(ChannelId::Application, true).setFragment(true, false);
+	header.srcStreamID = 1;
+	header.seq		   = 1;
+	header.fragIndex   = 0;
+	header.fragCount   = static_cast<uint16_t>(MaxFragmentCount);
+
+	EXPECT_FALSE(wire.accept(header, body).has_value());
+	ASSERT_TRUE(wire.isAssembling());
+	EXPECT_LE(wire.reservedBytes(), MessageAssembler::MaxInitialReserve) << "One datagram must not make the receiver set 16 MiB aside";
+}
+
+
 TEST_F(MessageAssemblerTest, LargeMessageRoundTrip)
 {
-	const auto body	   = makeBody(size_t{4} * 1024 * 1024);
-	const auto message = feed(assembler, body, 77, 1172);
+	MessageAssembler wire; // fragments as a link really cuts them
 
-	ASSERT_TRUE(message.has_value());
+	const auto		 body	 = makeBody(size_t{4} * 1024 * 1024);
+	const auto		 message = feed(wire, body, 77, MaxFragmentBody);
+
+	ASSERT_TRUE(message.has_value()) << "Also when the message outgrows what was set aside for it at first";
 	EXPECT_EQ(message->body, body);
 	EXPECT_EQ(message->tag, 77u);
 }

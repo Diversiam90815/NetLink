@@ -36,7 +36,13 @@ constexpr int	 MaxBackoffSteps	= 16;
 
 uint32_t makeStreamID(const uint32_t different)
 {
-	thread_local std::mt19937				generator{std::random_device{}()};
+	// Seeded with more than one word of entropy: a single one leaves only 2^32 possible sequences of IDs
+	thread_local std::mt19937 generator = []
+	{
+		std::random_device device;
+		std::seed_seq	   seed{device(), device(), device(), device(), device(), device(), device(), device()};
+		return std::mt19937(seed);
+	}();
 	std::uniform_int_distribution<uint32_t> distribution(1, UINT32_MAX);
 
 	uint32_t								id = 0;
@@ -95,8 +101,8 @@ ReliableLink::Stream &ReliableLink::streamFor(const ChannelId channel)
 
 	if (!slot)
 	{
-		slot = channel == ChannelId::Control ? std::make_unique<Stream>(ControlQueueCapacity, OverflowPolicy::DropNewest, mConfig.maxMessageSize)
-											 : std::make_unique<Stream>(mConfig.sendQueueCapacity, mConfig.sendQueueOverflow, mConfig.maxMessageSize);
+		slot = channel == ChannelId::Control ? std::make_unique<Stream>(ControlQueueCapacity, OverflowPolicy::DropNewest, mConfig.maxMessageSize, maxFragmentBody())
+											 : std::make_unique<Stream>(mConfig.sendQueueCapacity, mConfig.sendQueueOverflow, mConfig.maxMessageSize, maxFragmentBody());
 	}
 
 	return *slot;
@@ -247,7 +253,7 @@ void ReliableLink::sendData(Stream &stream, const ChannelId channel, std::vector
 		if (!entry && !hasSendable(stream))
 			return;
 
-		if (!mayTransmit(stream, now))
+		if (!mayTransmit(stream, channel, now))
 			return;
 
 		if (entry)
@@ -263,9 +269,16 @@ void ReliableLink::sendData(Stream &stream, const ChannelId channel, std::vector
 }
 
 
-bool ReliableLink::mayTransmit(Stream &stream, const TimePoint now)
+bool ReliableLink::congestionWindowOpen(const Stream &stream, const ChannelId channel) const
 {
-	if (mOnTheWire >= static_cast<size_t>(mCongestionWindow))
+	// Control signals are few and small, and a session has to be able to end while the window is full of application data
+	return channel == ChannelId::Control || stream.onTheWire < static_cast<size_t>(mCongestionWindow);
+}
+
+
+bool ReliableLink::mayTransmit(Stream &stream, const ChannelId channel, const TimePoint now)
+{
+	if (!congestionWindowOpen(stream, channel))
 	{
 		mWindowLimited = true;
 		return false;
@@ -375,7 +388,6 @@ void ReliableLink::transmit(Stream &stream, InFlight &entry, std::vector<Outgoin
 		scheduleDeadline(now + mConfig.failureTimeout);
 	}
 
-	++mOnTheWire;
 	++stream.onTheWire;
 
 	OutgoingDatagram datagram = makeDatagram(entry.header);
@@ -429,7 +441,7 @@ void ReliableLink::onPacket(const DecodedPacket &packet, const TimePoint now)
 	// Acknowledgements for a channel nothing was ever sent on cannot be meant for this stream
 	case PacketKind::DataAck:
 		if (auto *stream = existingStream(channel))
-			handleDataAck(*stream, header, packet.body, now);
+			handleDataAck(*stream, channel, header, packet.body, now);
 		break;
 
 	case PacketKind::AckAck:
@@ -517,7 +529,7 @@ void ReliableLink::handleUnreliableData(const PacketHeader &header, const std::s
 }
 
 
-void ReliableLink::handleDataAck(Stream &stream, const PacketHeader &header, const std::span<const uint8_t> body, const TimePoint now)
+void ReliableLink::handleDataAck(Stream &stream, const ChannelId channel, const PacketHeader &header, const std::span<const uint8_t> body, const TimePoint now)
 {
 	if (body.size() < AckWindowFieldSize)
 		return;
@@ -540,10 +552,7 @@ void ReliableLink::handleDataAck(Stream &stream, const PacketHeader &header, con
 			return;
 
 		if (!entry->lost)
-		{
-			--mOnTheWire;
 			--stream.onTheWire;
-		}
 
 		mLargestAcked = std::max(mLargestAcked, entry->transmission);
 		mAcknowledged.push_back(entry->transmission);
@@ -601,6 +610,10 @@ void ReliableLink::handleDataAck(Stream &stream, const PacketHeader &header, con
 
 	// While packets are missing behind acknowledged ones the window does not grow: they are probably lost
 	if (detectLosses(stream, now))
+		return;
+
+	// Control signals never wait for the window, so their acknowledgements say nothing about how much it can take
+	if (channel != ChannelId::Application)
 		return;
 
 	// Packets from before the window was last reduced say nothing about the reduced window: only what was sent since counts
@@ -679,7 +692,6 @@ bool ReliableLink::detectLosses(Stream &stream, const TimePoint now)
 void ReliableLink::markLost(Stream &stream, const uint64_t seq, InFlight &entry, const bool timedOut)
 {
 	entry.lost = true;
-	--mOnTheWire;
 	--stream.onTheWire;
 	stream.lost.push_back(seq);
 
@@ -877,18 +889,17 @@ bool ReliableLink::hasOutgoing() const
 	if (mHeartbeatDue || !mUnreliableQueue.empty())
 		return true;
 
-	const bool windowOpen = mOnTheWire < static_cast<size_t>(mCongestionWindow);
-
-	return std::ranges::any_of(mStreams,
-							   [&](const auto &stream)
+	return std::ranges::any_of(ChannelOrder,
+							   [&](const ChannelId channel)
 							   {
+								   const Stream *stream = existingStream(channel);
 								   if (!stream)
 									   return false;
 
 								   if (!stream->dataAcks.empty() || stream->ackAckDue)
 									   return true;
 
-								   return windowOpen && stream->peerWindow > 0 && (hasSendable(*stream) || !stream->lost.empty());
+								   return congestionWindowOpen(*stream, channel) && stream->peerWindow > 0 && (hasSendable(*stream) || !stream->lost.empty());
 							   });
 }
 
@@ -933,7 +944,6 @@ void ReliableLink::resetStreams()
 	mRtt.reset();
 	mCongestionWindow	= static_cast<double>(std::clamp(mConfig.initialCongestionWindow, mConfig.minCongestionWindow, mConfig.maxCongestionWindow));
 	mSlowStartThreshold = std::numeric_limits<double>::max();
-	mOnTheWire			= 0;
 	mTransmissions		= 0;
 	mLargestAcked		= 0;
 	mRecoveryStart		= 0;

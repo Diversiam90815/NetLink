@@ -157,6 +157,7 @@ SocketError common::mapNativeError(const int code)
 	case WSAEAFNOSUPPORT: return SocketError::InvalidArgument;
 	case WSAENETUNREACH:
 	case WSAEHOSTUNREACH:
+	case WSAEHOSTDOWN:
 	case WSAENETDOWN: return SocketError::NetworkUnreachable;
 	case WSAEMSGSIZE: return SocketError::MessageTooLarge;
 	case WSANOTINITIALISED: return SocketError::NotInitialized;

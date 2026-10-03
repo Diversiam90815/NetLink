@@ -39,12 +39,13 @@
 	two small datagrams per batch of Data packets instead of two per packet.
 
  Channels:
-	Control and Application are streams of their own (seqs, send window, reorder buffer), sharing only the congestion
-	window. Application data can neither delay a control signal nor hold it back in the receiver's reorder buffer.
+	Control and Application are streams of their own (seqs, send window, reorder buffer). Application data can neither
+	delay a control signal nor hold it back in the receiver's reorder buffer.
 
  Loss and congestion:
 	A packet is retransmitted as soon as packets sent after it are acknowledged (fast retransmit), otherwise after its
-	retransmission timeout. How many packets may be unacknowledged at once is adapted to the path (congestion window).
+	retransmission timeout. How many application packets may be unacknowledged at once is adapted to the path
+	(congestion window). Control signals do not wait for that window.
  */
 
 
@@ -220,7 +221,10 @@ private:
 	// Everything one channel needs for its reliable stream, in both directions
 	struct Stream
 	{
-		Stream(const size_t queueCapacity, const OverflowPolicy overflow, const size_t maxMessageSize) : queue(queueCapacity, overflow), assembler(maxMessageSize) {}
+		Stream(const size_t queueCapacity, const OverflowPolicy overflow, const size_t maxMessageSize, const size_t fragmentBody)
+			: queue(queueCapacity, overflow), assembler(maxMessageSize, fragmentBody)
+		{
+		}
 
 		// Send side
 		BoundedQueue<OutboundMessage>			 queue;
@@ -254,7 +258,7 @@ private:
 
 	void											  handleReliableData(ChannelId channel, const PacketHeader &header, std::span<const uint8_t> body, TimePoint now);
 	void											  handleUnreliableData(const PacketHeader &header, std::span<const uint8_t> body);
-	void											  handleDataAck(Stream &stream, const PacketHeader &header, std::span<const uint8_t> body, TimePoint now);
+	void											  handleDataAck(Stream &stream, ChannelId channel, const PacketHeader &header, std::span<const uint8_t> body, TimePoint now);
 	static void										  handleAckAck(Stream &stream, const PacketHeader &header, std::span<const uint8_t> body);
 
 	// Hands a packet that is next in its stream to the assembler
@@ -263,7 +267,8 @@ private:
 	// Send pass
 	void											  flushAcks(Stream &stream, ChannelId channel, std::vector<OutgoingDatagram> &pass);
 	void											  sendData(Stream &stream, ChannelId channel, std::vector<OutgoingDatagram> &pass, TimePoint now);
-	bool											  mayTransmit(Stream &stream, TimePoint now);
+	bool											  mayTransmit(Stream &stream, ChannelId channel, TimePoint now);
+	bool											  congestionWindowOpen(const Stream &stream, ChannelId channel) const;
 	static InFlight									 *nextLost(Stream &stream);
 	InFlight										 *nextFragment(Stream &stream, ChannelId channel) const;
 	void											  transmit(Stream &stream, InFlight &entry, std::vector<OutgoingDatagram> &pass, TimePoint now);
@@ -294,10 +299,9 @@ private:
 
 	std::array<std::unique_ptr<Stream>, ChannelCount> mStreams;
 
-	// Congestion control, shared by the channels: they travel the same path
+	// Congestion control. The window limits the application channel only (its Stream::onTheWire).
 	double											  mCongestionWindow;
 	double											  mSlowStartThreshold;
-	size_t											  mOnTheWire{0};		 // Data packets sent and neither acknowledged nor considered lost
 	uint64_t										  mTransmissions{0};	 // counts every Data transmission
 	uint64_t										  mLargestAcked{0};		 // the latest transmission that was acknowledged
 	uint64_t										  mRecoveryStart{0};	 // losses of transmissions up to this one already reduced the window

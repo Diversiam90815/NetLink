@@ -205,11 +205,30 @@ Result<Datagram> receiveDatagram(const NativeHandle handle, std::span<uint8_t> b
 	while (true)
 	{
 		sockaddr_in from{};
-		SockLen		length = sizeof(from);
 
-		if (const auto received =
-				::recvfrom(toNative(handle), reinterpret_cast<char *>(buffer.data()), clampLength(buffer.size()), 0, reinterpret_cast<sockaddr *>(&from), &length);
-			received != SocketErrorRet)
+#if defined(_WIN32)
+		// A datagram that does not fit into the buffer fails with WSAEMSGSIZE, and is gone
+		SockLen	   length	= sizeof(from);
+		const auto received = ::recvfrom(toNative(handle), reinterpret_cast<char *>(buffer.data()), clampLength(buffer.size()), 0, reinterpret_cast<sockaddr *>(&from), &length);
+#else
+		iovec part{};
+		part.iov_base = buffer.data();
+		part.iov_len  = buffer.size();
+
+		msghdr message{};
+		message.msg_name	= &from;
+		message.msg_namelen = sizeof(from);
+		message.msg_iov		= &part;
+		message.msg_iovlen	= 1;
+
+		const auto received = ::recvmsg(toNative(handle), &message, 0);
+
+		// A datagram that does not fit into the buffer is cut off silently, and its rest is gone: reported like on Windows
+		if (received != SocketErrorRet && (message.msg_flags & MSG_TRUNC) != 0)
+			return std::unexpected(SocketError::MessageTooLarge);
+#endif
+
+		if (received != SocketErrorRet)
 			return Datagram{.size = static_cast<size_t>(received), .from = fromSockaddr(from)};
 
 		const int code = lastNativeError();
