@@ -20,6 +20,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
 option(NETLINK_ENABLE_LOGGING "Enable logging via Logger library" OFF)
+set(NETLINK_SANITIZER "" CACHE STRING "Build the library, tests and benchmarks with a sanitizer: thread or address (clang, gcc)")
 
 include(cpm)
 
@@ -82,6 +83,20 @@ if (MSVC)
 else ()
     target_compile_options(${PROJECT_NAME} PRIVATE -Wall -Wextra -Wpedantic)
 endif ()
+
+if (NETLINK_SANITIZER STREQUAL "thread")
+    set(NETLINK_SANITIZER_FLAGS -fsanitize=thread)
+elseif (NETLINK_SANITIZER STREQUAL "address")
+    set(NETLINK_SANITIZER_FLAGS -fsanitize=address -fsanitize=undefined)
+elseif (NETLINK_SANITIZER)
+    message(FATAL_ERROR "NETLINK_SANITIZER must be 'thread' or 'address'")
+endif ()
+
+# PUBLIC: whatever links the library in this build (tests, benchmarks) is instrumented with it
+foreach (flag IN LISTS NETLINK_SANITIZER_FLAGS)
+    target_compile_options(${PROJECT_NAME} PUBLIC $<BUILD_INTERFACE:${flag}> $<BUILD_INTERFACE:-fno-omit-frame-pointer>)
+    target_link_options(${PROJECT_NAME} PUBLIC $<BUILD_INTERFACE:${flag}>)
+endforeach ()
 
 target_include_directories(${PROJECT_NAME} PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

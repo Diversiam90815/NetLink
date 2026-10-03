@@ -130,7 +130,7 @@ flags: bit 0-2 kind (Data, DataAck, AckAck, Heartbeat) · 3 reliable · 4 fragme
 
 | Thread            | Does                                                                                              |
 |-------------------|---------------------------------------------------------------------------------------------------|
-| I/O thread        | Reads the socket, acknowledges, retransmits, sends heartbeats. Never runs a callback.              |
+| I/O thread        | The only thread that reads and writes the channel socket: sends, acknowledges, retransmits. Never runs a callback. |
 | Delivery thread   | Hands control signals to the connection and validation services                                   |
 | Event thread      | Runs the application's callbacks, one at a time                                                   |
 | Timeout thread    | Fires the timeouts of the connection and validation flow                                          |
@@ -329,7 +329,7 @@ is never run by CI or ctest.
 | **Pure protocol core**   | `ReliableLink`, `MessageAssembler` and `HeartbeatService` contain no sockets or threads and take the time as a parameter, so loss, duplication and reordering are tested deterministically     |
 | **Seams for testing**    | `IDatagramSocket` lets the whole stack run on an in-memory network with configurable loss (`tests/Fakes`)                                                                                      |
 | **Observer / Callbacks** | `NetLinkCallbacks` wires application code to async events without coupling to internals                                                                                                        |
-| **Active Object**        | `ThreadBase` backs the single I/O thread of `PeerChannel` (receive, retransmit, heartbeats); callbacks run on separate threads fed by a `TaskQueue`                                            |
+| **Active Object**        | `ThreadBase` backs the single I/O thread of `PeerChannel` (send, receive, retransmit, heartbeats). Other threads only hand it messages through a `Mailbox`; callbacks run on separate threads fed by a `TaskQueue` |
 | **Platform seams**       | `IDeadlineTimer` and the socket `ReadWaiter` hide how each operating system waits precisely (high resolution waitable timer, `ppoll`, `kqueue`)                                                 |
 
 ## Platform

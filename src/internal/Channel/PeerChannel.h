@@ -9,7 +9,6 @@
 
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <functional>
 #include <map>
 #include <memory>
@@ -19,6 +18,7 @@
 #include <string>
 #include <vector>
 
+#include "Mailbox.h"
 #include "SignalPacket.h"
 #include "TaskQueue.h"
 #include "ThreadBase.h"
@@ -100,7 +100,7 @@ public:
 	// Binds the channel socket to the adapter address. Resets all links.
 	void		 setLocalIPv4(const net::IPv4Address &localIPv4);
 
-	// Starts the I/O loop (receiving, retransmissions, heartbeats) and the delivery thread
+	// Starts the I/O loop (receiving, sending, retransmissions, heartbeats) and the delivery thread
 	void		 start() override;
 
 	// Also wakes flush() and waiting sendMessage() calls: without the loop no acknowledgement can arrive anymore.
@@ -144,15 +144,17 @@ public:
 	// Waits until everything reliable to the peer was acknowledged. Requires the I/O loop to run.
 	bool		 flush(const std::string &computerName, std::chrono::milliseconds timeout);
 
+	struct LoopStats
+	{
+		uint64_t steps{0};		  // rounds of the I/O loop
+		uint64_t overdueWaits{0}; // waits that started with a timer already due
+	};
+
+	LoopStats loopStats() const { return {.steps = mSteps.load(), .overdueWaits = mOverdueWaits.load()}; }
+
 private:
 	using Clock		= std::chrono::steady_clock;
 	using TimePoint = Clock::time_point;
-
-	struct OutgoingDatagram
-	{
-		net::SocketAddress		  to;
-		channel::OutgoingDatagram datagram;
-	};
 
 	struct InboundMessage
 	{
@@ -180,94 +182,103 @@ private:
 		std::string		   reason;
 	};
 
-	// Work collected under mLinksMutex and carried out after releasing it
-	struct Batch
+	// What one step of the I/O loop hands over to the delivery threads
+	struct EventBatch
 	{
-		std::vector<OutgoingDatagram> datagrams;
-		std::vector<InboundMessage>	  messages;
-		std::vector<LostPeer>		  lostPeers;
-		bool						  wakeIoThread{false}; // a timer became due earlier than the I/O thread is waiting for
+		std::vector<InboundMessage> messages;
+		std::vector<LostPeer>		lostPeers;
 	};
 
-	void				   run() override;
-	void				   interruptWork() override;
-	void				   receivePending(net::IDatagramSocket &socket);
-	void				   handleDatagram(const net::SocketAddress &from, std::span<const uint8_t> bytes);
-	void				   serviceTimers();
-	void				   waitForWork(net::IDatagramSocket &socket);
+	struct LinkState
+	{
+		explicit LinkState(const channel::ReliabilityConfig &config) : link(config) {}
 
-	// Caller holds mLinksMutex
-	channel::ReliableLink *linkFor(const net::SocketAddress &address, bool create);
+		channel::ReliableLink link;
+		bool				  backlog{false};	// the mailbox may hold messages for this link
+		bool				  unsettled{false}; // flush() callers were not told yet that everything it took is acknowledged
+	};
 
-	// Everything a link produced: datagrams to send, received messages and events. I/O thread only: it alone hands
-	// messages over, so they reach their callbacks in the order the link delivered them.
-	void				   collect(const net::SocketAddress &address, channel::ReliableLink &link, Batch &batch, TimePoint now);
+	// --- I/O thread ------------------------------------------------------------
 
-	// Only the datagrams to send: for threads that queue messages. Their datagrams may reach the wire slightly before
-	// or after those of the I/O thread, which the links tolerate (ReliabilityConfig::reorderDelay).
-	void				   collectOutgoing(const net::SocketAddress &address, channel::ReliableLink &link, Batch &batch, TimePoint now);
+	void		 run() override;
+	void		 interruptWork() override;
+	void		 loop();
+	void		 fail();
 
-	// Records a timer. True if the I/O thread has to be woken, because it waits for a later one.
-	bool				   noteDeadline(std::optional<TimePoint> due);
+	// One round of the loop: commands, receiving, timers, sending. The time is passed in: a step never reads the clock.
+	EventBatch	 step(net::IDatagramSocket &socket, TimePoint now);
+	void		 apply(const channel::Mailbox::PostedCommand &command, TimePoint now);
+	void		 receivePending(net::IDatagramSocket &socket, TimePoint now);
+	void		 handleDatagram(const net::SocketAddress &from, std::span<const uint8_t> bytes, TimePoint now);
+	void		 serviceTimers(EventBatch &batch, TimePoint now);
+	void		 feed(const net::SocketAddress &address, LinkState &state);
+	void		 collect(const net::SocketAddress &address, LinkState &state, net::IDatagramSocket &socket, EventBatch &batch, TimePoint now);
+	void		 waitForWork(net::IDatagramSocket &socket);
+	LinkState	*linkFor(const net::SocketAddress &address, bool create);
 
-	// Caller must not hold mLinksMutex
-	void				   execute(Batch &batch);
-	void				   deliver(Batch &batch);
-	void				   routeControl(const net::SocketAddress &from, std::span<const uint8_t> body) const;
-	void				   routeApplication(const net::SocketAddress &from, uint32_t type, std::vector<uint8_t> body) const;
-	void				   reportLostPeer(const LostPeer &lost) const;
+	void		 deliver(EventBatch &batch);
+	void		 routeControl(const net::SocketAddress &from, std::span<const uint8_t> body) const;
+	void		 routeApplication(const net::SocketAddress &from, uint32_t type, std::vector<uint8_t> body) const;
+	void		 reportLostPeer(const LostPeer &lost) const;
 
-	bool				   sendSignal(const std::string &computerName, SignalType type, decltype(SignalPacket::payload) payload = PayloadEmpty{});
-	bool				   queueReliable(const PeerEndpoint &peer, channel::ChannelId channelId, uint32_t tag, std::vector<uint8_t> body, std::chrono::milliseconds timeout = {});
+	// --- Any thread ------------------------------------------------------------
 
-	PeerEndpoint		   resolvePeer(const std::string &computerName) const;
-	std::string			   nameOf(const net::SocketAddress &address) const;
+	bool		 sendSignal(const std::string &computerName, SignalType type, decltype(SignalPacket::payload) payload = PayloadEmpty{});
+	bool		 push(const PeerEndpoint &peer, channel::Mailbox::Lane lane, uint32_t tag, std::vector<uint8_t> body, std::chrono::milliseconds timeout = {});
+
+	PeerEndpoint resolvePeer(const std::string &computerName) const;
+	std::string	 nameOf(const net::SocketAddress &address) const;
 
 	// Caller holds mPeerRegistryMutex
-	void				   forgetAddress(const net::SocketAddress &address, const std::string &displayName);
+	void		 forgetAddress(const net::SocketAddress &address, const std::string &displayName);
 
-	void				   resetLinks();
+	void		 resetLinks();
+	void		 wakeIoThread();
 
-	std::shared_ptr<net::IDatagramSocket>								 socket() const;
+	std::shared_ptr<net::IDatagramSocket>	  socket() const;
 
 
-	net::DatagramSocketFactory											 mSocketFactory;
+	net::DatagramSocketFactory				  mSocketFactory;
 
-	mutable std::mutex													 mSocketMutex;
-	std::shared_ptr<net::IDatagramSocket>								 mSocket;
-	std::string															 mLocalComputerName;
-	net::IPv4Address													 mLocalIPv4;
-	std::atomic<int>													 mBoundPort{0};
-
-	std::vector<uint8_t>												 mReceiveBuffer; // I/O thread only
-	std::vector<net::SocketAddress>										 mTouched;		 // I/O thread only: links that received something in the current pass
+	mutable std::mutex						  mSocketMutex;
+	std::shared_ptr<net::IDatagramSocket>	  mSocket;
+	std::string								  mLocalComputerName;
+	net::IPv4Address						  mLocalIPv4;
+	PeerChannelConfig						  mPendingConfig; // set by setConfig(), taken over by the I/O thread
+	std::atomic<int>						  mBoundPort{0};
 
 	// Received messages and lost peers are handed over to these threads, so callbacks never hold up the I/O loop
-	TaskQueue															 mDelivery;
-	TaskQueue															*mApplicationQueue; // not owned. Null: application messages go through mDelivery as well
+	TaskQueue								  mDelivery;
+	TaskQueue								 *mApplicationQueue; // not owned. Null: application messages go through mDelivery as well
 
 	// Application payload handed over and not delivered yet, in bytes
-	std::shared_ptr<std::atomic<size_t>>								 mDeliveryBacklog{std::make_shared<std::atomic<size_t>>(0)};
+	std::shared_ptr<std::atomic<size_t>>	  mDeliveryBacklog{std::make_shared<std::atomic<size_t>>(0)};
 
-	std::atomic<bool>													 mInitialized{false};
-	ChannelConnectionCallbacks											 mConnectionCallbacks;
-	ChannelValidationCallbacks											 mValidationCallbacks;
-	SocketBoundCallback													 mOnSocketBound;
-	ChannelMessageCallback												 mMessageCallback;
-	PeerLostCallback													 mOnPeerLost;
+	std::atomic<bool>						  mInitialized{false};
+	ChannelConnectionCallbacks				  mConnectionCallbacks;
+	ChannelValidationCallbacks				  mValidationCallbacks;
+	SocketBoundCallback						  mOnSocketBound;
+	ChannelMessageCallback					  mMessageCallback;
+	PeerLostCallback						  mOnPeerLost;
 
-	// Reliability state, guarded by mLinksMutex
-	mutable std::mutex													 mLinksMutex;
-	std::condition_variable												 mLinksChanged; // signalled after links changed (acknowledgements, resets); flush() waits on it
-	PeerChannelConfig													 mConfig;
-	std::map<net::SocketAddress, std::unique_ptr<channel::ReliableLink>> mLinks;
-	channel::HeartbeatService											 mHeartbeat;
-	std::optional<TimePoint>											 mEarliestDeadline; // never later than the next timer of any link or heartbeat
-	std::optional<TimePoint>											 mWaitingUntil;		// while the I/O thread waits: when that wait ends
+	// Everything other threads want from the I/O thread goes through here
+	channel::Mailbox						  mMailbox;
 
-	std::map<std::string, PeerEndpoint>									 mPeerRegistry;		// key = displayName
-	std::map<net::SocketAddress, std::string>							 mNameByAddress;	// the same peers by address
-	mutable std::mutex													 mPeerRegistryMutex;
+	// Owned by the I/O thread
+	PeerChannelConfig						  mConfig;
+	std::map<net::SocketAddress, LinkState>	  mLinks;
+	channel::HeartbeatService				  mHeartbeat;
+	std::optional<TimePoint>				  mNextWake; // never later than the next timer of any link or heartbeat
+	std::vector<uint8_t>					  mReceiveBuffer;
+	std::vector<net::SocketAddress>			  mTouched;	 // links with something to send, deliver or report in the current step
+	channel::Mailbox::Work					  mWork;
+
+	std::atomic<uint64_t>					  mSteps{0};
+	std::atomic<uint64_t>					  mOverdueWaits{0};
+
+	std::map<std::string, PeerEndpoint>		  mPeerRegistry;  // key = displayName
+	std::map<net::SocketAddress, std::string> mNameByAddress; // the same peers by address
+	mutable std::mutex						  mPeerRegistryMutex;
 };
 
 } // namespace netlink

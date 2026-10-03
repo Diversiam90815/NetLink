@@ -45,7 +45,6 @@ struct ReliabilityConfig
 
 	// A packet counts as lost once this many packets that were sent after it are acknowledged (fast retransmit)
 	size_t					  reorderThreshold{3};
-	std::chrono::microseconds reorderDelay{1000};
 
 	// How often the sender asks again while the receiver's window is closed (its application is not keeping up)
 	std::chrono::milliseconds windowProbeInterval{50};

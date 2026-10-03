@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -13,6 +14,7 @@
 #include "Channel/PeerChannel.h"
 #include "FakeDatagramNetwork.h"
 #include "LossyDatagramSocket.h"
+#include "SpyDatagramSocket.h"
 #include "TaskQueue.h"
 
 using namespace netlink;
@@ -234,6 +236,14 @@ protected:
 		pcB->start();
 	}
 
+	// Connects again, with everything A does to its socket recorded in usageA
+	void spyOnA(const PeerChannelConfig &config = fastConfig())
+	{
+		pcA->deinit();
+		pcB->deinit();
+		connect(FakeNet::SpyDatagramSocket::wrap(network->factory("10.0.0.1"), usageA), network->factory("10.0.0.2"), config);
+	}
+
 	static std::vector<uint8_t> payload(size_t size, uint8_t seed)
 	{
 		std::vector<uint8_t> data(size);
@@ -243,6 +253,7 @@ protected:
 	}
 
 	std::shared_ptr<FakeNet::FakeDatagramNetwork> network = FakeNet::FakeDatagramNetwork::create();
+	std::shared_ptr<FakeNet::SocketUsage>		  usageA  = std::make_shared<FakeNet::SocketUsage>();
 
 	Recorder									  atA;
 	Recorder									  atB;
@@ -460,6 +471,22 @@ TEST_F(PeerChannelTest, Flush_WaitsUntilEverythingIsAcknowledged)
 }
 
 
+TEST_F(PeerChannelTest, Flush_RightAfterSend_SeesTheMessage)
+{
+	for (uint32_t i = 0; i < 50; ++i)
+	{
+		ASSERT_TRUE(pcA->sendMessage("pc-b", i, payload(8, 1), DeliveryMode::ReliableOrdered));
+		ASSERT_TRUE(pcA->flush("pc-b", 3s));
+		ASSERT_TRUE(waitUntilTrue([&] { return atB.messageCount() == i + 1; }, 1s)) << "Acknowledged means received";
+	}
+
+	pcB->deinit(); // nobody acknowledges anymore
+
+	ASSERT_TRUE(pcA->sendMessage("pc-b", 99, payload(8, 1), DeliveryMode::ReliableOrdered));
+	EXPECT_FALSE(pcA->flush("pc-b", 20ms)) << "A message that was just accepted counts, also before the I/O thread got to see it";
+}
+
+
 TEST_F(PeerChannelTest, Flush_ReturnsWhenTheLoopStops)
 {
 	pcB->deinit(); // nobody acknowledges anymore
@@ -497,20 +524,34 @@ class SmallQueuePeerChannelTest : public PeerChannelTest
 protected:
 	static constexpr size_t QueueCapacity = 8;
 
-	void					SetUp() override
+	static PeerChannelConfig smallQueueConfig()
 	{
 		PeerChannelConfig config			 = fastConfig();
 		config.reliability.sendQueueCapacity = QueueCapacity;
 		config.reliability.sendQueueOverflow = OverflowPolicy::DropNewest;
 		config.reliability.failureTimeout	 = 30s; // the link must outlive the time B is stopped
-		connect(network->factory("10.0.0.1"), network->factory("10.0.0.2"), config);
+		return config;
 	}
 
-	// Sends until the congestion window and the queue behind it are full. B must be stopped: nothing is acknowledged.
+	void SetUp() override { connect(network->factory("10.0.0.1"), network->factory("10.0.0.2"), smallQueueConfig()); }
+
+	// Sends until the congestion window and the queues behind it are full. B must be stopped: nothing is acknowledged.
 	void fillSendQueue()
 	{
-		while (queued < 10'000 && pcA->sendMessage("pc-b", queued, payload(8, 1), DeliveryMode::ReliableOrdered))
-			++queued;
+		const auto sendUntilRefused = [this]
+		{
+			while (queued < 10'000 && pcA->sendMessage("pc-b", queued, payload(8, 1), DeliveryMode::ReliableOrdered))
+				++queued;
+		};
+
+		// The I/O thread takes messages out of the queue while its link has room: only after that the queue stays full
+		uint32_t before = 0;
+		do
+		{
+			before = queued;
+			sendUntilRefused();
+			std::this_thread::sleep_for(50ms);
+		} while (queued != before);
 
 		ASSERT_GE(queued, QueueCapacity) << "At least the queue itself takes messages";
 		ASSERT_LT(queued, 10'000u) << "A full queue refuses a message that may not wait";
@@ -566,9 +607,128 @@ TEST_F(SmallQueuePeerChannelTest, SendWithTimeout_ReturnsWhenTheLoopStops)
 }
 
 
+TEST_F(SmallQueuePeerChannelTest, UnregisterWhileSendWaits_LeavesNoLink)
+{
+	spyOnA(smallQueueConfig());
+
+	pcB->stop();
+	fillSendQueue();
+
+	auto sent = std::async(std::launch::async, [this] { return pcA->sendMessage("pc-b", 9999, payload(8, 1), DeliveryMode::ReliableOrdered, 10s); });
+	std::this_thread::sleep_for(50ms);
+	pcA->unregisterPeer("pc-b");
+
+	ASSERT_EQ(sent.wait_for(2s), std::future_status::ready) << "A peer that is gone must end the wait";
+	EXPECT_FALSE(sent.get());
+
+	// For as long as a link exists, what is on the wire is sent again and again
+	std::this_thread::sleep_for(100ms);
+	const size_t sends = usageA->sends.load();
+	std::this_thread::sleep_for(300ms);
+
+	EXPECT_EQ(usageA->sends.load(), sends) << "Nothing goes to an unregistered peer: neither what was queued nor the message that waited";
+}
+
+
 // ---------------------------------------------------------------------------
 // Threads
 // ---------------------------------------------------------------------------
+
+TEST_F(PeerChannelTest, Send_NeverTouchesTheSocketOnTheCallersThread)
+{
+	spyOnA();
+
+	std::thread other(
+		[this]
+		{
+			for (uint32_t i = 0; i < 50; ++i)
+				pcA->sendMessage("pc-b", i, payload(2000, 1), DeliveryMode::ReliableOrdered, 5s);
+		});
+	const auto otherThread = other.get_id();
+
+	for (uint32_t i = 0; i < 50; ++i)
+		pcA->sendMessage("pc-b", 100 + i, payload(8, 1), DeliveryMode::UnreliableSequenced);
+	pcA->sendConnectRequest("pc-b");
+
+	other.join();
+	ASSERT_TRUE(pcA->flush("pc-b", 5s));
+
+	const auto senders = usageA->sendingThreads();
+	ASSERT_EQ(senders.size(), 1u) << "One thread writes to the socket: the I/O thread";
+	EXPECT_FALSE(senders.contains(std::this_thread::get_id()));
+	EXPECT_FALSE(senders.contains(otherThread));
+}
+
+
+TEST_F(PeerChannelTest, ConcurrentSenders_KeepPerThreadOrder)
+{
+	constexpr uint32_t		 Threads   = 4;
+	constexpr uint32_t		 PerThread = 500;
+
+	std::vector<std::thread> senders;
+	for (uint32_t thread = 0; thread < Threads; ++thread)
+	{
+		senders.emplace_back(
+			[this, thread]
+			{
+				for (uint32_t i = 0; i < PerThread; ++i)
+					pcA->sendMessage("pc-b", (thread << 16) | i, payload(16, static_cast<uint8_t>(thread)), DeliveryMode::ReliableOrdered, 10s);
+			});
+	}
+
+	for (auto &sender : senders)
+		sender.join();
+
+	ASSERT_TRUE(waitUntilTrue([this] { return atB.messageCount() == Threads * PerThread; }, 20s)) << "Only " << atB.messageCount() << " arrived";
+
+	std::array<uint32_t, Threads> next{};
+	for (const auto &message : atB.receivedMessages())
+	{
+		const uint32_t thread = message.type >> 16;
+		ASSERT_LT(thread, Threads);
+		ASSERT_EQ(message.type & 0xFFFF, next[thread]++) << "Order of thread " << thread << " broken";
+	}
+}
+
+
+TEST_F(PeerChannelTest, IdleChannel_DoesNotWakeUp)
+{
+	ASSERT_TRUE(pcA->sendMessage("pc-b", 1, payload(8, 1), DeliveryMode::ReliableOrdered));
+	ASSERT_TRUE(pcA->flush("pc-b", 3s));
+
+	// The timers of that exchange run out
+	std::this_thread::sleep_for(800ms);
+
+	const auto stepsA = pcA->loopStats().steps;
+	const auto stepsB = pcB->loopStats().steps;
+	std::this_thread::sleep_for(300ms);
+
+	EXPECT_EQ(pcA->loopStats().steps, stepsA) << "Without traffic and without timers the I/O thread sleeps";
+	EXPECT_EQ(pcB->loopStats().steps, stepsB);
+}
+
+
+TEST_F(PeerChannelTest, ExceptionOnTheIoThread_ReportsEveryPeerLostAndWakesWaiters)
+{
+	PeerChannelConfig config		  = fastConfig();
+	config.reliability.failureTimeout = 30s; // the link itself must not give up during the test
+	spyOnA(config);
+
+	ASSERT_TRUE(pcA->sendMessage("pc-b", 1, payload(8, 1), DeliveryMode::ReliableOrdered));
+	ASSERT_TRUE(pcA->flush("pc-b", 3s));
+
+	pcB->deinit();
+	ASSERT_TRUE(pcA->sendMessage("pc-b", 2, payload(8, 1), DeliveryMode::ReliableOrdered));
+	auto flushed = std::async(std::launch::async, [this] { return pcA->flush("pc-b", 10s); });
+	std::this_thread::sleep_for(50ms);
+
+	usageA->throwOnReceive.store(true);
+
+	ASSERT_TRUE(waitUntilTrue([this] { return !atA.lost().empty(); })) << "A loop that died must not leave its sessions waiting forever";
+	EXPECT_EQ(atA.lost().front(), "pc-b");
+	EXPECT_EQ(flushed.wait_for(2s), std::future_status::ready) << "Nothing is acknowledged anymore: whoever waits for it must be woken";
+}
+
 
 TEST_F(PeerChannelTest, BlockedMessageCallback_DoesNotHoldUpTheIoLoop)
 {

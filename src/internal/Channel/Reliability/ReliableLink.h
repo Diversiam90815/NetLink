@@ -275,7 +275,7 @@ private:
 	static bool										  hasSendable(const Stream &stream);
 
 	// Loss and congestion
-	bool											  detectLosses(Stream &stream, TimePoint now);
+	bool											  detectLosses(Stream &stream);
 	void											  markLost(Stream &stream, uint64_t seq, InFlight &entry, bool timedOut);
 	void											  growCongestionWindow(size_t acknowledged);
 	static void										  advanceSendBase(Stream &stream);

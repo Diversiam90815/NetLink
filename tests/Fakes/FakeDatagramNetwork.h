@@ -167,21 +167,19 @@ public:
 
 	Result<Datagram> receiveFrom(std::span<uint8_t> buffer, std::chrono::microseconds timeout) override
 	{
+		// Like the real socket: reading comes first, and a read that does not wait leaves a pending interrupt alone
+		if (auto datagram = take(buffer); datagram || datagram.error() != SocketError::WouldBlock)
+			return datagram;
+
+		if (timeout <= std::chrono::microseconds::zero())
+			return std::unexpected(SocketError::Timeout);
+
 		if (auto ready = waitReadable(timeout); !ready)
 			return std::unexpected(ready.error());
 
-		std::lock_guard<std::mutex> lock(mInbox->mutex);
-
 		// Taken by another reader in the meantime
-		if (mInbox->queue.empty())
-			return std::unexpected(SocketError::Timeout);
-
-		auto [payload, from] = std::move(mInbox->queue.front());
-		mInbox->queue.pop_front();
-
-		const size_t size = std::min(payload.size(), buffer.size());
-		std::memcpy(buffer.data(), payload.data(), size);
-		return Datagram{size, from};
+		auto datagram = take(buffer);
+		return datagram || datagram.error() != SocketError::WouldBlock ? datagram : std::unexpected(SocketError::Timeout);
 	}
 
 	Result<void> waitReadable(std::chrono::microseconds timeout) override
@@ -220,6 +218,25 @@ public:
 	}
 
 private:
+	// The oldest waiting datagram, SocketError::WouldBlock if there is none
+	Result<Datagram> take(std::span<uint8_t> buffer)
+	{
+		std::lock_guard<std::mutex> lock(mInbox->mutex);
+
+		if (mInbox->shutdown)
+			return std::unexpected(SocketError::Closed);
+
+		if (mInbox->queue.empty())
+			return std::unexpected(SocketError::WouldBlock);
+
+		auto [payload, from] = std::move(mInbox->queue.front());
+		mInbox->queue.pop_front();
+
+		const size_t size = std::min(payload.size(), buffer.size());
+		std::memcpy(buffer.data(), payload.data(), size);
+		return Datagram{size, from};
+	}
+
 	std::weak_ptr<FakeDatagramNetwork>			mNetwork;
 	std::shared_ptr<FakeDatagramNetwork::Inbox> mInbox;
 	IPv4Address									mHostIp;

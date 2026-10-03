@@ -609,7 +609,7 @@ void ReliableLink::handleDataAck(Stream &stream, const ChannelId channel, const 
 	mTimeoutsInARow = 0;
 
 	// While packets are missing behind acknowledged ones the window does not grow: they are probably lost
-	if (detectLosses(stream, now))
+	if (detectLosses(stream))
 		return;
 
 	// Control signals never wait for the window, so their acknowledgements say nothing about how much it can take
@@ -663,7 +663,7 @@ void ReliableLink::advanceSendBase(Stream &stream)
 }
 
 
-bool ReliableLink::detectLosses(Stream &stream, const TimePoint now)
+bool ReliableLink::detectLosses(Stream &stream)
 {
 	bool missing = false;
 
@@ -677,12 +677,7 @@ bool ReliableLink::detectLosses(Stream &stream, const TimePoint now)
 			continue;
 
 		missing = true;
-
-		// Overtaken, not lost? Its acknowledgement may be on the way: looked at again once it is late enough.
-		if (const TimePoint late = entry->sentAt + mConfig.reorderDelay; now < late)
-			scheduleDeadline(late);
-		else
-			markLost(stream, seq, *entry, false);
+		markLost(stream, seq, *entry, false);
 	}
 
 	return missing;
@@ -793,9 +788,6 @@ void ReliableLink::onTimer(const TimePoint now)
 			markLost(*stream, seq, *stream->inFlight.find(seq), true);
 
 		timedOut |= !overdue.empty();
-
-		// Packets that were only overtaken when their successors were acknowledged are late by now
-		detectLosses(*stream, now);
 
 		stream->ackRecords.forEach(
 			[&](const uint64_t seq, AckRecord &record)

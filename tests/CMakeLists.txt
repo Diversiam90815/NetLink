@@ -21,6 +21,7 @@ set(Channel_Tests
     ${Test_Directory}/ChannelTests/HeartbeatServiceTests.cpp
     ${Test_Directory}/ChannelTests/ReliableLinkTests.cpp
     ${Test_Directory}/ChannelTests/SignalPacketTests.cpp
+    ${Test_Directory}/ChannelTests/MailboxTests.cpp
     ${Test_Directory}/ChannelTests/PeerChannelTests.cpp
 )
 
@@ -54,6 +55,7 @@ set(Test_Fakes
     ${Test_Directory}/Fakes/TestIp.h
     ${Test_Directory}/Fakes/FakeDatagramNetwork.h
     ${Test_Directory}/Fakes/LossyDatagramSocket.h
+    ${Test_Directory}/Fakes/SpyDatagramSocket.h
     ${Test_Directory}/Fakes/SpyDeadlineTimer.h
 )
 

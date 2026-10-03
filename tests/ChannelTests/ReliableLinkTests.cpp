@@ -1287,48 +1287,14 @@ TEST_F(CongestionTest, FastRetransmit_ResendsAHoleWithoutWaitingForTheRto)
 	deliverPass(b, pass, [](const PacketHeader &header) { return header.seq == 3; });
 	transfer(b, a);
 
-	EXPECT_TRUE(dataSeqs(a.takeOutgoing(now)).empty()) << "Seq 3 may merely have been overtaken: it gets a moment to show up";
-
-	advance(1ms);
-
 	const auto repair = a.takeOutgoing(now);
-	EXPECT_EQ(dataSeqs(repair), (std::vector<uint64_t>{3})) << "Seven later packets were acknowledged and it is late: seq 3 is resent long before its timeout";
+	EXPECT_EQ(dataSeqs(repair), (std::vector<uint64_t>{3})) << "Seven later packets were acknowledged: seq 3 is resent long before its timeout";
 	EXPECT_EQ(a.stats().fastRetransmissions, 1u);
 	EXPECT_EQ(a.stats().retransmissions, 1u);
 	EXPECT_EQ(a.congestionWindow(), config.initialCongestionWindow / 2) << "A loss halves the window";
 
 	deliverPass(b, repair);
 	settle();
-	EXPECT_EQ(atB.size(), 10u);
-	EXPECT_FALSE(a.hasPendingReliable());
-}
-
-
-TEST_F(CongestionTest, OvertakenPackets_AreNotResent)
-{
-	queueMessages(10);
-
-	const auto pass = a.takeOutgoing(now);
-	ASSERT_EQ(pass.size(), 10u);
-
-	// The second half arrives and is acknowledged before the first half: two threads of the sender, or the path
-	const Pass first(pass.begin(), pass.begin() + 5);
-	const Pass second(pass.begin() + 5, pass.end());
-
-	deliverPass(b, second);
-	transfer(b, a);
-	ASSERT_NE(a.nextDeadline(), std::nullopt);
-	EXPECT_LE(*a.nextDeadline(), now + config.reorderDelay) << "The link wants to look at the missing packets again once they are late";
-
-	now += 200us;
-	deliverPass(b, first);
-	transfer(b, a);
-
-	advance(5ms);
-
-	EXPECT_TRUE(dataSeqs(a.takeOutgoing(now)).empty());
-	EXPECT_EQ(a.stats().retransmissions, 0u) << "Everything arrived, just not in order";
-	EXPECT_EQ(a.congestionWindow(), config.initialCongestionWindow) << "... which is no sign of congestion";
 	EXPECT_EQ(atB.size(), 10u);
 	EXPECT_FALSE(a.hasPendingReliable());
 }
