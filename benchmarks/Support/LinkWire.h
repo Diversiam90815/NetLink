@@ -48,7 +48,7 @@ public:
 	// Carries everything `from` produced so far into `to`. Returns the number of datagrams moved (lost ones included).
 	size_t transfer(ReliableLink &from, ReliableLink &to, const Drop &drop = {})
 	{
-		const auto datagrams = from.takeOutgoing(now, &from == &a ? mFromA : mFromB);
+		const auto datagrams = takeOutgoing(from, &from == &a ? mFromA : mFromB);
 
 		for (const auto &datagram : datagrams)
 		{
@@ -123,6 +123,26 @@ private:
 
 	Outbox								   mFromA;
 	Outbox								   mFromB;
+
+	// What the engine does with a link in one step: acknowledgements first, then the Reliable lane until it has nothing left to send
+	std::vector<netlink::channel::OutgoingDatagram> takeOutgoing(ReliableLink &link, netlink::channel::MessageSource &source) const
+	{
+		std::vector<netlink::channel::OutgoingDatagram> pass;
+
+		while (const auto *ack = link.peekAck())
+		{
+			pass.push_back(*ack);
+			link.commitAck();
+		}
+
+		while (const auto *datagram = link.peek(netlink::channel::Lane::Reliable, now, source))
+		{
+			pass.push_back(*datagram);
+			link.commit(netlink::channel::Lane::Reliable, now);
+		}
+
+		return pass;
+	}
 
 	std::optional<ReliableLink::TimePoint> earliestDeadline() const
 	{
