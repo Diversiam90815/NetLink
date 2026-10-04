@@ -9,10 +9,8 @@
 #include <utility>
 #include <vector>
 
+#include "SimScenario.h"
 #include "TestIp.h"
-#include "Channel/PeerChannel.h"
-#include "FakeDatagramNetwork.h"
-#include "SimDriver.h"
 
 using namespace netlink;
 using namespace std::chrono_literals;
@@ -21,45 +19,7 @@ using namespace std::chrono_literals;
 namespace SimTests
 {
 
-// Peer channels on one fake network, run by a SimDriver: time only passes when the test lets it
-struct Scenario
-{
-	struct Node
-	{
-		std::string										 name;
-		std::string										 ip;
-		std::unique_ptr<PeerChannel>					 channel;
-		std::vector<std::chrono::microseconds>			 received; // when each message arrived
-		std::vector<std::pair<std::string, std::string>> lost;	   // peer and reason
-	};
-
-	Node &add(const std::string &name, const std::string &ip, const PeerChannelConfig &config = {})
-	{
-		Node &node	 = *nodes.emplace_back(std::make_unique<Node>());
-		node.name	 = name;
-		node.ip		 = ip;
-		node.channel = std::make_unique<PeerChannel>(network->factory(ip), config);
-
-		EXPECT_TRUE(node.channel->init(name));
-		node.channel->setLocalIPv4(ipv4(ip));
-
-		node.channel->setMessageCallback([this, &node](const std::string &, uint32_t, std::vector<uint8_t>) { node.received.push_back(driver.elapsed()); });
-		node.channel->setOnPeerLost([&node](const std::string &peer, const std::string &reason) { node.lost.emplace_back(peer, reason); });
-
-		driver.add(*node.channel);
-		return node;
-	}
-
-	static void introduce(const Node &a, const Node &b)
-	{
-		a.channel->registerPeer(b.name, ipv4(b.ip), b.channel->getBoundPort());
-		b.channel->registerPeer(a.name, ipv4(a.ip), a.channel->getBoundPort());
-	}
-
-	std::shared_ptr<FakeNet::FakeDatagramNetwork> network = FakeNet::FakeDatagramNetwork::create();
-	FakeNet::SimDriver							  driver{network};
-	std::vector<std::unique_ptr<Node>>			  nodes; // after the driver: the channels go first
-};
+using Scenario = FakeNet::SimScenario;
 
 
 static std::vector<uint8_t> payload(const size_t size)
@@ -74,13 +34,13 @@ TEST(PacingSimTest, DatagramRate_FollowsTheBudget)
 
 	for (const uint32_t rate : {1000u, 5000u, 20'000u, 80'000u})
 	{
-		Scenario		  sim;
-		PeerChannelConfig config;
-		config.maxSendRate = rate;
+		Scenario	 sim;
+		EngineConfig config = Scenario::defaultConfig();
+		config.maxSendRate	= rate;
 
-		auto &hub		   = sim.add("hub", "10.0.0.1", config);
-		auto &peer		   = sim.add("peer", "10.0.0.2");
-		Scenario::introduce(hub, peer);
+		auto &hub			= sim.add("hub", "10.0.0.1", config);
+		auto &peer			= sim.add("peer", "10.0.0.2");
+		ASSERT_TRUE(sim.connect(hub, peer));
 
 		// More than the budget allows in every millisecond: what does not fit is dropped before it is sent
 		const auto flood = [&](const int milliseconds)
@@ -90,7 +50,7 @@ TEST(PacingSimTest, DatagramRate_FollowsTheBudget)
 			for (int ms = 0; ms < milliseconds; ++ms)
 			{
 				for (int i = 0; i < 30; ++i)
-					hub.channel->sendMessage("peer", 1, message, DeliveryMode::UnreliableSequenced);
+					hub.engine->send(peer.id(), 1, std::vector<uint8_t>(message), Lane::Media);
 
 				sim.driver.run(1ms);
 			}
@@ -110,17 +70,20 @@ TEST(PacingSimTest, DatagramRate_FollowsTheBudget)
 
 TEST(PacingSimTest, Acknowledgements_CountAgainstTheBudget)
 {
-	Scenario		  sim;
-	PeerChannelConfig config;
-	config.maxSendRate = 20'000;
+	Scenario	 sim;
+	EngineConfig config = Scenario::defaultConfig();
+	config.maxSendRate	= 20'000;
 
-	auto &hub		   = sim.add("hub", "10.0.0.1", config);
-	auto &peer		   = sim.add("peer", "10.0.0.2");
-	Scenario::introduce(hub, peer);
+	auto &hub			= sim.add("hub", "10.0.0.1", config);
+	auto &peer			= sim.add("peer", "10.0.0.2");
+	ASSERT_TRUE(sim.connect(hub, peer));
 
-	// Enough reliable data for the whole measurement: the hub also has to confirm the peer's acknowledgements
+	// Enough reliable data for the whole measurement, in both directions: the hub also acknowledges what the peer sends
 	for (int i = 0; i < 3; ++i)
-		ASSERT_TRUE(hub.channel->sendMessage("peer", 1, payload(size_t{12} * 1024 * 1024), DeliveryMode::ReliableOrdered));
+	{
+		ASSERT_EQ(hub.engine->send(peer.id(), 1, payload(size_t{12} * 1024 * 1024), Lane::Reliable), SendResult::Queued);
+		ASSERT_EQ(peer.engine->send(hub.id(), 1, payload(size_t{12} * 1024 * 1024), Lane::Reliable), SendResult::Queued);
+	}
 
 	sim.driver.run(100ms);
 
@@ -129,7 +92,7 @@ TEST(PacingSimTest, Acknowledgements_CountAgainstTheBudget)
 	const auto sent = static_cast<double>(sim.network->sentBy(hub.ip) - before);
 
 	EXPECT_NEAR(sent, 20'000.0, 20'000.0 * 0.02) << "Data and acknowledgements together stay within the budget";
-	EXPECT_TRUE(hub.lost.empty());
+	EXPECT_TRUE(hub.events.ended().empty());
 }
 
 
@@ -141,10 +104,11 @@ TEST(PacingSimTest, FanOut_ServesEveryPeerAtTheSameRate)
 	auto		 &hub = sim.add("hub", "10.0.0.1");
 
 	for (int i = 0; i < Peers; ++i)
-		Scenario::introduce(hub, sim.add("peer-" + std::to_string(i), "10.0.0." + std::to_string(10 + i)));
+		ASSERT_TRUE(sim.connect(hub, sim.add("peer-" + std::to_string(i), "10.0.0." + std::to_string(10 + i))));
 
-	for (int i = 0; i < Peers; ++i)
-		ASSERT_TRUE(hub.channel->sendMessage("peer-" + std::to_string(i), 1, payload(256 * 1024), DeliveryMode::ReliableOrdered));
+	// The same message for all of them, at the same moment
+	const auto started = sim.driver.elapsed();
+	ASSERT_EQ(hub.engine->broadcast(1, payload(256 * 1024), Lane::Reliable), static_cast<size_t>(Peers));
 
 	const auto allArrived = [&] { return std::ranges::all_of(sim.nodes, [&](const auto &node) { return node.get() == &hub || !node->received.empty(); }); };
 	ASSERT_TRUE(sim.driver.runUntil(allArrived, 5s));
@@ -153,7 +117,7 @@ TEST(PacingSimTest, FanOut_ServesEveryPeerAtTheSameRate)
 	for (const auto &node : sim.nodes)
 	{
 		if (node.get() != &hub)
-			finished.push_back(node->received.front());
+			finished.push_back(node->received.front() - started);
 	}
 
 	const auto [first, last] = std::ranges::minmax(finished);
@@ -167,7 +131,7 @@ TEST(PacingSimTest, WouldBlock_CausesNoRetransmissions)
 	Scenario sim;
 	auto	&hub  = sim.add("hub", "10.0.0.1");
 	auto	&peer = sim.add("peer", "10.0.0.2");
-	Scenario::introduce(hub, peer);
+	ASSERT_TRUE(sim.connect(hub, peer));
 
 	// The socket puts a quarter of what the budget allows on the wire, and refuses more than 32 waiting datagrams
 	FakeNet::LinkProfile profile;
@@ -191,7 +155,7 @@ TEST(PacingSimTest, WouldBlock_CausesNoRetransmissions)
 				++repeated;
 		});
 
-	ASSERT_TRUE(hub.channel->sendMessage("peer", 1, payload(1024 * 1024), DeliveryMode::ReliableOrdered));
+	ASSERT_EQ(hub.engine->send(peer.id(), 1, payload(1024 * 1024), Lane::Reliable), SendResult::Queued);
 	ASSERT_TRUE(sim.driver.runUntil([&] { return !peer.received.empty(); }, 10s));
 
 	sim.network->setTap({});
@@ -207,14 +171,14 @@ TEST(PacingSimTest, HostDown_IsTreatedAsLoss)
 	Scenario sim;
 	auto	&hub  = sim.add("hub", "10.0.0.1");
 	auto	&peer = sim.add("peer", "10.0.0.2");
-	Scenario::introduce(hub, peer);
+	ASSERT_TRUE(sim.connect(hub, peer));
 
 	sim.network->setHostDown(peer.ip, true);
-	ASSERT_TRUE(hub.channel->sendMessage("peer", 1, payload(100), DeliveryMode::ReliableOrdered));
+	ASSERT_EQ(hub.engine->send(peer.id(), 1, payload(100), Lane::Reliable), SendResult::Queued);
 
 	sim.driver.run(300ms);
 	EXPECT_TRUE(peer.received.empty());
-	EXPECT_TRUE(hub.lost.empty()) << "A send that fails is a lost datagram: the link keeps trying";
+	EXPECT_TRUE(hub.events.ended().empty()) << "A send that fails is a lost datagram: the link keeps trying";
 
 	sim.network->setHostDown(peer.ip, false);
 
@@ -224,12 +188,14 @@ TEST(PacingSimTest, HostDown_IsTreatedAsLoss)
 
 	// A host that stays down is given up on like one that does not answer
 	sim.network->setHostDown(peer.ip, true);
-	ASSERT_TRUE(hub.channel->sendMessage("peer", 2, payload(100), DeliveryMode::ReliableOrdered));
+	ASSERT_EQ(hub.engine->send(peer.id(), 2, payload(100), Lane::Reliable), SendResult::Queued);
 
-	const auto since = sim.driver.elapsed();
-	ASSERT_TRUE(sim.driver.runUntil([&] { return !hub.lost.empty(); }, 30s));
-	EXPECT_GE(sim.driver.elapsed() - since, PeerChannelConfig{}.timings.peerTimeout);
-	EXPECT_EQ(hub.lost.front().first, "peer");
+	const auto since   = sim.driver.elapsed();
+	const auto timings = Scenario::defaultConfig().timings;
+
+	ASSERT_TRUE(sim.driver.runUntil([&] { return !hub.events.ended().empty(); }, 30s));
+	EXPECT_GE(sim.driver.elapsed() - since, timings.peerTimeout - timings.keepAlive) << "Not before the peer was silent for that long";
+	EXPECT_EQ(hub.events.ended().front(), (FakeNet::Ended{peer.id(), DisconnectReason::Lost}));
 }
 
 
@@ -242,16 +208,17 @@ TEST(PacingSimTest, UnreachablePeer_DoesNotStallOthers)
 		auto	&hub   = sim.add("hub", "10.0.0.1");
 		auto	&other = sim.add("other", "10.0.0.2");
 		auto	&good  = sim.add("good", "10.0.0.3");
-		Scenario::introduce(hub, other);
-		Scenario::introduce(hub, good);
+		EXPECT_TRUE(sim.connect(hub, other));
+		EXPECT_TRUE(sim.connect(hub, good));
 
 		sim.network->setHostDown(other.ip, otherIsDown);
 
-		EXPECT_TRUE(hub.channel->sendMessage("other", 1, payload(512 * 1024), DeliveryMode::ReliableOrdered));
-		EXPECT_TRUE(hub.channel->sendMessage("good", 1, payload(512 * 1024), DeliveryMode::ReliableOrdered));
+		const auto started = sim.driver.elapsed();
+		EXPECT_EQ(hub.engine->send(other.id(), 1, payload(512 * 1024), Lane::Reliable), SendResult::Queued);
+		EXPECT_EQ(hub.engine->send(good.id(), 1, payload(512 * 1024), Lane::Reliable), SendResult::Queued);
 
 		EXPECT_TRUE(sim.driver.runUntil([&] { return !good.received.empty(); }, 5s));
-		return good.received.empty() ? 5s : good.received.front();
+		return good.received.empty() ? 5s : good.received.front() - started;
 	};
 
 	const auto bothHealthy = timeToDeliver(false);
@@ -267,20 +234,23 @@ TEST(PacingSimTest, NetworkDown_EndsEverySession)
 	auto	&hub = sim.add("hub", "10.0.0.1");
 	auto	&a	 = sim.add("a", "10.0.0.2");
 	auto	&b	 = sim.add("b", "10.0.0.3");
-	Scenario::introduce(hub, a);
-	Scenario::introduce(hub, b);
+	ASSERT_TRUE(sim.connect(hub, a));
+	ASSERT_TRUE(sim.connect(hub, b));
 
-	ASSERT_TRUE(hub.channel->sendMessage("a", 1, payload(100), DeliveryMode::ReliableOrdered));
-	ASSERT_TRUE(hub.channel->sendMessage("b", 1, payload(100), DeliveryMode::ReliableOrdered));
+	ASSERT_EQ(hub.engine->send(a.id(), 1, payload(100), Lane::Reliable), SendResult::Queued);
+	ASSERT_EQ(hub.engine->send(b.id(), 1, payload(100), Lane::Reliable), SendResult::Queued);
 	ASSERT_TRUE(sim.driver.runUntil([&] { return !a.received.empty() && !b.received.empty(); }, 1s));
 
 	sim.network->setSendError(hub.ip, net::SocketError::NetworkDown);
-	ASSERT_TRUE(hub.channel->sendMessage("a", 2, payload(100), DeliveryMode::ReliableOrdered));
+	ASSERT_EQ(hub.engine->send(a.id(), 2, payload(100), Lane::Reliable), SendResult::Queued);
 	sim.driver.run(10ms);
 
-	ASSERT_EQ(hub.lost.size(), 2u) << "A socket that cannot send anymore ends every session, not only the one that noticed";
-	EXPECT_NE(hub.lost[0].first, hub.lost[1].first);
-	EXPECT_TRUE(hub.channel->flush("a", 0ms)) << "Nothing is left waiting for an acknowledgement that cannot come";
+	const auto ended = hub.events.ended();
+	ASSERT_EQ(ended.size(), 2u) << "A socket that cannot send anymore ends every session, not only the one that noticed";
+	EXPECT_NE(ended[0].peer, ended[1].peer);
+	EXPECT_EQ(ended[0].reason, DisconnectReason::NetworkError);
+	EXPECT_TRUE(hub.engine->flush(a.id(), 0ms)) << "Nothing is left waiting for an acknowledgement that cannot come";
+	EXPECT_EQ(hub.engine->send(a.id(), 3, payload(100), Lane::Reliable), SendResult::NotConnected);
 }
 
 } // namespace SimTests

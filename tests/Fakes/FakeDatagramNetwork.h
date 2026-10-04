@@ -114,6 +114,19 @@ public:
 			mSendErrors.erase(ipv4(hostIp));
 	}
 
+	// Delivers a datagram as if a socket at `from` had sent it: what someone who forges its sender address can do
+	void inject(const SocketAddress &from, const SocketAddress &to, const std::span<const uint8_t> data)
+	{
+		std::vector<std::shared_ptr<Inbox>> targets;
+		{
+			std::lock_guard<std::mutex> lock(mMutex);
+			targets = targetsOf(from.ip, to);
+		}
+
+		for (const auto &target : targets)
+			target->add({.at = mTime->now(), .payload = std::vector<uint8_t>(data.begin(), data.end()), .from = from});
+	}
+
 	// Sees every datagram a socket accepted, before the network loses or delays it. Called with the network locked.
 	void setTap(Tap tap)
 	{

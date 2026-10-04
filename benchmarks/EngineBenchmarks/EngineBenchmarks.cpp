@@ -1,9 +1,10 @@
 /*
   ==============================================================================
-	Module:         PeerChannelBenchmarks
-	Description:    Production PeerChannels on real UDP loopback sockets:
-					throughput, request/reply latency, many senders into one
-					receiver and one sender to many receivers
+	Module:         EngineBenchmarks
+	Description:    Production engines on real UDP loopback sockets, with
+					sessions between them: throughput, request/reply latency,
+					many senders into one receiver and one sender to many
+					receivers
   ==============================================================================
 */
 
@@ -24,7 +25,7 @@ using namespace netlink;
 using bench::LoopbackPeers;
 
 
-namespace ChannelBenchmarks
+namespace EngineBenchmarks
 {
 
 static constexpr uint32_t DataType = 1;
@@ -35,31 +36,27 @@ static constexpr uint32_t EchoType = 2;
 class SenderReceiver
 {
 public:
-	explicit SenderReceiver(const PeerChannelConfig &config = bench::unlimitedRate()) : peers(1, config) {}
+	explicit SenderReceiver(const EngineConfig &config = bench::unlimitedRate()) : peers(1, config) {}
 
 	bool open()
 	{
-		if (!peers.open())
-			return false;
-
-		peers.peer(0).setMessageCallback(
-			[this](const std::string &sender, const uint32_t type, std::vector<uint8_t> data)
+		peers.peer(0).setMessageHandler(
+			[this](const PeerId sender, const uint32_t type, std::vector<uint8_t> &data)
 			{
 				if (type == EchoType)
-					peers.peer(0).sendMessage(sender, EchoType, data, DeliveryMode::ReliableOrdered);
+					peers.peer(0).engine.send(sender, EchoType, std::move(data), Lane::Reliable);
 
 				received.notify();
 			});
 
-		peers.hub().setMessageCallback([this](const std::string &, uint32_t, std::vector<uint8_t>) { replies.notify(); });
+		peers.hub().setMessageHandler([this](PeerId, uint32_t, std::vector<uint8_t> &) { replies.notify(); });
 
-		peers.start();
-		return true;
+		return peers.open();
 	}
 
-	bool send(const std::vector<uint8_t> &payload, const uint32_t type) { return bench::sendWithBackpressure(peers.hub(), peers.peerName(0), type, payload); }
+	bool					 send(const std::vector<uint8_t> &payload, const uint32_t type) { return bench::sendWithBackpressure(peers.hub(), peers.peer(0).id(), type, payload); }
 
-	// Declared before the channels: their threads report into these until the channels are gone
+	// Declared before the engines: their threads report into these until the engines are gone
 	bench::CompletionCounter received;
 	bench::CompletionCounter replies;
 	LoopbackPeers			 peers;
@@ -68,16 +65,16 @@ public:
 
 // Time: a batch of `messages` reliable messages sent (waiting whenever the send queue is full) until all arrived.
 // Read items_per_second as messages/s and bytes_per_second as payload throughput.
-static void BM_PeerChannel_Throughput(benchmark::State &state)
+static void BM_Engine_Throughput(benchmark::State &state)
 {
 	const auto	   size		= static_cast<size_t>(state.range(0));
 	const auto	   messages = static_cast<uint64_t>(state.range(1));
 	const auto	   payload	= bench::makePayload(size);
 
-	SenderReceiver channels;
-	if (!channels.open())
+	SenderReceiver engines;
+	if (!engines.open())
 	{
-		state.SkipWithError("Could not bind the channels to 127.0.0.1");
+		state.SkipWithError("The engines did not connect over 127.0.0.1");
 		return;
 	}
 
@@ -87,11 +84,11 @@ static void BM_PeerChannel_Throughput(benchmark::State &state)
 	{
 		bool sent = true;
 		for (uint64_t i = 0; i < messages && sent; ++i)
-			sent = channels.send(payload, DataType);
+			sent = engines.send(payload, DataType);
 
 		expected += messages;
 
-		if (!sent || !channels.received.waitFor(expected))
+		if (!sent || !engines.received.waitFor(expected))
 		{
 			state.SkipWithError("Not every message arrived");
 			break;
@@ -101,13 +98,13 @@ static void BM_PeerChannel_Throughput(benchmark::State &state)
 	state.SetItemsProcessed(static_cast<int64_t>(state.iterations() * messages));
 	state.SetBytesProcessed(static_cast<int64_t>(state.iterations() * messages * size));
 }
-BENCHMARK(BM_PeerChannel_Throughput)
+BENCHMARK(BM_Engine_Throughput)
 	->ArgNames({"bytes", "messages"})
 	->Args({64, 20'000})
 	->Args({bench::KiB, 20'000})
 	->Args({64 * bench::KiB, 256})
 	->Args({bench::MiB, 16})
-	->Args({static_cast<int64_t>(internal::MaxMessagePayload) - 4, 2}) // the largest message the channel accepts
+	->Args({static_cast<int64_t>(internal::MaxMessagePayload) - 4, 2}) // (nearly) the largest message a lane accepts
 	->UseRealTime()
 	->MeasureProcessCPUTime()
 	->Unit(benchmark::kMillisecond);
@@ -115,18 +112,18 @@ BENCHMARK(BM_PeerChannel_Throughput)
 
 // Time: one message of the largest size at the default send budget. datagrams_per_s: what the hub's socket took, data
 // and acknowledgements together. tick_ms: a round of the hub's loop that only waited for the next tick of its budget.
-static void BM_PeerChannel_Paced(benchmark::State &state)
+static void BM_Engine_Paced(benchmark::State &state)
 {
 	const auto	   payload = bench::makePayload(internal::MaxMessagePayload - 4);
 
-	SenderReceiver channels{PeerChannelConfig{}};
-	if (!channels.open())
+	SenderReceiver engines{bench::defaultRate()};
+	if (!engines.open())
 	{
-		state.SkipWithError("Could not bind the channels to 127.0.0.1");
+		state.SkipWithError("The engines did not connect over 127.0.0.1");
 		return;
 	}
 
-	const auto before	= channels.peers.hub().loopStats();
+	const auto before	= engines.peers.hub().engine.loopStats();
 	double	   seconds	= 0.0;
 	uint64_t   expected = 0;
 
@@ -134,7 +131,7 @@ static void BM_PeerChannel_Paced(benchmark::State &state)
 	{
 		const auto start = bench::Clock::now();
 
-		if (!channels.send(payload, DataType) || !channels.received.waitFor(++expected))
+		if (!engines.send(payload, DataType) || !engines.received.waitFor(++expected))
 		{
 			state.SkipWithError("The message did not arrive");
 			break;
@@ -143,24 +140,24 @@ static void BM_PeerChannel_Paced(benchmark::State &state)
 		seconds += bench::secondsSince(start);
 	}
 
-	const auto after				  = channels.peers.hub().loopStats();
+	const auto after				  = engines.peers.hub().engine.loopStats();
 	const auto ticks				  = after.budgetTicks - before.budgetTicks;
 	state.counters["datagrams_per_s"] = seconds > 0.0 ? static_cast<double>(after.datagramsSent - before.datagramsSent) / seconds : 0.0;
 	state.counters["tick_ms"]		  = ticks > 0 ? static_cast<double>(after.budgetTickTime - before.budgetTickTime) / static_cast<double>(ticks) / 1000.0 : 0.0;
 	state.SetBytesProcessed(static_cast<int64_t>(state.iterations() * payload.size()));
 }
-BENCHMARK(BM_PeerChannel_Paced)->UseRealTime()->MeasureProcessCPUTime()->Unit(benchmark::kMillisecond);
+BENCHMARK(BM_Engine_Paced)->UseRealTime()->MeasureProcessCPUTime()->Unit(benchmark::kMillisecond);
 
 
 // Time: one reliable request until its reply arrived back (the receiver answers from its message callback)
-static void BM_PeerChannel_RoundTrip(benchmark::State &state)
+static void BM_Engine_RoundTrip(benchmark::State &state)
 {
 	const auto	   payload = bench::makePayload(static_cast<size_t>(state.range(0)));
 
-	SenderReceiver channels;
-	if (!channels.open())
+	SenderReceiver engines;
+	if (!engines.open())
 	{
-		state.SkipWithError("Could not bind the channels to 127.0.0.1");
+		state.SkipWithError("The engines did not connect over 127.0.0.1");
 		return;
 	}
 
@@ -168,81 +165,73 @@ static void BM_PeerChannel_RoundTrip(benchmark::State &state)
 
 	for (auto _ : state)
 	{
-		if (!channels.send(payload, EchoType) || !channels.replies.waitFor(++replies))
+		if (!engines.send(payload, EchoType) || !engines.replies.waitFor(++replies))
 		{
 			state.SkipWithError("No reply arrived");
 			break;
 		}
 	}
 }
-BENCHMARK(BM_PeerChannel_RoundTrip)
-	->ArgName("bytes")
-	->Arg(64)
-	->Arg(bench::KiB)
-	->Arg(64 * bench::KiB)
-	->UseRealTime()
-	->MeasureProcessCPUTime()
-	->Unit(benchmark::kMicrosecond);
+BENCHMARK(BM_Engine_RoundTrip)->ArgName("bytes")->Arg(64)->Arg(bench::KiB)->Arg(64 * bench::KiB)->UseRealTime()->MeasureProcessCPUTime()->Unit(benchmark::kMicrosecond);
 
 
 // Time: one reliable message until flush() saw it acknowledged: what a graceful shutdown waits for its goodbye
-static void BM_PeerChannel_Flush(benchmark::State &state)
+static void BM_Engine_Flush(benchmark::State &state)
 {
 	const auto	   payload = bench::makePayload(64);
 
-	SenderReceiver channels;
-	if (!channels.open())
+	SenderReceiver engines;
+	if (!engines.open())
 	{
-		state.SkipWithError("Could not bind the channels to 127.0.0.1");
+		state.SkipWithError("The engines did not connect over 127.0.0.1");
 		return;
 	}
 
 	for (auto _ : state)
 	{
-		if (!channels.send(payload, DataType) || !channels.peers.hub().flush(channels.peers.peerName(0), bench::WaitTimeout))
+		if (!engines.send(payload, DataType) || !engines.peers.hub().engine.flush(engines.peers.peer(0).id(), bench::WaitTimeout))
 		{
 			state.SkipWithError("The message was not acknowledged");
 			break;
 		}
 	}
 }
-BENCHMARK(BM_PeerChannel_Flush)->UseRealTime()->MeasureProcessCPUTime()->Unit(benchmark::kMicrosecond);
+BENCHMARK(BM_Engine_Flush)->UseRealTime()->MeasureProcessCPUTime()->Unit(benchmark::kMicrosecond);
 
 
 // Time: N peers each stream 500 messages of 1 KiB to the hub at once, until the last one arrived (or delivery stopped).
-// delivered_pct: messages that reached the hub. links_lost: links reset per round after exhausting their retransmissions,
-// which discards the messages still queued on them.
-static void BM_PeerChannel_FanIn(benchmark::State &state)
+// delivered_pct: messages that reached the hub. links_lost: sessions that ended per round because a peer stopped
+// answering, which discards the messages still queued for it.
+static void BM_Engine_FanIn(benchmark::State &state)
 {
-	constexpr uint64_t	  PerSender = 500;
-	const auto			  senders	= static_cast<size_t>(state.range(0));
-	const auto			  payload	= bench::makePayload(bench::KiB);
+	constexpr uint64_t		 PerSender = 500;
+	const auto				 senders   = static_cast<size_t>(state.range(0));
+	const auto				 payload   = bench::makePayload(bench::KiB);
 
-	// Declared before the channels: their threads report into these
+	// Declared before the engines: their threads report into these
 	bench::CompletionCounter received;
-	std::atomic<uint64_t> linksLost{0};
-	std::atomic<int64_t>  lastArrival{0}; // steady clock ticks of the latest message at the hub
+	std::atomic<uint64_t>	 linksLost{0};
+	std::atomic<int64_t>	 lastArrival{0}; // steady clock ticks of the latest message at the hub
 
 	LoopbackPeers			 peers(senders, bench::unlimitedRate());
-	if (!peers.open())
-	{
-		state.SkipWithError("Could not bind the channels to 127.0.0.1");
-		return;
-	}
 
-	peers.hub().setMessageCallback(
-		[&](const std::string &, uint32_t, std::vector<uint8_t>)
+	peers.hub().setMessageHandler(
+		[&](PeerId, uint32_t, std::vector<uint8_t> &)
 		{
 			lastArrival.store(bench::Clock::now().time_since_epoch().count());
 			received.notify();
 		});
 
-	auto countLoss = [&linksLost](const std::string &, const std::string &) { ++linksLost; };
-	peers.hub().setOnPeerLost(countLoss);
+	auto countLoss = [&linksLost] { ++linksLost; };
+	peers.hub().setLossHandler(countLoss);
 	for (size_t s = 0; s < senders; ++s)
-		peers.peer(s).setOnPeerLost(countLoss);
+		peers.peer(s).setLossHandler(countLoss);
 
-	peers.start();
+	if (!peers.open())
+	{
+		state.SkipWithError("The engines did not connect over 127.0.0.1");
+		return;
+	}
 
 	uint64_t delivered = 0;
 
@@ -258,7 +247,7 @@ static void BM_PeerChannel_FanIn(benchmark::State &state)
 				{
 					go.wait();
 					for (uint64_t i = 0; i < PerSender; ++i)
-						bench::sendWithBackpressure(peers.peer(s), LoopbackPeers::HubName, DataType, payload);
+						bench::sendWithBackpressure(peers.peer(s), peers.hub().id(), DataType, payload);
 				});
 		}
 
@@ -277,43 +266,38 @@ static void BM_PeerChannel_FanIn(benchmark::State &state)
 		state.SetIterationTime(std::chrono::duration<double>(std::max(finished, start) - start).count());
 	}
 
-	const auto sent				    = static_cast<uint64_t>(state.iterations()) * senders * PerSender;
+	const auto sent					= static_cast<uint64_t>(state.iterations()) * senders * PerSender;
 	state.counters["delivered_pct"] = bench::percent(delivered, sent);
 	state.counters["links_lost"]	= benchmark::Counter(static_cast<double>(linksLost.load()), benchmark::Counter::kAvgIterations);
 	state.SetItemsProcessed(static_cast<int64_t>(delivered));
 
 	peers.stop();
 }
-BENCHMARK(BM_PeerChannel_FanIn)->ArgName("senders")->Arg(1)->Arg(8)->Arg(32)->Arg(128)->UseManualTime()->MeasureProcessCPUTime()->Unit(benchmark::kMillisecond);
+BENCHMARK(BM_Engine_FanIn)->ArgName("senders")->Arg(1)->Arg(8)->Arg(32)->Arg(128)->UseManualTime()->MeasureProcessCPUTime()->Unit(benchmark::kMillisecond);
 
 
 // Time: the hub streams 500 messages of 1 KiB to each of N peers, one message per peer in turn, until the last one
 // arrived (or delivery stopped). delivered_pct and links_lost: as for FanIn.
-static void BM_PeerChannel_FanOut(benchmark::State &state)
+static void BM_Engine_FanOut(benchmark::State &state)
 {
 	constexpr uint64_t		 PerReceiver = 500;
 	const auto				 receivers	 = static_cast<size_t>(state.range(0));
 	const auto				 payload	 = bench::makePayload(bench::KiB);
 
-	// Declared before the channels: their threads report into these
+	// Declared before the engines: their threads report into these
 	bench::CompletionCounter received;
 	std::atomic<uint64_t>	 linksLost{0};
 	std::atomic<int64_t>	 lastArrival{0}; // steady clock ticks of the latest message at any peer
 
 	LoopbackPeers			 peers(receivers, bench::unlimitedRate());
-	if (!peers.open())
-	{
-		state.SkipWithError("Could not bind the channels to 127.0.0.1");
-		return;
-	}
 
-	auto countLoss = [&linksLost](const std::string &, const std::string &) { ++linksLost; };
-	peers.hub().setOnPeerLost(countLoss);
+	auto					 countLoss = [&linksLost] { ++linksLost; };
+	peers.hub().setLossHandler(countLoss);
 
 	for (size_t r = 0; r < receivers; ++r)
 	{
-		peers.peer(r).setMessageCallback(
-			[&](const std::string &, uint32_t, std::vector<uint8_t>)
+		peers.peer(r).setMessageHandler(
+			[&](PeerId, uint32_t, std::vector<uint8_t> &)
 			{
 				// Every peer reports from a thread of its own: the latest arrival wins
 				const int64_t arrival = bench::Clock::now().time_since_epoch().count();
@@ -324,10 +308,14 @@ static void BM_PeerChannel_FanOut(benchmark::State &state)
 
 				received.notify();
 			});
-		peers.peer(r).setOnPeerLost(countLoss);
+		peers.peer(r).setLossHandler(countLoss);
 	}
 
-	peers.start();
+	if (!peers.open())
+	{
+		state.SkipWithError("The engines did not connect over 127.0.0.1");
+		return;
+	}
 
 	uint64_t delivered = 0;
 
@@ -339,7 +327,7 @@ static void BM_PeerChannel_FanOut(benchmark::State &state)
 		for (uint64_t i = 0; i < PerReceiver; ++i)
 		{
 			for (size_t r = 0; r < receivers; ++r)
-				bench::sendWithBackpressure(peers.hub(), peers.peerName(r), DataType, payload);
+				bench::sendWithBackpressure(peers.hub(), peers.peer(r).id(), DataType, payload);
 		}
 
 		// Done when everything arrived, or when nothing arrived for 5 s: the rest was lost with failed links
@@ -357,6 +345,6 @@ static void BM_PeerChannel_FanOut(benchmark::State &state)
 
 	peers.stop();
 }
-BENCHMARK(BM_PeerChannel_FanOut)->ArgName("receivers")->Arg(1)->Arg(8)->Arg(32)->UseManualTime()->MeasureProcessCPUTime()->Unit(benchmark::kMillisecond);
+BENCHMARK(BM_Engine_FanOut)->ArgName("receivers")->Arg(1)->Arg(8)->Arg(32)->UseManualTime()->MeasureProcessCPUTime()->Unit(benchmark::kMillisecond);
 
-} // namespace ChannelBenchmarks
+} // namespace EngineBenchmarks

@@ -1,95 +1,94 @@
 #include <gtest/gtest.h>
-#include <algorithm>
+
 #include <atomic>
-#include <optional>
 #include <chrono>
-#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
 
-#include "TestIp.h"
 #include "Core/NetLinkCore.h"
+#include "EngineHarness.h"
 #include "FakeDatagramNetwork.h"
 #include "LossyDatagramSocket.h"
+#include "TestIp.h"
 
 using namespace netlink;
 using namespace std::chrono_literals;
+using FakeNet::Ended;
+using FakeNet::waitUntilTrue;
 
 
 namespace IntegrationTests
 {
 
-template <typename Predicate>
-bool waitFor(Predicate predicate, std::chrono::milliseconds timeout = 5s)
+// One complete NetLink stack on the in-memory network, with everything its callbacks delivered
+struct Stack
 {
-	auto deadline = std::chrono::steady_clock::now() + timeout;
-	while (std::chrono::steady_clock::now() < deadline)
+	Stack(const std::shared_ptr<FakeNet::FakeDatagramNetwork> &network, const std::string &address, net::DatagramSocketFactory factory = {})
+		: iface(address),
+		  core(NetLinkCoreDependencies{.datagramSocketFactory = factory ? std::move(factory) : cuttable(network, address, cut), .localInterface = iface.provider(), .timings = {}})
 	{
-		if (predicate())
-			return true;
-		std::this_thread::sleep_for(10ms);
-	}
-	return predicate();
-}
-
-
-// Thread-safe record of everything the public callbacks delivered
-class EventRecorder
-{
-public:
-	void addDiscovered(const Endpoint &endpoint)
-	{
-		std::lock_guard<std::mutex> lock(mMutex);
-		mDiscovered.push_back(endpoint);
 	}
 
-	void addConnectionEvent(const ConnectionEvent &event)
+	static net::DatagramSocketFactory cuttable(const std::shared_ptr<FakeNet::FakeDatagramNetwork> &network, const std::string &address,
+											   const std::shared_ptr<std::atomic<bool>> &cut)
 	{
-		std::lock_guard<std::mutex> lock(mMutex);
-		mConnectionEvents.push_back(event);
+		return FakeNet::CuttableSocket::wrap(network->factory(address), cut);
 	}
 
-	void addMessage(const Message &message)
+	// The public callbacks, recorded like the events of an engine
+	NetLinkCallbacks callbacks()
 	{
-		std::lock_guard<std::mutex> lock(mMutex);
-		mMessages.push_back(message);
+		using Kind = EngineEvent::Kind;
+
+		NetLinkCallbacks result;
+		result.onPeerDiscovered = [this](const PeerInfo &peer) { record({.kind = Kind::PeerDiscovered, .peer = peer.id, .info = peer}); };
+		result.onPeerLost		= [this](const PeerId peer) { record({.kind = Kind::PeerLost, .peer = peer}); };
+		result.onConnected		= [this](const PeerInfo &peer) { record({.kind = Kind::Connected, .peer = peer.id, .info = peer}); };
+		result.onDisconnected	= [this](const PeerId peer, const DisconnectReason reason) { record({.kind = Kind::Disconnected, .peer = peer, .reason = reason}); };
+		result.onMessage		= [this](const PeerId from, const Lane lane, Message &&message)
+		{
+			if (onMessage)
+				onMessage(from, message);
+
+			record({.kind = Kind::Message, .peer = from, .lane = lane, .message = std::move(message)});
+		};
+		result.onNetworkAdapterChanged = [this](const NetworkAdapter &adapter) { record({.kind = Kind::AdapterChanged, .info = {.address = adapter.ipv4}}); };
+		return result;
 	}
 
-	std::vector<Endpoint> discovered()
+	void record(EngineEvent event) { events.record(event); }
+
+	bool start(const NetLinkConfig &config, const NetLinkCallbacks &with)
 	{
-		std::lock_guard<std::mutex> lock(mMutex);
-		return mDiscovered;
+		if (!core.start(config, with))
+			return false;
+
+		peerId = core.engine()->id();
+		return true;
 	}
 
-	std::vector<Message> messages()
+	bool start(const std::string &name, const std::string &appVersion = {}, const std::string &appId = "core-tests")
 	{
-		std::lock_guard<std::mutex> lock(mMutex);
-		return mMessages;
+		NetLinkConfig config;
+		config.displayName = name;
+		config.appId	   = appId;
+		config.appVersion  = appVersion;
+		return start(config, callbacks());
 	}
 
-	std::optional<ConnectionEvent> lastEventWithState(ConnectionState state)
-	{
-		std::lock_guard<std::mutex> lock(mMutex);
-		auto						it = std::find_if(mConnectionEvents.rbegin(), mConnectionEvents.rend(), [state](const ConnectionEvent &e) { return e.state == state; });
-		return it != mConnectionEvents.rend() ? std::optional(*it) : std::nullopt;
-	}
+	// Of the latest start
+	PeerId													 id() const { return peerId; }
 
-	size_t countState(ConnectionState state)
-	{
-		std::lock_guard<std::mutex> lock(mMutex);
-		return static_cast<size_t>(std::count_if(mConnectionEvents.begin(), mConnectionEvents.end(), [state](const ConnectionEvent &e) { return e.state == state; }));
-	}
-
-private:
-	std::mutex					 mMutex;
-	std::vector<Endpoint>		 mDiscovered;
-	std::vector<ConnectionEvent> mConnectionEvents;
-	std::vector<Message>		 mMessages;
+	std::shared_ptr<std::atomic<bool>>						 cut = std::make_shared<std::atomic<bool>>(false);
+	FakeNet::TestInterface									 iface;
+	FakeNet::EventRecorder									 events;
+	std::function<void(PeerId from, const Message &message)> onMessage; // set before start(): what the application does with a message
+	PeerId													 peerId;
+	NetLinkCore												 core;		// last: its threads are gone before what they report into
 };
 
 
-// Two complete NetLink stacks in one process, all traffic (discovery and the peer channel) on an in-memory network
 class NetLinkCoreTest : public ::testing::Test
 {
 protected:
@@ -98,239 +97,106 @@ protected:
 
 	void						 SetUp() override
 	{
-		peerA = std::make_unique<NetLinkCore>(dependenciesFor(AddressA));
-		peerB = std::make_unique<NetLinkCore>(dependenciesFor(AddressB));
+		a = std::make_unique<Stack>(network, AddressA, factoryFor(AddressA));
+		b = std::make_unique<Stack>(network, AddressB, factoryFor(AddressB));
 	}
 
-	virtual NetLinkCoreDependencies dependenciesFor(const char *address) { return {cuttable(network->factory(address), address)}; }
+	// Empty: the cuttable socket of the stack
+	virtual net::DatagramSocketFactory factoryFor(const char *) { return {}; }
 
-	// Cutting a host drops everything it sends and receives, as if its cable was pulled
-	net::DatagramSocketFactory		cuttable(net::DatagramSocketFactory inner, const char *address)
+	// Both announce themselves until each found the other. Announcing again also makes a core look at its discovery port.
+	static bool						   discover(Stack &first, Stack &second, const std::chrono::milliseconds timeout = 5s)
 	{
-		auto flag = std::string(address) == AddressA ? cutA : cutB;
-
-		return [inner = std::move(inner), flag](const net::SocketAddress &local, const net::BindOptions &options) -> net::Result<std::unique_ptr<net::IDatagramSocket>>
-		{
-			auto socket = inner(local, options);
-			if (!socket)
-				return std::unexpected(socket.error());
-			return std::make_unique<CuttableSocket>(std::move(*socket), flag);
-		};
+		return waitUntilTrue(
+			[&]
+			{
+				first.core.startDiscovery();
+				second.core.startDiscovery();
+				return first.events.knows(second.id()) && second.events.knows(first.id());
+			},
+			timeout);
 	}
 
-	class CuttableSocket final : public net::IDatagramSocket
+	static bool connect(Stack &from, Stack &to, const std::chrono::milliseconds timeout = 5s)
 	{
-	public:
-		CuttableSocket(std::unique_ptr<net::IDatagramSocket> inner, std::shared_ptr<std::atomic<bool>> cut) : mInner(std::move(inner)), mCut(std::move(cut)) {}
+		if (!discover(from, to, timeout) || !from.core.connect(to.id()))
+			return false;
 
-		net::Result<size_t> sendTo(const net::SocketAddress &destination, std::span<const uint8_t> data) override
-		{
-			return mCut->load() ? net::Result<size_t>(data.size()) : mInner->sendTo(destination, data);
-		}
-
-		net::Result<net::Datagram> receiveFrom(std::span<uint8_t> buffer, std::chrono::microseconds timeout) override
-		{
-			auto datagram = mInner->receiveFrom(buffer, timeout);
-			if (datagram && mCut->load())
-				return std::unexpected(net::SocketError::Timeout);
-			return datagram;
-		}
-
-		net::Result<void>  waitReadable(std::chrono::microseconds timeout) override { return mInner->waitReadable(timeout); }
-		void			   interrupt() override { mInner->interrupt(); }
-		net::SocketAddress localAddress() const override { return mInner->localAddress(); }
-		void			   shutdown() override { mInner->shutdown(); }
-
-	private:
-		std::unique_ptr<net::IDatagramSocket> mInner;
-		std::shared_ptr<std::atomic<bool>>	  mCut;
-	};
-
-
-	static NetLinkConfig makeConfig(const std::string &name, const std::string &secret, const std::string &version = {})
-	{
-		NetLinkConfig config;
-		config.localDisplayName	  = name;
-		config.secret			  = secret;
-		config.applicationVersion = version;
-		config.discoveryPort	  = 5555;
-		config.broadcastAddress	  = FakeNet::BroadcastAddress;
-		return config;
+		return waitUntilTrue([&] { return from.events.isConnectedTo(to.id()) && to.events.isConnectedTo(from.id()); }, timeout);
 	}
 
-	NetLinkCallbacks recordInto(EventRecorder &recorder)
-	{
-		NetLinkCallbacks callbacks;
-		callbacks.onRemoteDiscovered  = [&recorder](const Endpoint &endpoint) { recorder.addDiscovered(endpoint); };
-		callbacks.onConnectionChanged = [&recorder](const ConnectionEvent &event) { recorder.addConnectionEvent(event); };
-		callbacks.onMessageReceived	  = [&recorder](const Message &message) { recorder.addMessage(message); };
-		return callbacks;
-	}
-
-	void start(std::unique_ptr<NetLinkCore> &peer, const NetLinkConfig &config, const NetLinkCallbacks &callbacks, const std::string &address)
-	{
-		peer->configure(config, callbacks);
-		ASSERT_TRUE(peer->init());
-		peer->setLocalAddress(address);
-	}
-
-	void startDiscovery()
-	{
-		ASSERT_TRUE(peerA->startDiscovery());
-		ASSERT_TRUE(peerB->startDiscovery());
-	}
-
-	// Discovers, validates and connects A -> B. B accepts from inside its callback.
 	void connectPeers()
 	{
-		auto callbacksB				   = recordInto(eventsB);
-		callbacksB.onConnectionChanged = [this](const ConnectionEvent &event)
-		{
-			eventsB.addConnectionEvent(event);
-
-			if (event.state == ConnectionState::PendingInbound)
-				peerB->respondToConnection(true); // calling back into NetLink from a callback must not deadlock
-		};
-		callbacksB.onMessageReceived = [this](const Message &message)
-		{
-			eventsB.addMessage(message);
-
-			switch (reactionB.load())
-			{
-			case Reaction::Reply: peerB->send(message.type + 1, message.data, DeliveryMode::ReliableOrdered); break;
-			case Reaction::Disconnect: peerB->disconnect(); break;
-			case Reaction::None: break;
-			}
-		};
-
-		start(peerA, makeConfig("pc-a", "shared"), recordInto(eventsA), AddressA);
-		start(peerB, makeConfig("pc-b", "shared"), callbacksB, AddressB);
-		startDiscovery();
-
-		ASSERT_TRUE(waitFor([this] { return !eventsA.discovered().empty() && !eventsB.discovered().empty(); })) << "Both peers must discover and validate each other";
-
-		ASSERT_TRUE(peerA->connectTo(eventsA.discovered().front()));
-
-		ASSERT_TRUE(waitFor([this] { return eventsA.countState(ConnectionState::Connected) == 1 && eventsB.countState(ConnectionState::Connected) == 1; }))
-			<< "Both peers must report an established connection";
+		ASSERT_TRUE(a->start("pc-a"));
+		ASSERT_TRUE(b->start("pc-b"));
+		ASSERT_TRUE(connect(*a, *b)) << "Both peers must report an established connection";
 	}
 
-	// How peer B reacts to a received message (callbacks are fixed after configure())
-	enum class Reaction
+	static SendResult send(Stack &from, const Stack &to, const uint32_t type, std::vector<uint8_t> data, const Lane lane = Lane::Reliable)
 	{
-		None,
-		Reply,
-		Disconnect,
-	};
+		return from.core.send(to.id(), type, std::move(data), lane, {});
+	}
 
-	// Declaration order: recorders outlive the peers whose event threads write into them
-	std::atomic<Reaction>						  reactionB{Reaction::None};
-	std::shared_ptr<std::atomic<bool>>			  cutA	  = std::make_shared<std::atomic<bool>>(false);
-	std::shared_ptr<std::atomic<bool>>			  cutB	  = std::make_shared<std::atomic<bool>>(false);
 	std::shared_ptr<FakeNet::FakeDatagramNetwork> network = FakeNet::FakeDatagramNetwork::create();
-	EventRecorder								  eventsA;
-	EventRecorder								  eventsB;
-
-	std::unique_ptr<NetLinkCore>				  peerA;
-	std::unique_ptr<NetLinkCore>				  peerB;
+	std::unique_ptr<Stack>						  a;
+	std::unique_ptr<Stack>						  b;
 };
 
 
-TEST_F(NetLinkCoreTest, DiscoveredPeersAreValidatedAndReportedOnce)
+TEST_F(NetLinkCoreTest, Start_NeedsAnAppId_AndRunsOnce)
 {
-	start(peerA, makeConfig("pc-a", "shared"), recordInto(eventsA), AddressA);
-	start(peerB, makeConfig("pc-b", "shared"), recordInto(eventsB), AddressB);
-	startDiscovery();
+	EXPECT_FALSE(a->start("pc-a", {}, "")) << "Without an appId nobody could tell this application from another";
+	EXPECT_EQ(a->core.send(PeerId{1}, 1, {}, Lane::Reliable, {}), SendResult::NotRunning);
+	EXPECT_FALSE(a->core.startDiscovery());
+	EXPECT_FALSE(a->core.connect(PeerId{1}));
+	EXPECT_TRUE(a->core.peers().empty());
 
-	ASSERT_TRUE(waitFor([this] { return !eventsA.discovered().empty() && !eventsB.discovered().empty(); }));
+	ASSERT_TRUE(a->start("pc-a"));
+	EXPECT_FALSE(a->start("pc-a")) << "Already running";
+	EXPECT_TRUE(a->core.startDiscovery());
 
-	const auto seenByA = eventsA.discovered().front();
-	EXPECT_EQ(seenByA.displayName, "pc-b");
-	EXPECT_EQ(seenByA.IPAddress, AddressB);
+	ASSERT_TRUE(waitUntilTrue([this] { return a->events.addresses() == std::vector<std::string>{AddressA}; })) << "The adapter in use is reported";
+}
 
-	ASSERT_EQ(peerA->getPotentialEndpoints().size(), 1u);
-	EXPECT_EQ(peerA->getPotentialEndpoints().front().displayName, "pc-b");
-	EXPECT_EQ(peerA->getConnectionState(), ConnectionState::Searching);
+
+TEST_F(NetLinkCoreTest, DiscoveredPeers_AreReportedOnce)
+{
+	ASSERT_TRUE(a->start("pc-a"));
+	ASSERT_TRUE(b->start("pc-b"));
+	ASSERT_TRUE(discover(*a, *b));
+
+	const auto seenByA = a->events.discovered();
+	ASSERT_EQ(seenByA.size(), 1u);
+	EXPECT_EQ(seenByA[0].displayName, "pc-b");
+	EXPECT_EQ(seenByA[0].address, AddressB);
+	EXPECT_EQ(seenByA[0].id, b->id());
+
+	ASSERT_EQ(a->core.peers().size(), 1u);
+	EXPECT_EQ(a->core.peers().front().displayName, "pc-b");
 
 	std::this_thread::sleep_for(2500ms); // at least one more announcement round
-	EXPECT_EQ(eventsA.discovered().size(), 1u) << "Re-announcements of an unchanged peer must not report it again";
+	EXPECT_EQ(a->events.discovered().size(), 1u) << "Re-announcements of an unchanged peer must not report it again";
 }
 
 
-TEST_F(NetLinkCoreTest, MismatchingSecret_PeerIsNeverOffered)
+TEST_F(NetLinkCoreTest, OtherApplication_IsNeverOffered)
 {
-	start(peerA, makeConfig("pc-a", "secret-one"), recordInto(eventsA), AddressA);
-	start(peerB, makeConfig("pc-b", "secret-two"), recordInto(eventsB), AddressB);
-	startDiscovery();
+	ASSERT_TRUE(a->start("pc-a", {}, "app-one"));
+	ASSERT_TRUE(b->start("pc-b", {}, "app-two"));
 
-	std::this_thread::sleep_for(1500ms);
-
-	EXPECT_TRUE(eventsA.discovered().empty()) << "An incompatible peer must not be reported";
-	EXPECT_TRUE(peerA->getPotentialEndpoints().empty());
-	EXPECT_FALSE(peerA->connectTo({AddressB, 0, "pc-b"})) << "Connecting to an unvalidated peer must be refused";
+	EXPECT_FALSE(discover(*a, *b, 1500ms)) << "Only peers of the same application see each other";
+	EXPECT_TRUE(a->core.peers().empty());
+	EXPECT_FALSE(a->core.connect(b->id())) << "Connecting to a peer that was not discovered must be refused";
 }
 
-
-TEST_F(NetLinkCoreTest, FullSession_ConnectExchangeMessagesDisconnect)
-{
-	connectPeers();
-
-	EXPECT_EQ(peerA->getConnectionState(), ConnectionState::Connected);
-	EXPECT_EQ(peerB->getConnectionState(), ConnectionState::Connected);
-	EXPECT_EQ(eventsA.lastEventWithState(ConnectionState::Connected)->remote.displayName, "pc-b") << "Connection events must name the remote peer";
-	EXPECT_EQ(eventsB.lastEventWithState(ConnectionState::Connected)->remote.displayName, "pc-a");
-
-	// A -> B, and B answers from inside its message callback
-	reactionB.store(Reaction::Reply);
-
-	ASSERT_TRUE(peerA->send(10, {1, 2, 3}, DeliveryMode::ReliableOrdered));
-
-	ASSERT_TRUE(waitFor([this] { return !eventsA.messages().empty(); })) << "The reply must arrive at A";
-
-	EXPECT_EQ(eventsB.messages().front().type, 10u);
-	EXPECT_EQ(eventsA.messages().front().type, 11u);
-	EXPECT_EQ(eventsA.messages().front().data, (std::vector<uint8_t>{1, 2, 3}));
-
-	peerA->disconnect();
-
-	EXPECT_TRUE(waitFor([this] { return eventsA.countState(ConnectionState::Disconnected) == 1 && eventsB.countState(ConnectionState::Disconnected) == 1; }))
-		<< "Both peers must report the disconnect";
-	EXPECT_FALSE(peerA->send(10, {1}, DeliveryMode::ReliableOrdered)) << "Sending after disconnect must fail";
-}
-
-
-TEST_F(NetLinkCoreTest, Shutdown_NotifiesConnectedRemote)
-{
-	connectPeers();
-
-	peerA->shutdown();
-
-	EXPECT_TRUE(waitFor([this] { return eventsB.countState(ConnectionState::Disconnected) == 1; })) << "Shutting down must tell the remote instead of leaving it hanging";
-	EXPECT_EQ(peerA->getConnectionState(), ConnectionState::None);
-}
-
-
-TEST_F(NetLinkCoreTest, DisconnectFromInsideCallback_DoesNotDeadlock)
-{
-	connectPeers();
-
-	reactionB.store(Reaction::Disconnect);
-
-	ASSERT_TRUE(peerA->send(1, {42}, DeliveryMode::ReliableOrdered));
-
-	EXPECT_TRUE(waitFor([this] { return eventsA.countState(ConnectionState::Disconnected) == 1; })) << "B's disconnect from within its callback must go through";
-}
 
 TEST_F(NetLinkCoreTest, MismatchingApplicationVersion_PeerIsNeverOffered)
 {
-	start(peerA, makeConfig("pc-a", "shared", "1.0.0"), recordInto(eventsA), AddressA);
-	start(peerB, makeConfig("pc-b", "shared", "2.0.0"), recordInto(eventsB), AddressB);
-	startDiscovery();
+	ASSERT_TRUE(a->start("pc-a", "1.0.0"));
+	ASSERT_TRUE(b->start("pc-b", "2.0.0"));
 
-	std::this_thread::sleep_for(1500ms);
-
-	EXPECT_TRUE(eventsA.discovered().empty()) << "A peer running an incompatible application version must not be offered";
-	EXPECT_TRUE(peerA->getPotentialEndpoints().empty());
+	EXPECT_FALSE(discover(*a, *b, 1500ms)) << "A peer running an incompatible application version must not be offered";
+	EXPECT_TRUE(a->core.peers().empty());
 }
 
 
@@ -338,23 +204,169 @@ TEST_F(NetLinkCoreTest, PatchAndBuildNumberDifferencesStayCompatible)
 {
 	// The build number comes from the commit count, so two builds of the same release
 	// must still find each other or no two peers could ever connect.
-	start(peerA, makeConfig("pc-a", "shared", "1.4.0.100"), recordInto(eventsA), AddressA);
-	start(peerB, makeConfig("pc-b", "shared", "1.4.9.2000"), recordInto(eventsB), AddressB);
-	startDiscovery();
+	ASSERT_TRUE(a->start("pc-a", "1.4.0.100"));
+	ASSERT_TRUE(b->start("pc-b", "1.4.9.2000"));
 
-	EXPECT_TRUE(waitFor([this] { return !eventsA.discovered().empty() && !eventsB.discovered().empty(); }))
-		<< "Builds differing only in patch and build number must stay compatible";
+	EXPECT_TRUE(discover(*a, *b)) << "Builds differing only in patch and build number must stay compatible";
+	EXPECT_EQ(a->events.discovered()[0].appVersion, "1.4");
 }
 
 
-TEST_F(NetLinkCoreTest, UnreliableMessages_ReachTheRemote)
+TEST_F(NetLinkCoreTest, FullSession_ConnectExchangeMessagesDisconnect)
+{
+	// B answers from inside its message callback: calling back into NetLink from a callback must not deadlock
+	b->onMessage = [this](const PeerId from, const Message &message) { b->core.send(from, message.type + 1, std::vector<uint8_t>(message.data), Lane::Reliable, {}); };
+
+	connectPeers();
+
+	EXPECT_EQ(a->events.connected()[0].displayName, "pc-b") << "The connection names the remote peer";
+	EXPECT_EQ(b->events.connected()[0].displayName, "pc-a");
+	EXPECT_EQ(a->core.connectedPeers(), std::vector<PeerId>{b->id()});
+
+	ASSERT_EQ(send(*a, *b, 10, {1, 2, 3}), SendResult::Queued);
+
+	ASSERT_TRUE(waitUntilTrue([this] { return a->events.messageCount() == 1; })) << "The reply must arrive at A";
+
+	EXPECT_EQ(b->events.messages().front().type, 10u);
+	EXPECT_EQ(b->events.messages().front().from, a->id());
+	EXPECT_EQ(a->events.messages().front().type, 11u);
+	EXPECT_EQ(a->events.messages().front().data, (std::vector<uint8_t>{1, 2, 3}));
+
+	a->core.disconnect(b->id());
+
+	EXPECT_TRUE(waitUntilTrue([this] { return !a->events.ended().empty() && !b->events.ended().empty(); })) << "Both peers must report the disconnect";
+	EXPECT_EQ(a->events.ended(), std::vector<Ended>({{b->id(), DisconnectReason::Local}}));
+	EXPECT_EQ(b->events.ended(), std::vector<Ended>({{a->id(), DisconnectReason::Remote}}));
+	EXPECT_EQ(send(*a, *b, 10, {1}), SendResult::NotConnected) << "Sending after disconnect must fail";
+}
+
+
+TEST_F(NetLinkCoreTest, ConnectionRequest_IsAnsweredFromItsCallback)
+{
+	auto callbacksB				   = b->callbacks();
+	callbacksB.onConnectionRequest = [this](const PeerInfo &peer)
+	{
+		b->record({.kind = EngineEvent::Kind::ConnectionRequest, .peer = peer.id, .info = peer});
+		b->core.accept(peer.id);
+	};
+
+	NetLinkConfig configB;
+	configB.displayName = "pc-b";
+	configB.appId		= "core-tests";
+
+	ASSERT_TRUE(a->start("pc-a"));
+	ASSERT_TRUE(b->start(configB, callbacksB));
+	ASSERT_TRUE(connect(*a, *b));
+
+	ASSERT_EQ(b->events.requests().size(), 1u);
+	EXPECT_EQ(b->events.requests()[0].displayName, "pc-a");
+
+	const auto order = b->events.order();
+	const auto asked = std::ranges::find(order, std::pair{EngineEvent::Kind::ConnectionRequest, a->id()});
+	const auto done	 = std::ranges::find(order, std::pair{EngineEvent::Kind::Connected, a->id()});
+	EXPECT_LT(asked, done);
+}
+
+
+TEST_F(NetLinkCoreTest, ThreeStacks_HoldSessionsWithEachOther)
+{
+	Stack c(network, "10.0.0.3");
+
+	ASSERT_TRUE(a->start("pc-a"));
+	ASSERT_TRUE(b->start("pc-b"));
+	ASSERT_TRUE(c.start("pc-c"));
+
+	ASSERT_TRUE(connect(*a, *b));
+	ASSERT_TRUE(connect(*a, c));
+	ASSERT_TRUE(connect(*b, c));
+
+	EXPECT_EQ(a->core.connectedPeers().size(), 2u);
+	EXPECT_EQ(a->core.broadcast(7, std::vector<uint8_t>{9}, Lane::Reliable), 2u);
+	ASSERT_EQ(send(c, *a, 8, {1}), SendResult::Queued);
+
+	ASSERT_TRUE(waitUntilTrue([&] { return b->events.messageCount() == 1 && c.events.messageCount() == 1 && a->events.messageCount() == 1; }));
+	EXPECT_EQ(a->events.messages()[0].from, c.id()) << "Every message says whom it is from";
+	EXPECT_EQ(c.events.messages()[0].from, a->id());
+
+	c.core.stop();
+}
+
+
+TEST_F(NetLinkCoreTest, Stop_NotifiesConnectedRemote)
+{
+	connectPeers();
+
+	a->core.stop();
+
+	EXPECT_EQ(a->events.ended(), std::vector<Ended>({{b->id(), DisconnectReason::Shutdown}})) << "The last event is delivered before stop() returns";
+	EXPECT_TRUE(waitUntilTrue([this] { return !b->events.ended().empty(); })) << "Stopping must tell the remote instead of leaving it hanging";
+	EXPECT_EQ(b->events.ended(), std::vector<Ended>({{a->id(), DisconnectReason::Remote}}));
+	EXPECT_EQ(a->core.send(PeerId{1}, 1, {}, Lane::Reliable, {}), SendResult::NotRunning);
+
+	EXPECT_NO_THROW(a->core.stop());
+}
+
+
+TEST_F(NetLinkCoreTest, StopAndStartAgain_IsANewPeer)
+{
+	connectPeers();
+	const PeerId before = a->id();
+
+	a->core.stop();
+	ASSERT_TRUE(a->start("pc-a"));
+
+	EXPECT_NE(a->id(), before);
+	ASSERT_TRUE(discover(*a, *b)) << "For B it is a peer it has not seen before";
+
+	ASSERT_TRUE(b->core.connect(a->id()));
+	EXPECT_TRUE(waitUntilTrue([this] { return b->events.connected().size() == 2; }));
+}
+
+
+TEST_F(NetLinkCoreTest, DisconnectFromInsideCallback_DoesNotDeadlock)
+{
+	b->onMessage = [this](const PeerId from, const Message &) { b->core.disconnect(from); };
+
+	connectPeers();
+	ASSERT_EQ(send(*a, *b, 1, {42}), SendResult::Queued);
+
+	EXPECT_TRUE(waitUntilTrue([this] { return !a->events.ended().empty(); })) << "B's disconnect from within its callback must go through";
+	EXPECT_EQ(a->events.ended(), std::vector<Ended>({{b->id(), DisconnectReason::Remote}}));
+}
+
+
+TEST_F(NetLinkCoreTest, StopFromInsideCallback_ReturnsAndDeliversTheLastEvents)
+{
+	std::atomic<bool> returned{false};
+
+	b->onMessage = [&](PeerId, const Message &)
+	{
+		b->core.stop();
+		returned.store(true);
+	};
+
+	connectPeers();
+	ASSERT_EQ(send(*a, *b, 1, {42}), SendResult::Queued);
+
+	ASSERT_TRUE(waitUntilTrue([&] { return returned.load(); })) << "A callback cannot wait for its own thread";
+	EXPECT_TRUE(waitUntilTrue([this] { return b->events.ended() == std::vector<Ended>({{a->id(), DisconnectReason::Shutdown}}); })) << "The session's outcome still arrives";
+	EXPECT_TRUE(waitUntilTrue([this] { return a->events.ended() == std::vector<Ended>({{b->id(), DisconnectReason::Remote}}); }));
+
+	// Whoever stops again from elsewhere cleans up; after that the stack starts again
+	b->core.stop();
+	EXPECT_TRUE(b->start("pc-b"));
+}
+
+
+TEST_F(NetLinkCoreTest, MediaMessages_ReachTheRemote)
 {
 	connectPeers();
 
 	for (uint32_t i = 0; i < 20; ++i)
-		ASSERT_TRUE(peerA->send(100 + i, {static_cast<uint8_t>(i)}, DeliveryMode::UnreliableSequenced));
+		ASSERT_EQ(send(*a, *b, 100 + i, {static_cast<uint8_t>(i)}, Lane::Media), SendResult::Queued);
 
-	EXPECT_TRUE(waitFor([this] { return eventsB.messages().size() == 20; })) << "Without loss every unreliable message arrives";
+	EXPECT_TRUE(waitUntilTrue([this] { return b->events.messageCount() == 20; })) << "Without loss every Media message arrives";
+	EXPECT_EQ(b->events.messages()[0].lane, Lane::Media);
 }
 
 
@@ -366,21 +378,30 @@ TEST_F(NetLinkCoreTest, LargeMessage_IsDeliveredInOnePiece)
 	for (size_t i = 0; i < big.size(); ++i)
 		big[i] = static_cast<uint8_t>(i * 3);
 
-	ASSERT_TRUE(peerA->send(5, big, DeliveryMode::ReliableOrdered));
+	ASSERT_EQ(send(*a, *b, 5, big, Lane::Bulk), SendResult::Queued);
 
-	ASSERT_TRUE(waitFor([this] { return !eventsB.messages().empty(); }, 10s));
-	EXPECT_EQ(eventsB.messages().front().data, big);
+	ASSERT_TRUE(waitUntilTrue([this] { return b->events.messageCount() == 1; }, 10s));
+	EXPECT_EQ(b->events.messages().front().data, big);
+	EXPECT_EQ(a->core.stats(b->id())->bytesSent, big.size());
 }
 
 
-TEST_F(NetLinkCoreTest, VanishedRemote_IsReportedAsDisconnected)
+TEST_F(NetLinkCoreTest, VanishedRemote_IsReportedAsLost)
 {
-	connectPeers();
+	NetLinkConfig config;
+	config.displayName = "pc-a";
+	config.appId	   = "core-tests";
+	config.peerTimeout = 1500ms;
 
-	// B disappears without telling A (cable pulled): only A's heartbeat supervision notices
-	cutB->store(true);
+	ASSERT_TRUE(a->start(config, a->callbacks()));
+	ASSERT_TRUE(b->start("pc-b"));
+	ASSERT_TRUE(connect(*a, *b));
 
-	EXPECT_TRUE(waitFor([this] { return eventsA.countState(ConnectionState::Disconnected) == 1; }, 15s)) << "A lost remote must end the session";
+	// B disappears without telling A (cable pulled): A notices because B does not answer anymore
+	b->cut->store(true);
+
+	EXPECT_TRUE(waitUntilTrue([this] { return !a->events.ended().empty(); }, 10s)) << "A lost remote must end the session";
+	EXPECT_EQ(a->events.ended(), std::vector<Ended>({{b->id(), DisconnectReason::Lost}}));
 }
 
 
@@ -388,35 +409,39 @@ TEST_F(NetLinkCoreTest, VanishedRemote_IsReportedAsDisconnected)
 class LossyNetLinkCoreTest : public NetLinkCoreTest
 {
 protected:
-	NetLinkCoreDependencies dependenciesFor(const char *address) override
+	net::DatagramSocketFactory factoryFor(const char *address) override
 	{
-		FakeNet::LossProfile	profile{0.2, 0.05, 0.1, address == std::string(AddressA) ? 5u : 9u};
-
-		NetLinkCoreDependencies dependencies;
-		dependencies.datagramSocketFactory					  = FakeNet::LossyDatagramSocket::wrap(cuttable(network->factory(address), address), profile);
-		dependencies.channelConfig.timings.peerTimeout		  = std::chrono::seconds{20};
-		return dependencies;
+		const FakeNet::LossProfile profile{0.2, 0.05, 0.1, address == std::string(AddressA) ? 5u : 9u};
+		return FakeNet::LossyDatagramSocket::wrap(network->factory(address), profile);
 	}
 };
 
 
 TEST_F(LossyNetLinkCoreTest, FullSession_OverLossyNetwork)
 {
-	connectPeers();
+	NetLinkConfig config;
+	config.appId	   = "core-tests";
+	config.peerTimeout = 20s;
+
+	config.displayName = "pc-a";
+	ASSERT_TRUE(a->start(config, a->callbacks()));
+	config.displayName = "pc-b";
+	ASSERT_TRUE(b->start(config, b->callbacks()));
+	ASSERT_TRUE(connect(*a, *b, 15s));
 
 	const uint32_t total = 500;
 	for (uint32_t i = 0; i < total; ++i)
-		ASSERT_TRUE(peerA->send(i, {static_cast<uint8_t>(i), static_cast<uint8_t>(i >> 8)}, DeliveryMode::ReliableOrdered));
+		ASSERT_EQ(send(*a, *b, i, {static_cast<uint8_t>(i), static_cast<uint8_t>(i >> 8)}), SendResult::Queued);
 
-	ASSERT_TRUE(waitFor([this, total] { return eventsB.messages().size() >= total; }, 30s)) << "Only " << eventsB.messages().size() << " of " << total << " arrived";
+	ASSERT_TRUE(waitUntilTrue([this, total] { return b->events.messageCount() >= total; }, 30s)) << "Only " << b->events.messageCount() << " of " << total << " arrived";
 
-	const auto messages = eventsB.messages();
+	const auto messages = b->events.messages();
 	ASSERT_EQ(messages.size(), total) << "Every message exactly once";
 	for (uint32_t i = 0; i < total; ++i)
 		ASSERT_EQ(messages[i].type, i) << "In order, broken at " << i;
 
-	peerA->disconnect();
-	EXPECT_TRUE(waitFor([this] { return eventsB.countState(ConnectionState::Disconnected) == 1; }, 10s)) << "The Disconnect is delivered reliably as well";
+	a->core.disconnect(b->id());
+	EXPECT_TRUE(waitUntilTrue([this] { return !a->events.ended().empty(); }, 10s));
 }
 
 } // namespace IntegrationTests

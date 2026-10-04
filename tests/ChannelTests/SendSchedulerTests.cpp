@@ -6,7 +6,6 @@
 #include <vector>
 
 #include "Channel/SendScheduler.h"
-#include "TestIp.h"
 
 using namespace netlink;
 using namespace netlink::channel;
@@ -16,13 +15,15 @@ using namespace std::chrono_literals;
 namespace ChannelTests
 {
 
+using netlink::channel::Lane;
+
 class SendSchedulerTest : public ::testing::Test
 {
 protected:
 	using Result = SendScheduler::Result;
 	using Sent	 = std::vector<std::pair<Lane, int>>; // class and peer, in the order they were sent
 
-	static SendScheduler::Peer peer(const int number) { return {ipv4("10.0.0.1"), static_cast<uint16_t>(number)}; }
+	static SendScheduler::Peer peer(const int number) { return {static_cast<uint64_t>(number)}; }
 
 	// The peer has that many datagrams to send in the class
 	void					   give(SendScheduler &scheduler, const Lane lane, const int number, const size_t datagrams)
@@ -41,12 +42,12 @@ protected:
 			{
 				++asked;
 
-				auto &left = supply[{lane, from.port}];
+				auto &left = supply[{lane, static_cast<int>(from.value)}];
 				if (left == 0)
 					return Result::Empty;
 
 				--left;
-				sent.emplace_back(lane, from.port);
+				sent.emplace_back(lane, static_cast<int>(from.value));
 				return Result::Sent;
 			});
 
@@ -273,8 +274,8 @@ TEST_F(SendSchedulerTest, Lost_CountsAsSentAndEndsTheTurn)
 	scheduler.run(
 		[&](Lane, const SendScheduler::Peer &from)
 		{
-			order.push_back(from.port);
-			return from.port == 1 ? Result::Lost : Result::Sent;
+			order.push_back(static_cast<int>(from.value));
+			return static_cast<int>(from.value) == 1 ? Result::Lost : Result::Sent;
 		});
 
 	EXPECT_EQ(order, (std::vector<int>{1, 2, 2, 2, 2, 1, 2, 2, 2, 2, 1, 2, 2, 2, 2, 1})) << "A peer that cannot be reached gets one try per round";

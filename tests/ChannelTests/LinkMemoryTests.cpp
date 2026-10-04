@@ -132,4 +132,52 @@ TEST(LinkMemory, ControlOnlyLink_StaysSmall)
 #endif
 }
 
+
+TEST(LinkMemory, LinkWithControlAndReliable_StaysSmall)
+{
+#ifndef NETLINK_COUNTS_ALLOCATIONS
+	GTEST_SKIP() << "Allocations cannot be counted in this build";
+#else
+	FakeNet::QueueSource source;
+	FakeNet::QueueSource none;
+	const auto			 now = ReliableLink::Clock::now();
+
+	liveBytes				 = 0;
+	counting				 = true;
+
+	auto link				 = std::make_unique<ReliableLink>();
+	auto other				 = std::make_unique<ReliableLink>();
+
+	counting				 = false;
+
+	// What every session uses: its Control lane and the default lane for messages, in both directions
+	for (const Lane lane : {Lane::Control, Lane::Reliable})
+		source.push(lane, 0, std::vector<uint8_t>(200));
+
+	const auto carry = [&](ReliableLink &from, ReliableLink &to, FakeNet::QueueSource &messages)
+	{
+		for (const auto &datagram : from.takeOutgoing(now, messages))
+		{
+			const auto bytes = datagram.bytes();
+			to.onPacket(*decodePacket(bytes), now);
+		}
+	};
+
+	counting = true;
+	carry(*link, *other, source);
+	carry(*other, *link, none);
+	link->takeDelivered();
+	other->takeDelivered();
+	counting				   = false;
+
+	const std::int64_t perLink = liveBytes / 2;
+
+	EXPECT_GT(perLink, 16 * 1024);
+	EXPECT_LE(perLink, 64 * 1024) << "A session costs this much for as long as it is idle";
+
+	link.reset();
+	other.reset();
+#endif
+}
+
 } // namespace ChannelTests

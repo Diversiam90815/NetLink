@@ -4,9 +4,12 @@ set(Test_Directory ${CMAKE_CURRENT_SOURCE_DIR})
 
 
 set(Discovery_Tests
-    ${Test_Directory}/DiscoveryTests/EndpointTests.cpp 
-    ${Test_Directory}/DiscoveryTests/DiscoveryServiceTests.cpp
-    ${Test_Directory}/DiscoveryTests/RegistryTests.cpp
+    ${Test_Directory}/DiscoveryTests/BeaconTests.cpp
+    ${Test_Directory}/DiscoveryTests/DiscoveryLogicTests.cpp
+)
+
+set(Session_Tests
+    ${Test_Directory}/SessionTests/ControlMessageTests.cpp
 )
 
 set(Channel_Tests
@@ -18,18 +21,14 @@ set(Channel_Tests
     ${Test_Directory}/ChannelTests/FragmentationServiceTests.cpp
     ${Test_Directory}/ChannelTests/MessageAssemblerTests.cpp
     ${Test_Directory}/ChannelTests/MediaAssemblerTests.cpp
-    ${Test_Directory}/ChannelTests/HeartbeatServiceTests.cpp
     ${Test_Directory}/ChannelTests/ReliableLinkTests.cpp
     ${Test_Directory}/ChannelTests/LinkMemoryTests.cpp
-    ${Test_Directory}/ChannelTests/SignalPacketTests.cpp
     ${Test_Directory}/ChannelTests/MailboxTests.cpp
     ${Test_Directory}/ChannelTests/SendSchedulerTests.cpp
-    ${Test_Directory}/ChannelTests/PeerChannelTests.cpp
 )
 
-set(Connection_Tests
-    ${Test_Directory}/ConnectionTests/ReadySyncTrackerTests.cpp
-    ${Test_Directory}/ConnectionTests/ConnectionServiceTests.cpp
+set(Engine_Tests
+    ${Test_Directory}/EngineTests/NetworkEngineTests.cpp
 )
 
 set(Network_Tests
@@ -39,8 +38,6 @@ set(Network_Tests
 set(Utils_Tests
     ${Test_Directory}/UtilsTests/DeadlineTimerTests.cpp
     ${Test_Directory}/UtilsTests/TaskQueueTests.cpp
-    ${Test_Directory}/UtilsTests/ThreadBaseTests.cpp
-    ${Test_Directory}/UtilsTests/TimeoutServiceTests.cpp
 )
 
 set(Socket_Tests
@@ -51,10 +48,15 @@ set(Socket_Tests
 
 set(Sim_Tests
     ${Test_Directory}/SimTests/PacingSimTests.cpp
+    ${Test_Directory}/SimTests/SessionSimTests.cpp
 )
 
 set(Integration_Tests
     ${Test_Directory}/IntegrationTests/NetLinkCoreTests.cpp
+)
+
+set(Api_Tests
+    ${Test_Directory}/ApiTests/NetLinkApiTests.cpp
 )
 
 set(Test_Fakes
@@ -63,29 +65,22 @@ set(Test_Fakes
     ${Test_Directory}/Fakes/LossyDatagramSocket.h
     ${Test_Directory}/Fakes/SpyDatagramSocket.h
     ${Test_Directory}/Fakes/SimDriver.h
+    ${Test_Directory}/Fakes/SimScenario.h
+    ${Test_Directory}/Fakes/EngineHarness.h
     ${Test_Directory}/Fakes/QueueSource.h
-    ${Test_Directory}/Fakes/SpyDeadlineTimer.h
-)
-
-set(Validation_Tests
-    ${Test_Directory}/ValidationTests/CompatibilityCheckTests.cpp
-    ${Test_Directory}/ValidationTests/HandshakeTests.cpp
-    ${Test_Directory}/ValidationTests/PeerValidationTests.cpp
-    ${Test_Directory}/ValidationTests/PendingValidationStoreTests.cpp
-    ${Test_Directory}/ValidationTests/ValidatedPeerRegistryTests.cpp
-    ${Test_Directory}/ValidationTests/ValidationTypesTests.cpp
 )
 
 
 set(All_Tests
     ${Discovery_Tests}
+    ${Session_Tests}
     ${Channel_Tests}
-    ${Connection_Tests}
+    ${Engine_Tests}
     ${Network_Tests}
     ${Utils_Tests}
-    ${Validation_Tests}
     ${Socket_Tests}
     ${Integration_Tests}
+    ${Api_Tests}
     ${Sim_Tests}
 )
 

@@ -1,9 +1,9 @@
 /*
   ==============================================================================
 	Module:         SimDriver
-	Description:    Steps peer channels through virtual time on one thread:
-					the same I/O loop as in production, but deterministic and
-					as fast as the test machine computes
+	Description:    Steps engines through virtual time on one thread: the same
+					I/O loop as in production, but deterministic and as fast as
+					the test machine computes
   ==============================================================================
 */
 
@@ -11,24 +11,34 @@
 
 #include <algorithm>
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <vector>
 
-#include "Channel/PeerChannel.h"
+#include "Engine/NetworkEngine.h"
 #include "FakeDatagramNetwork.h"
 
 
 namespace FakeNet
 {
 
-// The channels must not be started: the driver runs their loops. Their sockets come from the network it is given.
+// The engines must not run on a thread: the driver runs their loops and hands their events to the sink they were
+// added with. Their sockets come from the network it is given.
 class SimDriver
 {
 public:
+	using Sink = std::function<void(netlink::EventBatch &&)>;
+
 	explicit SimDriver(std::shared_ptr<FakeDatagramNetwork> network) : mNetwork(std::move(network)) { mNetwork->useVirtualTime(mNow); }
 
-	void					  add(netlink::PeerChannel &channel) { mChannels.push_back(&channel); }
+	void add(netlink::NetworkEngine &engine, Sink sink) { mEngines.push_back({&engine, std::move(sink)}); }
+
+	// The engine is not stepped anymore, like a machine that froze
+	void remove(const netlink::NetworkEngine &engine)
+	{
+		std::erase_if(mEngines, [&](const auto &entry) { return entry.first == &engine; });
+	}
 
 	TimePoint				  now() const { return mNow; }
 	std::chrono::microseconds elapsed() const { return std::chrono::duration_cast<std::chrono::microseconds>(mNow - mStart); }
@@ -61,7 +71,7 @@ public:
 			if (wake)
 				next = std::min(next, *wake > mNow ? *wake : mNow + std::chrono::milliseconds{1});
 
-			// A datagram that waits although nothing was read belongs to a socket no channel of this driver reads
+			// A datagram that waits although nothing was read belongs to a socket no engine of this driver reads
 			const bool stuck = mNetwork->receivedCount() == received;
 
 			if (const auto arrival = mNetwork->nextArrival(stuck ? std::optional{mNow} : std::nullopt))
@@ -73,7 +83,7 @@ public:
 	}
 
 private:
-	// Everything that happens at the current instant. Returns the earliest time a channel wants to run again.
+	// Everything that happens at the current instant. Returns the earliest time an engine wants to run again.
 	std::optional<TimePoint> settle()
 	{
 		std::optional<TimePoint> wake;
@@ -84,13 +94,15 @@ private:
 			const size_t received = mNetwork->receivedCount();
 			wake.reset();
 
-			for (auto *channel : mChannels)
+			for (auto &[engine, sink] : mEngines)
 			{
-				if (const auto next = channel->poll(mNow); next && (!wake || *next < *wake))
+				sink(engine->step(mNow));
+
+				if (const auto next = engine->nextWake(); next && (!wake || *next < *wake))
 					wake = next;
 			}
 
-			// Another round if a channel was given work, or took in datagrams and may have answered them
+			// Another round if an engine was given work, or took in datagrams and may have answered them
 			const auto arrival = mNetwork->nextArrival();
 			again			   = mNetwork->takeInterrupts() || (mNetwork->receivedCount() != received && arrival && *arrival <= mNow);
 		}
@@ -99,7 +111,7 @@ private:
 	}
 
 	std::shared_ptr<FakeDatagramNetwork> mNetwork;
-	std::vector<netlink::PeerChannel *>	 mChannels;
+	std::vector<std::pair<netlink::NetworkEngine *, Sink>> mEngines;
 	TimePoint							 mStart = Clock::now();
 	TimePoint							 mNow	= mStart;
 };

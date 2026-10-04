@@ -10,24 +10,14 @@ set(Socket_Benchmarks
 set(Channel_Benchmarks
         ${Benchmark_Directory}/ChannelBenchmarks/ReliableLinkBenchmarks.cpp
         ${Benchmark_Directory}/ChannelBenchmarks/FragmentationBenchmarks.cpp
-        ${Benchmark_Directory}/ChannelBenchmarks/PeerChannelBenchmarks.cpp
+)
+
+set(Engine_Benchmarks
+        ${Benchmark_Directory}/EngineBenchmarks/EngineBenchmarks.cpp
 )
 
 set(Utils_Benchmarks
-        ${Benchmark_Directory}/UtilsBenchmarks/TimeoutServiceBenchmarks.cpp
         ${Benchmark_Directory}/UtilsBenchmarks/TaskQueueBenchmarks.cpp
-)
-
-set(Validation_Benchmarks
-        ${Benchmark_Directory}/ValidationBenchmarks/PeerValidationBenchmarks.cpp
-)
-
-set(Connection_Benchmarks
-        ${Benchmark_Directory}/ConnectionBenchmarks/ConnectionServiceBenchmarks.cpp
-)
-
-set(Discovery_Benchmarks
-        ${Benchmark_Directory}/DiscoveryBenchmarks/DiscoveryBenchmarks.cpp
 )
 
 set(Integration_Benchmarks
@@ -37,7 +27,6 @@ set(Integration_Benchmarks
 set(Benchmark_Support
         ${Benchmark_Directory}/Support/BenchUtil.h
         ${Benchmark_Directory}/Support/Loopback.h
-        ${Benchmark_Directory}/Support/ServiceWiring.h
         ${Benchmark_Directory}/Support/LinkWire.h
 )
 
@@ -45,10 +34,8 @@ set(Benchmark_Support
 set(All_Benchmarks
         ${Socket_Benchmarks}
         ${Channel_Benchmarks}
+        ${Engine_Benchmarks}
         ${Utils_Benchmarks}
-        ${Validation_Benchmarks}
-        ${Connection_Benchmarks}
-        ${Discovery_Benchmarks}
         ${Integration_Benchmarks}
 )
 

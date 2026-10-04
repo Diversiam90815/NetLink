@@ -226,13 +226,7 @@ protected:
 		return tags;
 	}
 
-	bool failed(ReliableLink &link)
-	{
-		bool result = false;
-		for (const auto event : link.takeEvents())
-			result |= event == LinkEvent::Failed;
-		return result;
-	}
+	static bool failed(const ReliableLink &link) { return link.hasFailed(); }
 };
 
 
@@ -503,13 +497,126 @@ TEST_F(ReliableLinkTest, AcknowledgementOfUnsentSeqs_ReleasesOnlyWhatWasSent)
 
 
 // ---------------------------------------------------------------------------
+// Liveness
+// ---------------------------------------------------------------------------
+
+TEST_F(ReliableLinkTest, Unsupervised_NeverAsksAndNeverGivesUp)
+{
+	send(a, Lane::Reliable, 0, bytes({1}));
+	settle();
+
+	advance(10 * timings.peerTimeout);
+
+	EXPECT_TRUE(take(a).empty());
+	EXPECT_FALSE(failed(a));
+	EXPECT_FALSE(a.nextDeadline().has_value());
+}
+
+
+TEST_F(ReliableLinkTest, Supervised_AsksARemoteThatWentQuiet)
+{
+	send(a, Lane::Reliable, 0, bytes({1}));
+	settle();
+	a.supervise(now);
+
+	ASSERT_EQ(a.nextDeadline(), now + timings.keepAlive);
+
+	advance(timings.keepAlive - 1ms);
+	EXPECT_TRUE(take(a).empty()) << "Not before it was quiet for that long";
+
+	advance(1ms);
+	const auto asked = take(a);
+	ASSERT_EQ(count(asked, PacketKind::Ping), 1u);
+
+	deliverPass(b, asked);
+	const auto answer = take(b);
+	ASSERT_EQ(acks(answer).size(), 1u);
+	deliverPass(a, answer);
+
+	EXPECT_EQ(a.nextDeadline(), now + timings.keepAlive) << "The answer counts: the remote is asked again that much later";
+	EXPECT_FALSE(failed(a));
+}
+
+
+TEST_F(ReliableLinkTest, Supervised_AsksOncePerInterval)
+{
+	timings.peerTimeout = 10 * timings.keepAlive;
+	recreate(timings);
+
+	send(a, Lane::Reliable, 0, bytes({1}));
+	settle();
+	a.supervise(now);
+
+	size_t pings = 0;
+	for (int i = 0; i < 30; ++i)
+	{
+		advance(timings.keepAlive / 10);
+		pings += count(take(a), PacketKind::Ping);
+	}
+
+	EXPECT_EQ(pings, 3u) << "Three intervals of silence, three questions";
+}
+
+
+TEST_F(ReliableLinkTest, Supervised_FailsWhenTheRemoteStaysSilent)
+{
+	send(a, Lane::Reliable, 0, bytes({1}));
+	settle();
+	a.supervise(now);
+
+	const auto started = now;
+	while (!failed(a) && now - started < 10 * timings.peerTimeout)
+	{
+		take(a); // the questions get lost
+		advance(50ms);
+	}
+
+	ASSERT_TRUE(failed(a));
+	EXPECT_GE(now - started, timings.peerTimeout);
+	EXPECT_LE(now - started, timings.peerTimeout + 100ms);
+}
+
+
+TEST_F(ReliableLinkTest, Supervised_AnyPacketCountsAsASignOfLife)
+{
+	send(a, Lane::Reliable, 0, bytes({1}));
+	settle();
+	a.supervise(now);
+
+	// B keeps sending, A never has to ask
+	for (int i = 0; i < 40; ++i)
+	{
+		advance(timings.keepAlive / 2);
+		send(b, Lane::Media, 0, bytes({1}));
+		const auto fromA = take(a);
+		EXPECT_EQ(count(fromA, PacketKind::Ping), 0u);
+		deliverPass(a, take(b));
+	}
+
+	EXPECT_FALSE(failed(a));
+}
+
+
+TEST_F(ReliableLinkTest, Supervised_DoesNotAskARemoteItDoesNotKnowYet)
+{
+	a.supervise(now);
+	send(a, Lane::Control, 1, bytes({1}));
+	take(a); // lost
+
+	advance(timings.keepAlive);
+
+	EXPECT_EQ(count(take(a), PacketKind::Ping), 0u) << "Only the first Control packet may go out without the remote's stream ID";
+	EXPECT_EQ(a.stats().pingsSent, 0u);
+}
+
+
+// ---------------------------------------------------------------------------
 // Failure and restart
 // ---------------------------------------------------------------------------
 
 TEST_F(ReliableLinkTest, UnacknowledgedData_FailsTheLinkAfterThePeerTimeout)
 {
-	const uint32_t streamID = a.localStreamID();
-	const auto	   started	= now;
+	const auto started = now;
 
 	send(a, Lane::Reliable, 0, bytes({1}));
 
@@ -526,7 +633,10 @@ TEST_F(ReliableLinkTest, UnacknowledgedData_FailsTheLinkAfterThePeerTimeout)
 	EXPECT_LE(now - started, timings.peerTimeout + 200ms);
 	EXPECT_GT(a.stats().retransmissions, 0u) << "It kept trying until then";
 	EXPECT_FALSE(a.hasPendingReliable()) << "The failed stream is discarded";
-	EXPECT_NE(a.localStreamID(), streamID) << "A new stream needs a new stream ID";
+
+	send(a, Lane::Reliable, 0, bytes({2}));
+	EXPECT_TRUE(take(a).empty()) << "A failed link sends nothing anymore: its session is over";
+	EXPECT_FALSE(a.nextDeadline().has_value());
 }
 
 
@@ -559,90 +669,23 @@ TEST_F(ReliableLinkTest, SlowProgress_DoesNotFailTheLink)
 }
 
 
-TEST_F(ReliableLinkTest, AfterFailure_BothSidesResynchronise)
-{
-	// Establish both streams first
-	send(a, Lane::Reliable, 0, bytes({1}));
-	send(b, Lane::Reliable, 0, bytes({2}));
-	settle();
-	ASSERT_EQ(atB.size(), 1u);
-	ASSERT_EQ(atA.size(), 1u);
-
-	// A's next message never gets through: A fails
-	send(a, Lane::Reliable, 0, bytes({3}));
-	bool linkFailed = false;
-	for (int i = 0; i < 100 && !linkFailed; ++i)
-	{
-		take(a);
-		take(b);
-		advance(100ms);
-		linkFailed = failed(a);
-	}
-	ASSERT_TRUE(linkFailed);
-
-	// The network recovers
-	send(a, Lane::Reliable, 0, bytes({4}));
-	settle();
-
-	ASSERT_EQ(atB.size(), 2u);
-	EXPECT_EQ(atB[1].body, bytes({4}));
-
-	auto eventsB = b.takeEvents();
-	ASSERT_EQ(eventsB.size(), 1u);
-	EXPECT_EQ(eventsB[0], LinkEvent::PeerRestarted) << "The new stream ID tells B to reset as well";
-
-	send(b, Lane::Reliable, 0, bytes({5}));
-	settle();
-	ASSERT_EQ(atA.size(), 2u);
-	EXPECT_EQ(atA[1].body, bytes({5})) << "B's stream to A continues after the reset";
-}
-
-
-TEST_F(ReliableLinkTest, PeerRestart_ResetsTheLink)
+TEST_F(ReliableLinkTest, PacketOfAnotherRemoteStream_IsDropped)
 {
 	send(a, Lane::Reliable, 0, bytes({1}));
 	settle();
 	ASSERT_EQ(a.remoteStreamID(), b.localStreamID());
 
-	// B restarts: a brand-new link with a new stream ID starts at seq 1 again
+	// B was started again: a brand-new link with a new stream ID. That is another session, not this one.
 	ReliableLink		 restarted(timings, 0xBBBB0002);
 	FakeNet::QueueSource fromRestarted;
-
-	send(a, Lane::Reliable, 0, bytes({2})); // towards the old B
-	take(a);
 
 	fromRestarted.push(Lane::Control, 0, bytes({9}));
 	deliverPass(a, restarted.takeOutgoing(now, fromRestarted));
 
-	auto events = a.takeEvents();
-	ASSERT_EQ(events.size(), 1u);
-	EXPECT_EQ(events[0], LinkEvent::PeerRestarted);
-	EXPECT_EQ(a.remoteStreamID(), 0xBBBB0002u);
-	EXPECT_FALSE(a.hasPendingReliable()) << "Messages for the old stream are dropped";
-
-	ASSERT_EQ(atA.size(), 1u) << "seq 1 of the new stream is not mistaken for a duplicate";
-	EXPECT_EQ(atA[0].body, bytes({9}));
-}
-
-
-TEST_F(ReliableLinkTest, PeerRestart_AbandonsAPartlyReceivedMessage)
-{
-	send(a, Lane::Reliable, 0, pattern(10'000));
-
-	auto fragments = take(a);
-	ASSERT_GT(fragments.size(), 3u);
-	fragments.resize(3);
-	deliverPass(b, fragments);
-
-	// A restarts in the middle of its message and sends a short one on the new stream
-	ReliableLink		 restarted(timings, 0xAAAA0002);
-	FakeNet::QueueSource fromRestarted;
-
-	fromRestarted.push(Lane::Reliable, 0, bytes({9}));
-	deliverPass(b, restarted.takeOutgoing(now, fromRestarted));
-
-	ASSERT_EQ(atB.size(), 1u);
-	EXPECT_EQ(atB[0].body, bytes({9})) << "Nothing of the old stream's partial message may show up";
+	EXPECT_EQ(a.remoteStreamID(), b.localStreamID()) << "A link talks to one stream for as long as it lives";
+	EXPECT_TRUE(atA.empty());
+	EXPECT_EQ(a.stats().staleDropped, 1u);
+	EXPECT_TRUE(take(a).empty()) << "... and does not acknowledge what is not meant for it";
 }
 
 
