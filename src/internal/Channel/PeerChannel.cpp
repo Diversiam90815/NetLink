@@ -12,13 +12,13 @@
 #include <ranges>
 #include <thread>
 
-#include "NetLinkConstants.h"
+#include "TransportConstants.h"
 #include "NetLinkLog.h"
 #include "Socket/UdpSocket.h"
 
 using json = nlohmann::json;
+using netlink::channel::Lane;
 using netlink::channel::Mailbox;
-using netlink::channel::SendClass;
 using netlink::channel::SendScheduler;
 
 
@@ -28,22 +28,30 @@ namespace
 // The longest the I/O thread waits without anything to do
 constexpr auto	MaxWait = std::chrono::hours{1};
 
-Mailbox::Limits limitsOf(const netlink::PeerChannelConfig &config)
+constexpr uint8_t bitOf(const Lane lane)
 {
-	const auto &reliability = config.reliability;
-
-	return {.controlCapacity	 = netlink::channel::ReliableLink::ControlQueueCapacity,
-			.applicationCapacity = reliability.sendQueueCapacity,
-			.applicationOverflow = reliability.sendQueueOverflow,
-			.unreliableCapacity	 = reliability.unreliableQueueCapacity,
-			.maxMessageSize		 = reliability.maxMessageSize,
-			.maxUnreliableBody	 = netlink::channel::ReliableLink(reliability).maxUnreliableBody()};
+	return static_cast<uint8_t>(1u << std::to_underlying(lane));
 }
 
-constexpr uint8_t bitOf(const SendClass sendClass)
+// Hands a link the messages that wait for its peer in the mailbox
+class MailboxSource final : public netlink::channel::MessageSource
 {
-	return static_cast<uint8_t>(1u << std::to_underlying(sendClass));
-}
+public:
+	MailboxSource(Mailbox &mailbox, const netlink::net::SocketAddress &peer) : mMailbox(mailbox), mPeer(peer) {}
+
+	std::optional<netlink::channel::OutboundMessage> next(const Lane lane) override
+	{
+		auto mail = mMailbox.take(mPeer, lane);
+		if (!mail)
+			return std::nullopt;
+
+		return netlink::channel::OutboundMessage{.tag = mail->tag, .body = std::move(mail->body)};
+	}
+
+private:
+	Mailbox							  &mMailbox;
+	const netlink::net::SocketAddress &mPeer;
+};
 
 template <typename TimePoint>
 std::optional<TimePoint> earlier(const std::optional<TimePoint> a, const std::optional<TimePoint> b)
@@ -59,15 +67,20 @@ std::optional<TimePoint> earlier(const std::optional<TimePoint> a, const std::op
 
 netlink::PeerChannel::PeerChannel(net::DatagramSocketFactory socketFactory, const PeerChannelConfig &config, TaskQueue *applicationQueue)
 	: mSocketFactory(socketFactory ? std::move(socketFactory) : net::UdpSocket::factory()), mPendingConfig(config), mApplicationQueue(applicationQueue),
-	  mMailbox([this] { wakeIoThread(); }), mConfig(config), mHeartbeat(config.heartbeat), mScheduler(config.maxSendRate), mReceiveBuffer(internal::PackageBufferSize)
+	  mMailbox([this] { wakeIoThread(); }), mConfig(config), mHeartbeat(config.timings), mScheduler(config.maxSendRate), mReceiveBuffer(internal::PackageBufferSize)
 {
-	mMailbox.setLimits(limitsOf(config));
+	mMailbox.setQueueBytes(config.sendQueueBytes);
+	mDeliveryBacklog->onDrained = [this] { mMailbox.post(Mailbox::Command::ResumeReceiving); };
 }
 
 
 netlink::PeerChannel::~PeerChannel()
 {
 	deinit();
+
+	// Payload that is still waiting somewhere must not call into a channel that is gone
+	std::lock_guard<std::mutex> lock(mDeliveryBacklog->mutex);
+	mDeliveryBacklog->onDrained = nullptr;
 }
 
 
@@ -117,7 +130,7 @@ void netlink::PeerChannel::setConfig(const PeerChannelConfig &config)
 		mPendingConfig = config;
 	}
 
-	mMailbox.setLimits(limitsOf(config));
+	mMailbox.setQueueBytes(config.sendQueueBytes);
 	mMailbox.post(Mailbox::Command::Reconfigure);
 }
 
@@ -134,7 +147,7 @@ void netlink::PeerChannel::setLocalIPv4(const net::IPv4Address &localIPv4)
 	}
 
 	// Room for one burst of the send budget, where the operating system needs to be asked for it
-	const auto burst = static_cast<int>(SendScheduler::burstOf(sendRate > 0 ? sendRate : PeerChannelConfig{}.maxSendRate));
+	const auto burst = static_cast<int>(SendScheduler::burstOf(sendRate > 0 ? sendRate : channel::DefaultMaxSendRate));
 	auto	   socket =
 		mSocketFactory({.ip = localIPv4, .port = 0}, {.receiveBufferSize = internal::ChannelReceiveBufferSize, .sendBufferSize = burst * internal::ChannelSendBufferPerDatagram});
 
@@ -370,7 +383,7 @@ bool netlink::PeerChannel::sendSignal(const std::string &computerName, SignalTyp
 	}
 
 	const std::string encoded = json(packet).dump();
-	const bool		  queued  = push(peer, Mailbox::Lane::Control, 0, std::vector<uint8_t>(encoded.begin(), encoded.end()));
+	const bool		  queued  = push(peer, Lane::Control, 0, std::vector<uint8_t>(encoded.begin(), encoded.end()));
 
 	if (queued)
 		NETLINK_LOG_DEBUG("Signal queued for {} (type={})", computerName, static_cast<int>(type));
@@ -387,14 +400,12 @@ bool netlink::PeerChannel::sendMessage(const std::string &computerName, const ui
 		return false;
 
 	// The type travels as the tag of the message: the payload is copied once, into the buffer its fragments are sent from
-	if (mode == DeliveryMode::ReliableOrdered)
-		return push(peer, Mailbox::Lane::Application, type, std::vector<uint8_t>(data.begin(), data.end()), timeout);
-
-	return push(peer, Mailbox::Lane::Unreliable, type, std::vector<uint8_t>(data.begin(), data.end()));
+	const Lane lane = mode == DeliveryMode::ReliableOrdered ? Lane::Reliable : Lane::Media;
+	return push(peer, lane, type, std::vector<uint8_t>(data.begin(), data.end()), timeout);
 }
 
 
-bool netlink::PeerChannel::push(const PeerEndpoint &peer, const Mailbox::Lane lane, const uint32_t tag, std::vector<uint8_t> body, const std::chrono::milliseconds timeout)
+bool netlink::PeerChannel::push(const PeerEndpoint &peer, const Lane lane, const uint32_t tag, std::vector<uint8_t> body, const std::chrono::milliseconds timeout)
 {
 	if (!mInitialized.load())
 	{
@@ -408,7 +419,8 @@ bool netlink::PeerChannel::push(const PeerEndpoint &peer, const Mailbox::Lane la
 		return false;
 	}
 
-	return mMailbox.push(peer.address(), lane, {.tag = tag, .body = std::move(body)}, timeout) == Mailbox::Push::Queued;
+	Mailbox::Mail mail{.tag = tag, .body = std::make_shared<const std::vector<uint8_t>>(std::move(body))};
+	return mMailbox.push(peer.address(), lane, std::move(mail), timeout) == Mailbox::Push::Queued;
 }
 
 
@@ -541,7 +553,7 @@ std::optional<netlink::PeerChannel::TimePoint> netlink::PeerChannel::poll(const 
 
 	for (auto &[from, message] : batch.messages)
 	{
-		if (message.channel == channel::ChannelId::Control)
+		if (message.lane == Lane::Control)
 			routeControl(from, message.body);
 		else
 			routeApplication(from, message.tag, std::move(message.body));
@@ -573,12 +585,12 @@ netlink::PeerChannel::EventBatch netlink::PeerChannel::step(net::IDatagramSocket
 	{
 		if (auto *state = linkFor(address, true))
 		{
-			state->backlog	 = true;
 			state->unsettled = true;
 			mTouched.push_back(address);
 		}
 	}
 
+	updatePause();
 	receivePending(socket, now);
 	serviceTimers(batch, now);
 
@@ -596,11 +608,8 @@ netlink::PeerChannel::EventBatch netlink::PeerChannel::step(net::IDatagramSocket
 		if (!state)
 			continue;
 
-		if (state->backlog)
-			feed(address, *state);
-
 		collect(address, *state, batch);
-		sendAcks(address, *state, socket, now);
+		sendAcks(address, *state, socket);
 		schedule(address, *state, now);
 	}
 
@@ -615,7 +624,7 @@ netlink::PeerChannel::EventBatch netlink::PeerChannel::step(net::IDatagramSocket
 
 		state->deadline = state->link.nextDeadline();
 
-		if (state->unsettled && !state->backlog && !state->link.hasPendingReliable())
+		if (state->unsettled && !state->link.hasPendingReliable())
 			state->unsettled = !mMailbox.settle(address);
 	}
 
@@ -652,14 +661,17 @@ void netlink::PeerChannel::apply(const Mailbox::PostedCommand &command, const Ti
 
 	case Mailbox::Command::ResetLinks: forgetLinks(); break;
 
+	// What the mailbox dropped is not sent anymore: whoever waits for it is told
 	case Mailbox::Command::DropApplication:
 		if (auto *state = linkFor(peer, false))
 		{
-			state->link.dropQueuedApplicationMessages();
 			state->unsettled = true;
 			mTouched.push_back(peer);
 		}
 		break;
+
+	// Only wakes the loop: every step looks at what waits for the application
+	case Mailbox::Command::ResumeReceiving: break;
 
 	case Mailbox::Command::KeepAliveOn:
 		// Heartbeats need a link, also towards a peer nothing was exchanged with yet
@@ -677,7 +689,7 @@ void netlink::PeerChannel::apply(const Mailbox::PostedCommand &command, const Ti
 			mScheduler.setRate(mPendingConfig.maxSendRate);
 
 		mConfig = mPendingConfig;
-		mHeartbeat.setConfig(mConfig.heartbeat);
+		mHeartbeat.setTimings(mConfig.timings);
 		break;
 	}
 	}
@@ -760,13 +772,13 @@ void netlink::PeerChannel::serviceTimers(EventBatch &batch, const TimePoint now)
 	if (const auto due = mHeartbeat.nextDeadline(); !due || now < *due)
 		return;
 
-	auto [heartbeatsDue, silentPeers] = mHeartbeat.tick(now);
+	auto [pingsDue, silentPeers] = mHeartbeat.tick(now);
 
-	for (const auto &address : heartbeatsDue)
+	for (const auto &address : pingsDue)
 	{
 		if (auto *state = linkFor(address, false))
 		{
-			state->link.sendHeartbeat();
+			state->link.sendPing();
 			mTouched.push_back(address);
 		}
 	}
@@ -776,26 +788,22 @@ void netlink::PeerChannel::serviceTimers(EventBatch &batch, const TimePoint now)
 }
 
 
-void netlink::PeerChannel::feed(const net::SocketAddress &address, LinkState &state)
+void netlink::PeerChannel::updatePause()
 {
-	auto &link	  = state.link;
+	// Too much waits for the application: every sender is asked to hold back, and told when there is room again
+	const size_t waiting = mDeliveryBacklog->bytes.load();
 
-	state.backlog = mMailbox.feed(address,
-								  [&link](const Mailbox::Lane lane, Mailbox::Mail &mail)
-								  {
-									  if (lane == Mailbox::Lane::Unreliable)
-									  {
-										  link.sendUnreliable(channel::ChannelId::Application, mail.tag, mail.body);
-										  return true;
-									  }
+	if (mPaused ? waiting >= channel::BacklogResumeBytes : waiting <= channel::BacklogPauseBytes)
+		return;
 
-									  const auto channelId = lane == Mailbox::Lane::Control ? channel::ChannelId::Control : channel::ChannelId::Application;
-									  if (!link.hasRoomFor(channelId))
-										  return false;
+	mPaused = !mPaused;
+	mDeliveryBacklog->paused.store(mPaused);
 
-									  link.queueReliable(channelId, mail.tag, std::move(mail.body));
-									  return true;
-								  });
+	for (auto &[address, state] : mLinks)
+	{
+		state.link.setPaused(mPaused);
+		mTouched.push_back(address);
+	}
 }
 
 
@@ -816,15 +824,10 @@ void netlink::PeerChannel::collect(const net::SocketAddress &address, LinkState 
 }
 
 
-void netlink::PeerChannel::sendAcks(const net::SocketAddress &address, LinkState &state, net::IDatagramSocket &socket, const TimePoint now)
+void netlink::PeerChannel::sendAcks(const net::SocketAddress &address, LinkState &state, net::IDatagramSocket &socket)
 {
-	auto &link = state.link;
-
-	// The acknowledgements tell the remote whether the application keeps up with what it sends
-	link.setApplicationReceiving(mDeliveryBacklog->load() < mConfig.deliveryBacklogLimit);
-
 	// Not held back by the budget, but counted against it
-	while (const auto *ack = link.peekAck())
+	while (const auto *ack = state.link.peekAck())
 	{
 		if (mSocketBlocked || transmit(socket, address, *ack) == Transmit::Refused)
 		{
@@ -832,21 +835,22 @@ void netlink::PeerChannel::sendAcks(const net::SocketAddress &address, LinkState
 			return;
 		}
 
-		link.commitAck();
+		state.link.commitAck();
 		mScheduler.spend();
-		mHeartbeat.onSent(address, now);
 	}
 }
 
 
 void netlink::PeerChannel::schedule(const net::SocketAddress &address, LinkState &state, const TimePoint now)
 {
-	for (const SendClass sendClass : {SendClass::Control, SendClass::Unreliable, SendClass::Application})
+	MailboxSource source(mMailbox, address);
+
+	for (const Lane lane : SendScheduler::Order)
 	{
-		if ((state.scheduled & bitOf(sendClass)) == 0 && state.link.peek(sendClass, now))
+		if ((state.scheduled & bitOf(lane)) == 0 && state.link.peek(lane, now, source))
 		{
-			mScheduler.add(sendClass, address);
-			state.scheduled |= bitOf(sendClass);
+			mScheduler.add(lane, address);
+			state.scheduled |= bitOf(lane);
 		}
 	}
 }
@@ -855,15 +859,17 @@ void netlink::PeerChannel::schedule(const net::SocketAddress &address, LinkState
 void netlink::PeerChannel::sendData(net::IDatagramSocket &socket, const TimePoint now)
 {
 	mScheduler.run(
-		[&](const SendClass sendClass, const net::SocketAddress &address)
+		[&](const Lane lane, const net::SocketAddress &address)
 		{
+			MailboxSource source(mMailbox, address);
+
 			auto	   *state	 = linkFor(address, false);
-			const auto *datagram = state ? state->link.peek(sendClass, now) : nullptr;
+			const auto	 *datagram = state ? state->link.peek(lane, now, source) : nullptr;
 
 			if (!datagram)
 			{
 				if (state)
-					state->scheduled &= static_cast<uint8_t>(~bitOf(sendClass));
+					state->scheduled &= static_cast<uint8_t>(~bitOf(lane));
 
 				return SendScheduler::Result::Empty;
 			}
@@ -872,9 +878,8 @@ void netlink::PeerChannel::sendData(net::IDatagramSocket &socket, const TimePoin
 			if (outcome == Transmit::Refused)
 				return SendScheduler::Result::Blocked;
 
-			state->link.commit(sendClass, now);
+			state->link.commit(lane, now);
 			state->deadline = state->link.nextDeadline();
-			mHeartbeat.onSent(address, now);
 
 			return outcome == Transmit::Sent ? SendScheduler::Result::Sent : SendScheduler::Result::Lost;
 		});
@@ -953,7 +958,9 @@ netlink::PeerChannel::LinkState *netlink::PeerChannel::linkFor(const net::Socket
 		return nullptr;
 	}
 
-	return &mLinks.try_emplace(address, mConfig.reliability).first->second;
+	LinkState &state = mLinks.try_emplace(address, mConfig.timings, &mAssemblyBudget).first->second;
+	state.link.setPaused(mPaused);
+	return &state;
 }
 
 
@@ -971,7 +978,7 @@ void netlink::PeerChannel::deliver(EventBatch &batch)
 	{
 		size_t bytes = 0;
 		for (const auto &[from, message] : messages)
-			bytes += message.channel == channel::ChannelId::Application ? message.body.size() : 0;
+			bytes += message.lane == Lane::Reliable || message.lane == Lane::Bulk ? message.body.size() : 0;
 
 		return std::make_shared<BacklogShare>(mDeliveryBacklog, bytes);
 	};
@@ -981,7 +988,7 @@ void netlink::PeerChannel::deliver(EventBatch &batch)
 	// Application messages may have a thread of their own, so a slow application cannot hold up control signals
 	if (mApplicationQueue)
 	{
-		const auto moved = std::ranges::stable_partition(batch.messages, [](const InboundMessage &inbound) { return inbound.message.channel == channel::ChannelId::Control; });
+		const auto moved = std::ranges::stable_partition(batch.messages, [](const InboundMessage &inbound) { return inbound.message.lane == Lane::Control; });
 
 		application.assign(std::make_move_iterator(moved.begin()), std::make_move_iterator(moved.end()));
 		batch.messages.erase(moved.begin(), moved.end());
@@ -1005,7 +1012,7 @@ void netlink::PeerChannel::deliver(EventBatch &batch)
 		{
 			for (auto &[from, message] : messages)
 			{
-				if (message.channel == channel::ChannelId::Control)
+				if (message.lane == Lane::Control)
 					routeControl(from, message.body);
 				else
 					routeApplication(from, message.tag, std::move(message.body));

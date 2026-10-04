@@ -14,25 +14,34 @@
 #include <vector>
 
 #include "ByteOrder.h"
-#include "NetLinkConstants.h"
 #include "PacketFlags.h"
+#include "TransportConstants.h"
 
 
 namespace netlink::channel
 {
 
 inline constexpr uint16_t ProtocolMagic			= 0x4E4C;
-inline constexpr uint8_t  ProtocolVersion		= 2;
+inline constexpr uint8_t  ProtocolVersion		= 3;
 inline constexpr size_t	  BaseHeaderSize		= 20;
 inline constexpr size_t	  FragmentExtensionSize = 4;
 inline constexpr size_t	  TagExtensionSize		= 4;
-inline constexpr size_t	  MaxHeaderSize			= BaseHeaderSize + FragmentExtensionSize + TagExtensionSize;
+inline constexpr size_t	  LengthExtensionSize	= 4;
+inline constexpr size_t	  MaxHeaderSize			= BaseHeaderSize + FragmentExtensionSize + TagExtensionSize + LengthExtensionSize;
 
-// Every fragment of a message but the last one carries this many bytes: what a full datagram leaves behind the largest header
+// Every fragment of a message but the last one carries exactly this many bytes
 inline constexpr size_t	  MaxFragmentBody		= internal::MaxDatagramSize - MaxHeaderSize;
 
-// Fragments of the largest message (14,316). A packet claiming more is not part of any message a link sends.
-inline constexpr size_t	  MaxFragmentCount		= (internal::MaxMessagePayload + MaxFragmentBody - 1) / MaxFragmentBody;
+constexpr size_t		  fragmentsOf(const size_t length)
+{
+	return length == 0 ? 1 : (length + MaxFragmentBody - 1) / MaxFragmentBody;
+}
+
+// The largest message a lane carries
+constexpr size_t maxMessageSize(const Lane lane)
+{
+	return lane == Lane::Media ? internal::MaxMediaPayload : internal::MaxMessagePayload;
+}
 
 
 /*
@@ -46,17 +55,19 @@ inline constexpr size_t	  MaxFragmentCount		= (internal::MaxMessagePayload + Max
 	12  u64   seq               → offset 12 + 8 bytes = 20 (matches BaseHeaderSize)
 
 	[only if flags.isFragmented()]
-	    u16   fragIndex
-	    u16   fragCount
+		u16   fragIndex
+		u16   fragCount
 
 	[only on a Data packet that starts a message: unfragmented, or fragIndex 0]
-	    u32   tag               (opaque to the channel: the message type of the layer above)
+		u32   tag               (opaque to the channel: the message type of the layer above)
 
- seq per packet kind (reliable packets count per channel, each channel is a stream of its own):
-	Data		seq of this packet
-	DataAck		highest seq received without a gap; the body lists further seqs (see AckRanges.h)
-	AckAck		every DataAck up to this seq arrived; the body lists further seqs
-	Heartbeat	unused (0)
+	[only on fragment 0]
+		u32   totalLength       (of the whole message)
+
+ seq per packet kind (every lane counts for itself):
+	Data		seq of this packet. On the Media lane: of this datagram, the message is seq - fragIndex
+	Ack			highest seq received without a gap; the body lists what waits behind a gap (see AckRanges.h)
+	Ping		unused (0)
  */
 struct PacketHeader
 {
@@ -66,12 +77,18 @@ struct PacketHeader
 	uint64_t	seq{0};
 	uint16_t	fragIndex{0}; // only on the wire when flags.isFragmented()
 	uint16_t	fragCount{0};
-	uint32_t	tag{0}; // only on the wire when startsMessage()
+	uint32_t	tag{0};		  // only on the wire when startsMessage()
+	uint32_t	totalLength{0}; // only on the wire when startsFragmentedMessage()
 
 	// The packet carries the beginning of a message, and with it the message's tag
 	bool		startsMessage() const { return flags.kind() == PacketKind::Data && (!flags.isFragmented() || fragIndex == 0); }
+	bool		startsFragmentedMessage() const { return flags.isFragmented() && fragIndex == 0; }
 
-	size_t		encodedSize() const { return BaseHeaderSize + (flags.isFragmented() ? FragmentExtensionSize : 0) + (startsMessage() ? TagExtensionSize : 0); }
+	size_t		encodedSize() const
+	{
+		return BaseHeaderSize + (flags.isFragmented() ? FragmentExtensionSize : 0) + (startsMessage() ? TagExtensionSize : 0) +
+			   (startsFragmentedMessage() ? LengthExtensionSize : 0);
+	}
 };
 
 
@@ -107,6 +124,12 @@ inline size_t encodeHeader(const PacketHeader &header, uint8_t *out)
 		size += TagExtensionSize;
 	}
 
+	if (header.startsFragmentedMessage())
+	{
+		writeUint32(out + size, header.totalLength);
+		size += LengthExtensionSize;
+	}
+
 	return size;
 }
 
@@ -123,10 +146,11 @@ inline std::vector<uint8_t> encodePacket(const PacketHeader &header, std::span<c
 }
 
 
-// Returns nullopt for anything that is not a well-formed packet of this protocol version
-inline std::optional<DecodedPacket> decodePacket(const std::span<const uint8_t> datagram)
+// The header at the start of a datagram; the body is whatever follows it. Returns nullopt for a header no link of this
+// protocol version sends.
+inline std::optional<DecodedPacket> decodeHeader(const std::span<const uint8_t> datagram)
 {
-	if (datagram.size() < BaseHeaderSize || datagram.size() > internal::MaxDatagramSize)
+	if (datagram.size() < BaseHeaderSize)
 		return std::nullopt;
 
 	const uint8_t *in = datagram.data();
@@ -135,48 +159,97 @@ inline std::optional<DecodedPacket> decodePacket(const std::span<const uint8_t> 
 		return std::nullopt;
 
 	DecodedPacket packet;
-	packet.header.flags = PacketFlags::fromRaw(in[3]);
+	PacketHeader &header = packet.header;
+	header.flags		 = PacketFlags::fromRaw(in[3]);
 
-	if (!packet.header.flags.isValid())
+	if (!header.flags.isValid() || header.flags.kind() == PacketKind::Beacon)
 		return std::nullopt;
 
-	packet.header.srcStreamID = readUint32(in + 4);
-	packet.header.dstStreamID = readUint32(in + 8);
-	packet.header.seq		  = readUint64(in + 12);
+	header.srcStreamID = readUint32(in + 4);
+	header.dstStreamID = readUint32(in + 8);
+	header.seq		   = readUint64(in + 12);
 
-	// A sender always has a stream ID
-	if (packet.header.srcStreamID == 0)
+	// A sender always has a stream ID, and its Data seqs start at 1
+	if (header.srcStreamID == 0 || (header.flags.kind() == PacketKind::Data && header.seq == 0))
 		return std::nullopt;
 
 	size_t size = BaseHeaderSize;
 
-	if (packet.header.flags.isFragmented())
+	if (header.flags.isFragmented())
 	{
 		if (datagram.size() < size + FragmentExtensionSize)
 			return std::nullopt;
 
-		packet.header.fragIndex = readUint16(in + size);
-		packet.header.fragCount = readUint16(in + size + 2);
+		header.fragIndex = readUint16(in + size);
+		header.fragCount = readUint16(in + size + 2);
 		size += FragmentExtensionSize;
 
-		if (packet.header.fragCount == 0 || packet.header.fragCount > MaxFragmentCount || packet.header.fragIndex >= packet.header.fragCount)
+		// A message of one fragment is not fragmented, and no lane carries more than its largest message needs
+		if (header.fragCount < 2 || header.fragCount > fragmentsOf(maxMessageSize(header.flags.lane())) || header.fragIndex >= header.fragCount)
 			return std::nullopt;
 
-		// The last-fragment bit must agree with the index
-		if (packet.header.flags.isLastFragment() != (packet.header.fragIndex + 1 == packet.header.fragCount))
+		if (header.flags.isLastFragment() != (header.fragIndex + 1 == header.fragCount))
 			return std::nullopt;
 	}
 
-	if (packet.header.startsMessage())
+	if (header.startsMessage())
 	{
 		if (datagram.size() < size + TagExtensionSize)
 			return std::nullopt;
 
-		packet.header.tag = readUint32(in + size);
+		header.tag = readUint32(in + size);
 		size += TagExtensionSize;
 	}
 
+	if (header.startsFragmentedMessage())
+	{
+		if (datagram.size() < size + LengthExtensionSize)
+			return std::nullopt;
+
+		header.totalLength = readUint32(in + size);
+		size += LengthExtensionSize;
+
+		if (header.totalLength > maxMessageSize(header.flags.lane()) || fragmentsOf(header.totalLength) != header.fragCount)
+			return std::nullopt;
+	}
+
 	packet.body = datagram.subspan(size);
+	return packet;
+}
+
+
+// Whether a packet with that header carries a body of that size: nothing carries bytes it has no use for
+inline bool isBodySizeValid(const PacketHeader &header, const size_t size)
+{
+	switch (header.flags.kind())
+	{
+	case PacketKind::Data:
+		if (!header.flags.isFragmented())
+			return size <= MaxFragmentBody;
+
+		return header.flags.isLastFragment() ? size > 0 && size <= MaxFragmentBody : size == MaxFragmentBody;
+
+	case PacketKind::Ping: return size == 0;
+
+	case PacketKind::Ack:
+	case PacketKind::Beacon: break; // the Ack body is checked where it is read (AckRanges.h)
+	}
+
+	return true;
+}
+
+
+// Returns nullopt for anything that is not a well-formed packet of a link in this protocol version
+inline std::optional<DecodedPacket> decodePacket(const std::span<const uint8_t> datagram)
+{
+	if (datagram.size() > internal::MaxDatagramSize)
+		return std::nullopt;
+
+	auto packet = decodeHeader(datagram);
+
+	if (!packet || !isBodySizeValid(packet->header, packet->body.size()))
+		return std::nullopt;
+
 	return packet;
 }
 

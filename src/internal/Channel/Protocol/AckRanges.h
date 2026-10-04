@@ -1,8 +1,8 @@
 /*
   ==============================================================================
 	Module:         AckRanges
-	Description:    Body of DataAck and AckAck packets: the acknowledged seqs,
-					as ranges, so one datagram acknowledges many packets
+	Description:    Body of an Ack: what the receiver of a lane holds, besides
+					everything up to the seq in the header
   ==============================================================================
 */
 
@@ -18,12 +18,10 @@
 
 
 /*
- DataAck body:
-	0   u16   window    packets the receiver accepts in flight on this channel (0 = pause, its application is not keeping up)
-	2   ranges
-
- AckAck body:
-	0   ranges
+ Ack body:
+	0   u32   serial          counts the Acks a link sends: tells a late Ack from the latest one
+	4   u32   mediaReceived   Media datagrams this link received so far
+	8   ranges                seqs that wait behind a gap, ascending
 
  Range:
 	0   u64   first     first seq of the range
@@ -34,8 +32,8 @@
 namespace netlink::channel
 {
 
-inline constexpr size_t AckWindowFieldSize = 2;
-inline constexpr size_t SeqRangeSize	   = 10;
+inline constexpr size_t AckFieldsSize = 8;
+inline constexpr size_t SeqRangeSize  = 10;
 
 
 struct SeqRange
@@ -48,25 +46,46 @@ struct SeqRange
 };
 
 
-inline void appendRange(std::vector<uint8_t> &body, const SeqRange &range)
+struct AckBody
 {
-	const size_t offset = body.size();
-	body.resize(offset + SeqRangeSize);
-	writeUint64(body.data() + offset, range.first);
-	writeUint16(body.data() + offset + 8, range.count);
+	uint32_t			  serial{0};
+	uint32_t			  mediaReceived{0};
+	std::vector<SeqRange> ranges;
+};
+
+
+// At most maxRanges of them: the lowest seqs, which the sender needs first
+inline std::vector<uint8_t> encodeAck(const AckBody &ack, const size_t maxRanges)
+{
+	const size_t		 count = std::min(ack.ranges.size(), maxRanges);
+	std::vector<uint8_t> body(AckFieldsSize + count * SeqRangeSize);
+
+	writeUint32(body.data(), ack.serial);
+	writeUint32(body.data() + 4, ack.mediaReceived);
+
+	for (size_t i = 0; i < count; ++i)
+	{
+		uint8_t *out = body.data() + AckFieldsSize + i * SeqRangeSize;
+		writeUint64(out, ack.ranges[i].first);
+		writeUint16(out + 8, ack.ranges[i].count);
+	}
+
+	return body;
 }
 
 
-// Returns nullopt for a body that is not a whole number of well-formed ranges
-inline std::optional<std::vector<SeqRange>> decodeRanges(const std::span<const uint8_t> body)
+// Returns nullopt for a body that is not the two fields and a whole number of well-formed ranges
+inline std::optional<AckBody> decodeAck(const std::span<const uint8_t> body)
 {
-	if (body.size() % SeqRangeSize != 0)
+	if (body.size() < AckFieldsSize || (body.size() - AckFieldsSize) % SeqRangeSize != 0)
 		return std::nullopt;
 
-	std::vector<SeqRange> ranges;
-	ranges.reserve(body.size() / SeqRangeSize);
+	AckBody ack;
+	ack.serial		  = readUint32(body.data());
+	ack.mediaReceived = readUint32(body.data() + 4);
+	ack.ranges.reserve((body.size() - AckFieldsSize) / SeqRangeSize);
 
-	for (size_t offset = 0; offset < body.size(); offset += SeqRangeSize)
+	for (size_t offset = AckFieldsSize; offset < body.size(); offset += SeqRangeSize)
 	{
 		const SeqRange range{.first = readUint64(body.data() + offset), .count = readUint16(body.data() + offset + 8)};
 
@@ -74,10 +93,10 @@ inline std::optional<std::vector<SeqRange>> decodeRanges(const std::span<const u
 		if (range.count == 0 || range.first == 0 || range.last() < range.first)
 			return std::nullopt;
 
-		ranges.push_back(range);
+		ack.ranges.push_back(range);
 	}
 
-	return ranges;
+	return ack;
 }
 
 
@@ -89,7 +108,6 @@ inline std::vector<SeqRange> toRanges(std::vector<uint64_t> &seqs)
 	if (seqs.empty())
 		return ranges;
 
-	// Packets mostly arrive in order: nothing to do then
 	if (!std::ranges::is_sorted(seqs))
 		std::ranges::sort(seqs);
 

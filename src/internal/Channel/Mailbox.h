@@ -17,13 +17,16 @@
 #include <deque>
 #include <functional>
 #include <map>
+#include <memory>
 #include <mutex>
+#include <optional>
 #include <ranges>
 #include <utility>
 #include <vector>
 
-#include "NetLink/NetLink.h"
+#include "Protocol/PacketFlags.h"
 #include "Socket/SocketTypes.h"
+#include "TransportConstants.h"
 
 
 namespace netlink::channel
@@ -31,7 +34,8 @@ namespace netlink::channel
 
 /*
  Application threads only push: messages into the lanes of a peer, commands for everything else. The I/O thread
- drains the commands, feeds the messages into its links as they have room and reports back what was acknowledged.
+ drains the commands, takes the messages one by one as its links are able to send them and reports back what was
+ acknowledged.
 
  The doorbell is rung when work arrives and none was waiting. It must wake the I/O thread, also when that thread is
  not waiting yet.
@@ -39,13 +43,6 @@ namespace netlink::channel
 class Mailbox
 {
 public:
-	enum class Lane : uint8_t
-	{
-		Control,
-		Application,
-		Unreliable,
-	};
-
 	enum class Push
 	{
 		Queued,
@@ -62,6 +59,7 @@ public:
 		KeepAliveOn,
 		KeepAliveOff,
 		Reconfigure,
+		ResumeReceiving,
 	};
 
 	struct PostedCommand
@@ -72,18 +70,8 @@ public:
 
 	struct Mail
 	{
-		uint32_t			 tag{0};
-		std::vector<uint8_t> body;
-	};
-
-	struct Limits
-	{
-		size_t		   controlCapacity{0};
-		size_t		   applicationCapacity{0};
-		OverflowPolicy applicationOverflow{OverflowPolicy::DropNewest};
-		size_t		   unreliableCapacity{0};
-		size_t		   maxMessageSize{0};
-		size_t		   maxUnreliableBody{0};
+		uint32_t									tag{0};
+		std::shared_ptr<const std::vector<uint8_t>> body;
 	};
 
 	struct Work
@@ -100,10 +88,11 @@ public:
 
 	// --- Any thread ------------------------------------------------------------
 
-	void	 setLimits(const Limits &limits)
+	// Bytes of messages that may wait in one acknowledged lane of one peer
+	void	 setQueueBytes(const size_t bytes)
 	{
 		std::lock_guard<std::mutex> lock(mMutex);
-		mLimits = limits;
+		mQueueBytes = bytes;
 	}
 
 	void setRunning(const bool running)
@@ -160,6 +149,7 @@ public:
 		ringIf(ring);
 	}
 
+	// Everything but control signals that was not taken yet
 	void dropApplication(const net::SocketAddress &peer)
 	{
 		bool ring = false;
@@ -170,8 +160,9 @@ public:
 			if (it == mPeers.end())
 				return;
 
-			it->second.lane(Lane::Application).clear();
-			it->second.lane(Lane::Unreliable).clear();
+			for (const Lane lane : {Lane::Reliable, Lane::Bulk, Lane::Media})
+				it->second.lane(lane) = {};
+
 			ring = postLocked(Command::DropApplication, peer);
 		}
 
@@ -189,24 +180,26 @@ public:
 		ringIf(ring);
 	}
 
-	// With a timeout, a message for a full lane waits that long for room
+	// With a timeout, a message for a full lane waits that long for room. Media never waits: its oldest message makes room.
 	Push push(const net::SocketAddress &peer, const Lane lane, Mail mail, const std::chrono::milliseconds timeout = {})
 	{
+		const size_t size = mail.body->size();
+
+		if (size > (lane == Lane::Media ? internal::MaxMediaPayload : internal::MaxMessagePayload))
+			return Push::TooLarge;
+
 		bool ring = false;
 		{
 			std::unique_lock<std::mutex> lock(mMutex);
 
-			if (mail.body.size() > (lane == Lane::Unreliable ? mLimits.maxUnreliableBody : mLimits.maxMessageSize))
-				return Push::TooLarge;
-
-			auto it = mPeers.find(peer);
+			auto						 it = mPeers.find(peer);
 			if (it == mPeers.end())
 				return Push::Closed;
 
-			const size_t capacity	 = std::max<size_t>(capacityOf(lane), 1);
-			const bool	 dropsOldest = lane == Lane::Unreliable || (lane == Lane::Application && mLimits.applicationOverflow == OverflowPolicy::DropOldest);
+			// A message that is larger than the whole lane is still taken when nothing else waits
+			const auto hasRoom = [&] { return it->second.lane(lane).queue.empty() || it->second.lane(lane).bytes + size <= mQueueBytes; };
 
-			if (!dropsOldest && it->second.lane(lane).size() >= capacity)
+			if (lane != Lane::Media && !hasRoom())
 			{
 				if (timeout <= std::chrono::milliseconds::zero() || !mRunning)
 					return Push::Full;
@@ -217,23 +210,28 @@ public:
 								  [&]
 								  {
 									  it = mPeers.find(peer);
-									  return !mRunning || it == mPeers.end() || it->second.epoch != epoch || it->second.lane(lane).size() < capacity;
+									  return !mRunning || it == mPeers.end() || it->second.epoch != epoch || hasRoom();
 								  });
 
 				if (it == mPeers.end() || it->second.epoch != epoch)
 					return Push::Closed;
 
-				if (it->second.lane(lane).size() >= capacity)
+				if (!hasRoom())
 					return Push::Full;
 			}
 
-			auto &queue = it->second.lane(lane);
-			if (queue.size() >= capacity)
+			auto &[queue, bytes] = it->second.lane(lane);
+
+			if (lane == Lane::Media && queue.size() >= MediaQueueMessages)
+			{
+				bytes -= queue.front().body->size();
 				queue.pop_front();
+			}
 
 			queue.push_back(std::move(mail));
+			bytes += size;
 
-			if (lane != Lane::Unreliable)
+			if (lane != Lane::Media)
 				++it->second.accepted;
 
 			if (!std::exchange(it->second.listed, true))
@@ -246,7 +244,7 @@ public:
 		return Push::Queued;
 	}
 
-	// Waits until every reliable message accepted so far was acknowledged or dropped. True as well when the peer is not open (anymore).
+	// Waits until every acknowledged message accepted so far was acknowledged or dropped. True as well when the peer is not open (anymore).
 	bool flush(const net::SocketAddress &peer, const std::chrono::milliseconds timeout)
 	{
 		std::unique_lock<std::mutex> lock(mMutex);
@@ -291,50 +289,41 @@ public:
 		mSignalled = false;
 	}
 
-	// Hands the waiting messages of a peer to sink(lane, mail), oldest first, for as long as it returns true. Nothing
-	// is handed over while commands are waiting: they come first. Returns whether messages are still waiting.
-	template <typename Sink>
-	bool feed(const net::SocketAddress &peer, Sink &&sink)
+	// The oldest message that waits in the lane. Nothing is handed over while commands are waiting: they come first,
+	// and the peer is offered again with them.
+	std::optional<Mail> take(const net::SocketAddress &peer, const Lane lane)
 	{
-		bool madeRoom = false;
-		bool waiting  = false;
+		std::optional<Mail> mail;
 		{
 			std::lock_guard<std::mutex> lock(mMutex);
 
 			const auto					it = mPeers.find(peer);
 			if (it == mPeers.end())
-				return false;
+				return std::nullopt;
+
+			auto &[queue, bytes] = it->second.lane(lane);
+			if (queue.empty())
+				return std::nullopt;
 
 			if (!mCommands.empty())
 			{
-				if (it->second.hasMail() && !std::exchange(it->second.listed, true))
+				if (!std::exchange(it->second.listed, true))
 					mReady.push_back(peer);
 
-				return it->second.hasMail();
+				return std::nullopt;
 			}
 
-			for (const Lane lane : {Lane::Control, Lane::Application, Lane::Unreliable})
-			{
-				auto &queue = it->second.lane(lane);
-
-				while (!queue.empty() && sink(lane, queue.front()))
-				{
-					queue.pop_front();
-					madeRoom = true;
-				}
-			}
-
-			waiting = it->second.hasMail();
+			mail = std::move(queue.front());
+			queue.pop_front();
+			bytes -= mail->body->size();
 		}
 
-		if (madeRoom)
-			mChanged.notify_all();
-
-		return waiting;
+		mChanged.notify_all();
+		return mail;
 	}
 
-	// The link of the peer has nothing reliable left to send or to wait for. False if reliable messages arrived in the
-	// meantime: flush() keeps waiting.
+	// The link of the peer has nothing acknowledged left to send or to wait for. False if such messages arrived in
+	// the meantime: flush() keeps waiting.
 	bool settle(const net::SocketAddress &peer)
 	{
 		{
@@ -344,8 +333,11 @@ public:
 			if (it == mPeers.end())
 				return true;
 
-			if (!it->second.lane(Lane::Control).empty() || !it->second.lane(Lane::Application).empty())
-				return false;
+			for (const Lane lane : {Lane::Control, Lane::Reliable, Lane::Bulk})
+			{
+				if (!it->second.lane(lane).queue.empty())
+					return false;
+			}
 
 			if (it->second.done == it->second.accepted)
 				return true;
@@ -358,31 +350,22 @@ public:
 	}
 
 private:
-	struct Peer
+	struct LaneQueue
 	{
-		std::array<std::deque<Mail>, 3> lanes;
-		uint64_t						accepted{0};   // reliable messages taken so far
-		uint64_t						done{0};	   // ... of these: acknowledged or dropped
-		uint64_t						epoch{0};	   // changes when the peer is reset: whoever waits gives up
-		bool							listed{false}; // in mReady
-
-		std::deque<Mail>			   &lane(const Lane lane) { return lanes[std::to_underlying(lane)]; }
-		bool							hasMail() const
-		{
-			return std::ranges::any_of(lanes, [](const auto &queue) { return !queue.empty(); });
-		}
+		std::deque<Mail> queue;
+		size_t			 bytes{0};
 	};
 
-	size_t capacityOf(const Lane lane) const
+	struct Peer
 	{
-		switch (lane)
-		{
-		case Lane::Control: return mLimits.controlCapacity;
-		case Lane::Application: return mLimits.applicationCapacity;
-		case Lane::Unreliable: return mLimits.unreliableCapacity;
-		}
-		return 0;
-	}
+		std::array<LaneQueue, LaneCount> lanes;
+		uint64_t						 accepted{0};	// acknowledged-lane messages taken so far
+		uint64_t						 done{0};		// ... of these: acknowledged or dropped
+		uint64_t						 epoch{0};		// changes when the peer is reset: whoever waits gives up
+		bool							 listed{false}; // in mReady
+
+		LaneQueue						&lane(const Lane lane) { return lanes[std::to_underlying(lane)]; }
+	};
 
 	bool postLocked(const Command command, const net::SocketAddress &peer)
 	{
@@ -400,7 +383,7 @@ private:
 
 	std::mutex						   mMutex;
 	std::condition_variable			   mChanged;
-	Limits							   mLimits;
+	size_t							   mQueueBytes{DefaultSendQueueBytes};
 	std::map<net::SocketAddress, Peer> mPeers;
 	std::vector<PostedCommand>		   mCommands;
 	std::vector<net::SocketAddress>	   mReady;

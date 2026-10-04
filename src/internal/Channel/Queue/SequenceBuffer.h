@@ -1,33 +1,33 @@
 /*
   ==============================================================================
 	Module:         SequenceBuffer
-	Description:    Fixed-size store for entries keyed by a 64-bit sequence
-					number, indexed directly by seq % Capacity
+	Description:    Ring buffer keyed by a 64-bit sequence number
   ==============================================================================
 */
 
 #pragma once
 
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <utility>
+#include <vector>
 
 
 namespace netlink::channel
 {
 
-template <typename T, size_t Capacity>
+template <typename T>
 class SequenceBuffer
 {
-	static_assert(Capacity > 0 && (Capacity & (Capacity - 1)) == 0, "Capacity must be a power of two");
-
 public:
-	static constexpr size_t capacity() { return Capacity; }
+	// The capacity must be a power of two. Seqs that are a capacity apart share a slot: the newer one replaces the older.
+	explicit SequenceBuffer(const size_t capacity) : mSlots(capacity) {}
+
+	size_t capacity() const { return mSlots.size(); }
 
 	// Stores the entry, replacing whatever occupied its slot (same seq or an older one)
-	T					   &insert(uint64_t seq, T value)
+	T	  &insert(uint64_t seq, T value)
 	{
 		Slot &slot = mSlots[index(seq)];
 
@@ -109,17 +109,17 @@ private:
 		T		 value{};
 	};
 
-	static constexpr size_t index(const uint64_t seq) { return static_cast<size_t>(seq & (Capacity - 1)); }
+	size_t index(const uint64_t seq) const { return static_cast<size_t>(seq & (mSlots.size() - 1)); }
 
-	void					release(Slot &slot)
+	void   release(Slot &slot)
 	{
 		slot.occupied = false;
 		slot.value	  = T{};
 		--mSize;
 	}
 
-	std::array<Slot, Capacity> mSlots{};
-	size_t					   mSize{0};
+	std::vector<Slot> mSlots;
+	size_t			  mSize{0};
 };
 
 } // namespace netlink::channel

@@ -2,7 +2,7 @@
   ==============================================================================
 	Module:         SendScheduler
 	Description:    Hands out the send budget of one socket: a token bucket
-					counted in datagrams, shared by class and, within a class,
+					counted in datagrams, shared by lane and, within a lane,
 					by the peers in turn
   ==============================================================================
 */
@@ -17,7 +17,7 @@
 #include <utility>
 #include <vector>
 
-#include "Reliability/SendClass.h"
+#include "Protocol/PacketFlags.h"
 #include "Socket/SocketTypes.h"
 
 
@@ -31,18 +31,21 @@ public:
 	using TimePoint					= Clock::time_point;
 	using Peer						= net::SocketAddress;
 
-	// Datagrams a peer sends before the next one of its class gets its turn
+	// Datagrams a peer sends before the next one of its lane gets its turn
 	static constexpr size_t Quantum = 4;
 
 	// How long the owner waits before it runs the scheduler again while datagrams are waiting for tokens
 	static constexpr auto	Tick	= std::chrono::milliseconds{1};
+
+	// The most urgent lane first
+	static constexpr Lane	Order[] = {Lane::Control, Lane::Media, Lane::Reliable, Lane::Bulk};
 
 	// What send() did with its turn
 	enum class Result
 	{
 		Sent,
 		Lost,	 // counts as sent, but the peer's turn ends: the destination cannot be reached right now
-		Empty,	 // the peer has nothing in this class: it leaves the ring
+		Empty,	 // the peer has nothing in this lane: it leaves the ring
 		Blocked, // the socket takes nothing anymore: the run ends
 	};
 
@@ -80,8 +83,8 @@ public:
 			mTokens -= static_cast<double>(datagrams);
 	}
 
-	// The peer has something to send in that class. Must not be added twice: it leaves with Result::Empty or remove().
-	void add(const SendClass sendClass, const Peer &peer) { ring(sendClass).peers.push_back(peer); }
+	// The peer has something to send in that lane. Must not be added twice: it leaves with Result::Empty or remove().
+	void add(const Lane lane, const Peer &peer) { ring(lane).peers.push_back(peer); }
 
 	void remove(const Peer &peer)
 	{
@@ -110,29 +113,30 @@ public:
 		return std::ranges::any_of(mRings, [](const Ring &ring) { return !ring.peers.empty(); });
 	}
 
-	// Asks send(sendClass, peer) for one datagram at a time: the most urgent class first, the peers of a class in turn,
-	// for as long as tokens are left.
+	// Asks send(lane, peer) for one datagram at a time: the most urgent lane first, the peers of a lane in turn, for as
+	// long as tokens are left.
 	template <typename Send>
 	void run(Send &&send)
 	{
-		// Unreliable data must not use up the budget retransmissions need
-		double unreliableAllowance = ring(SendClass::Application).peers.empty() ? mTokens : mTokens * 3.0 / 4.0;
+		// Media must not use up the budget retransmissions need
+		const bool acknowledgedWaits = !ring(Lane::Reliable).peers.empty() || !ring(Lane::Bulk).peers.empty();
+		double	   mediaAllowance	 = acknowledgedWaits ? mTokens * 3.0 / 4.0 : mTokens;
 
-		for (const SendClass sendClass : {SendClass::Control, SendClass::Unreliable, SendClass::Application})
+		for (const Lane lane : Order)
 		{
-			Ring	  &ring	  = this->ring(sendClass);
-			const bool capped = sendClass == SendClass::Unreliable && !isUnlimited();
+			Ring	  &ring	  = this->ring(lane);
+			const bool capped = lane == Lane::Media && !isUnlimited();
 
-			while (!ring.peers.empty() && hasTokens() && (!capped || unreliableAllowance >= 1.0))
+			while (!ring.peers.empty() && hasTokens() && (!capped || mediaAllowance >= 1.0))
 			{
 				if (ring.cursor >= ring.peers.size())
 					ring.cursor = 0;
 
-				switch (send(sendClass, Peer{ring.peers[ring.cursor]}))
+				switch (send(lane, Peer{ring.peers[ring.cursor]}))
 				{
 				case Result::Sent:
 					spend();
-					unreliableAllowance -= capped ? 1.0 : 0.0;
+					mediaAllowance -= capped ? 1.0 : 0.0;
 
 					if (++ring.used >= Quantum)
 						ring.next();
@@ -140,7 +144,7 @@ public:
 
 				case Result::Lost:
 					spend();
-					unreliableAllowance -= capped ? 1.0 : 0.0;
+					mediaAllowance -= capped ? 1.0 : 0.0;
 					ring.next();
 					break;
 
@@ -169,13 +173,13 @@ private:
 		}
 	};
 
-	Ring							&ring(const SendClass sendClass) { return mRings[std::to_underlying(sendClass)]; }
+	Ring					   &ring(const Lane lane) { return mRings[std::to_underlying(lane)]; }
 
-	uint32_t						 mRate{0};
-	size_t							 mBurst{0};
-	double							 mTokens{0};
-	std::optional<TimePoint>		 mRefilledAt;
-	std::array<Ring, SendClassCount> mRings;
+	uint32_t					mRate{0};
+	size_t						mBurst{0};
+	double						mTokens{0};
+	std::optional<TimePoint>	mRefilledAt;
+	std::array<Ring, LaneCount> mRings;
 };
 
 } // namespace netlink::channel

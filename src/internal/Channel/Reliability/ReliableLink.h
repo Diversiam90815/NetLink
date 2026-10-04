@@ -1,8 +1,8 @@
 /*
   ==============================================================================
 	Module:         ReliableLink
-	Description:    Reliable, ordered message streams to one remote peer on top
-					of datagrams (Data -> DataAck -> AckAck per seq)
+	Description:    Message streams to one remote peer on top of datagrams:
+					three acknowledged, ordered lanes and one that is neither
   ==============================================================================
 */
 
@@ -18,35 +18,30 @@
 #include <utility>
 #include <vector>
 
+#include "Channel/Fragmentation/MediaAssembler.h"
 #include "Channel/Fragmentation/MessageAssembler.h"
 #include "Channel/Protocol/AckRanges.h"
 #include "Channel/Protocol/PacketHeader.h"
-#include "Channel/Queue/BoundedQueue.h"
 #include "Channel/Queue/SequenceBuffer.h"
-#include "ReliabilityConfig.h"
 #include "RttEstimator.h"
-#include "SendClass.h"
+#include "TransportConstants.h"
 
 
 /*
- Reliable flow:
-	Every reliable packet is identified by its 64-bit seq (unique within the sender's current stream and channel) and
-	completes a three-way exchange:
-
-		Data(seq) -> DataAck(seq) -> AckAck(seq)
-
-	The sender retransmits Data until the DataAck arrives, the receiver retransmits the DataAck until the AckAck arrives.
-	One DataAck or AckAck datagram carries the seqs of everything that arrived since the last one, so the exchange costs
-	two small datagrams per batch of Data packets instead of two per packet.
-
- Channels:
-	Control and Application are streams of their own (seqs, send window, reorder buffer). Application data can neither
-	delay a control signal nor hold it back in the receiver's reorder buffer.
+ Lanes:
+	Control, Reliable and Bulk are streams of their own (seqs, send window, reorder buffer): what is lost on one of them
+	holds nothing back on the others. Every Data packet has a 64-bit seq; the receiver answers with an Ack that names
+	the highest seq it has without a gap, and what it holds behind one. Media messages are sent once and never
+	acknowledged.
 
  Loss and congestion:
-	A packet is retransmitted as soon as packets sent after it are acknowledged (fast retransmit), otherwise after its
-	retransmission timeout. How many application packets may be unacknowledged at once is adapted to the path
-	(congestion window). Control signals do not wait for that window.
+	A packet is sent again as soon as packets sent after it are acknowledged (fast retransmit), otherwise after its
+	retransmission timeout. How many Reliable and Bulk packets may be unacknowledged at once is adapted to the path
+	(congestion window). Control packets do not wait for that window.
+
+ Pausing:
+	A receiver whose application does not keep up, or that has no room for another large message, sets the pause bit
+	in the Acks of a lane. The sender then holds that lane back and asks again with a Ping from time to time.
  */
 
 
@@ -56,10 +51,9 @@ namespace netlink::channel
 using MessageBody = std::shared_ptr<const std::vector<uint8_t>>;
 
 
-// A whole message waiting to be sent reliably
+// A whole message to be sent
 struct OutboundMessage
 {
-	ChannelId	channel{ChannelId::Control};
 	uint32_t	tag{0};
 	MessageBody body;
 };
@@ -67,7 +61,7 @@ struct OutboundMessage
 // A message as it was sent
 struct DeliveredMessage
 {
-	ChannelId			 channel{ChannelId::Control};
+	Lane				 lane{Lane::Control};
 	uint32_t			 tag{0};
 	std::vector<uint8_t> body;
 };
@@ -77,7 +71,7 @@ struct OutgoingDatagram
 {
 	std::array<uint8_t, MaxHeaderSize> head{};
 	uint8_t							   headSize{0};
-	MessageBody						   message; // reliable data: keeps the message alive until the datagram was sent
+	MessageBody						   message; // data: keeps the message alive until the datagram was sent
 	uint32_t						   offset{0};
 	uint32_t						   length{0};
 	std::vector<uint8_t>			   owned;	// everything else: the body itself
@@ -89,6 +83,14 @@ struct OutgoingDatagram
 	std::vector<uint8_t>			   bytes() const;
 };
 
+// Where a link takes the messages of a lane from, one at a time, when it is able to send the next one
+class MessageSource
+{
+public:
+	virtual ~MessageSource()							   = default;
+	virtual std::optional<OutboundMessage> next(Lane lane) = 0;
+};
+
 enum class LinkEvent
 {
 	Failed,		   // Data stayed unacknowledged for too long: the link restarted its stream
@@ -97,15 +99,19 @@ enum class LinkEvent
 
 struct LinkStats
 {
-	uint64_t dataSent{0};			 // Data packets, first transmissions
-	uint64_t retransmissions{0};	 // Data packets sent again, for whatever reason
+	uint64_t dataSent{0};			 // Data packets of the acknowledged lanes, first transmissions
+	uint64_t retransmissions{0};	 // ... sent again, for whatever reason
 	uint64_t fastRetransmissions{0}; // ... of these: detected by later acknowledgements instead of the timeout
-	uint64_t dataAcksSent{0};		 // DataAck datagrams
-	uint64_t ackAcksSent{0};		 // AckAck datagrams
+	uint64_t acksSent{0};
+	uint64_t pingsSent{0};
 	uint64_t duplicatesReceived{0};
 	uint64_t staleDropped{0};
 	uint64_t outOfWindowDropped{0};
-	uint64_t delivered{0}; // whole messages
+	uint64_t delivered{0};			 // whole messages
+	uint64_t mediaSent{0};			 // Media datagrams
+	uint64_t mediaReceived{0};		 // ... that arrived here
+	uint64_t mediaReceivedByPeer{0}; // ... that arrived at the remote, as its latest Ack said
+	uint64_t timerWork{0};			 // packets the timers looked at
 };
 
 // Random, non-zero stream ID. Identifies one lifetime of a link's stream, so a peer can tell a fresh stream (seq restarts at 1) from a stale one.
@@ -115,104 +121,83 @@ uint32_t makeStreamID(uint32_t different = 0);
 class ReliableLink
 {
 public:
-	using Clock									 = std::chrono::steady_clock;
-	using TimePoint								 = Clock::time_point;
+	using Clock							 = std::chrono::steady_clock;
+	using TimePoint						 = Clock::time_point;
 
-	// Control messages are never subject to the application's queue policy
-	static constexpr size_t ControlQueueCapacity = 512;
+	// Ranges that fit into one Ack
+	static constexpr size_t MaxAckRanges = (internal::MaxDatagramSize - BaseHeaderSize - AckFieldsSize) / SeqRangeSize;
 
-	explicit ReliableLink(const ReliabilityConfig &config = {}, uint32_t localStreamID = makeStreamID());
+	// budget: shared by every link that puts large messages together. None: every message is taken.
+	explicit ReliableLink(const LinkTimings &timings = {}, uint32_t localStreamID = makeStreamID(), AssemblyBudget *budget = nullptr);
 
 	// --- Sending --------------------------------------------------------------
 
-	// Queues a whole message; it is fragmented and sent as the windows allow. Rejected when too large or the queue is full.
-	PushResult					  queueReliable(ChannelId channel, uint32_t tag, std::vector<uint8_t> body);
+	// Asks the remote for a sign of life: it answers with an Ack
+	void						  sendPing();
 
-	// Sent with the next send pass, without acknowledgement. False when the body does not fit into one datagram.
-	bool						  sendUnreliable(ChannelId channel, uint32_t tag, std::span<const uint8_t> body);
+	// The next Ack or Ping, null if there is none. These are never held back.
+	const OutgoingDatagram		 *peekAck();
+	void						  commitAck();
 
-	void						  sendHeartbeat();
+	// The next datagram of that lane, null if the lane has nothing it may send right now. A message is taken from the
+	// source when the previous one is on its way. The datagram only counts as sent with commit(), which has to follow
+	// its peek() directly.
+	const OutgoingDatagram		 *peek(Lane lane, TimePoint now, MessageSource &source);
+	void						  commit(Lane lane, TimePoint now);
+
+	// Everything above in one pass, for tests and benchmarks: Acks and Pings first, then the lanes in order of urgency
+	std::vector<OutgoingDatagram> takeOutgoing(TimePoint now, MessageSource &source);
 
 	// --- Receiving -------------------------------------------------------------
 
 	void						  onPacket(const DecodedPacket &packet, TimePoint now);
 
-	// Whether the application takes its messages as fast as they arrive. While it does not, the remote is told to pause
-	// the application channel instead of piling up more.
-	void						  setApplicationReceiving(const bool receiving) { mApplicationReceiving = receiving; }
+	// The application does not keep up with what arrives: the remote is asked to hold Reliable and Bulk back
+	void						  setPaused(bool paused);
 
 	// --- Timers ----------------------------------------------------------------
 
-	// Declares overdue Data packets lost, lists unconfirmed DataAcks again and detects a failed link
+	// Declares overdue packets lost, asks paused lanes again and detects a failed link
 	void						  onTimer(TimePoint now);
-	std::optional<TimePoint>	  nextDeadline() const { return mNextDeadline; }
+
+	// When onTimer() has something to do next
+	std::optional<TimePoint>	  nextDeadline() const;
 
 	// --- Output ----------------------------------------------------------------
 
-	// The next acknowledgement or heartbeat, null if there is none
-	const OutgoingDatagram		 *peekAck();
-	void						  commitAck();
-
-	// The next datagram of that class, null if the class has nothing it may send right now. Peeking changes nothing:
-	// the datagram only counts as sent with commit(), which has to follow its peek() directly.
-	const OutgoingDatagram		 *peek(SendClass sendClass, TimePoint now);
-	void						  commit(SendClass sendClass, TimePoint now);
-
-	// Everything above in one pass, for tests and benchmarks: acknowledgements and the heartbeat first, then unreliable
-	// data, then as much reliable data as the windows allow
-	std::vector<OutgoingDatagram> takeOutgoing(TimePoint now);
 	std::vector<DeliveredMessage> takeDelivered() { return std::exchange(mDelivered, {}); }
 	std::vector<LinkEvent>		  takeEvents() { return std::exchange(mEvents, {}); }
 
 	// --- State -----------------------------------------------------------------
 
-	// A reliable message of that channel would be queued right now (always the case under OverflowPolicy::DropOldest)
-	bool						  hasRoomFor(ChannelId channel) const;
-
-	// Something reliable is still unacknowledged or waiting to be sent
+	// A message of an acknowledged lane is on its way and not completely acknowledged yet
 	bool						  hasPendingReliable() const;
-
-	// The next send pass would produce datagrams
-	bool						  hasOutgoing() const;
 
 	// Data packets that were sent and are not acknowledged yet (those waiting for their retransmission included)
 	size_t						  inFlightCount() const;
-	size_t						  queuedMessageCount() const;
 	size_t						  congestionWindow() const { return static_cast<size_t>(mCongestionWindow); }
-
-	// Forgets application messages that were not put on the wire yet (session closed)
-	void						  dropQueuedApplicationMessages();
 
 	uint32_t					  localStreamID() const { return mLocalStreamID; }
 	std::optional<uint32_t>		  remoteStreamID() const { return mRemoteStreamID; }
 	const RttEstimator			 &rtt() const { return mRtt; }
 	const LinkStats				 &stats() const { return mStats; }
 
-	// Largest body of one fragment, and of one unreliable message
-	size_t						  maxFragmentBody() const;
-	size_t						  maxUnreliableBody() const;
-
 private:
-	static constexpr size_t	   ChannelCount				  = 2;
-	static constexpr ChannelId ChannelOrder[ChannelCount] = {ChannelId::Control, ChannelId::Application}; // control always goes first
+	static constexpr size_t StreamCount = 3; // Control, Reliable, Bulk
 
 	struct InFlight
 	{
-		PacketHeader header;		  // stream IDs are stamped with every transmission
-		MessageBody	 message;		  // the fragment is message[offset, offset + length)
-		uint32_t	 offset{0};
-		uint32_t	 length{0};
-		TimePoint	 sentAt{};		  // latest transmission
-		TimePoint	 deadline{};	  // ... and when it counts as lost without an acknowledgement
-		uint64_t	 transmission{0}; // position of the latest transmission among everything this link sent
-		int			 transmissions{0};
-		bool		 lost{false};	  // waiting for its retransmission: not on the wire, no timer running
-	};
-
-	struct AckRecord
-	{
-		TimePoint deadline{};
-		int		  retransmits{0};
+		MessageBody message; // the fragment is message[offset, offset + length)
+		uint32_t	offset{0};
+		uint32_t	length{0};
+		uint32_t	tag{0};
+		uint32_t	totalLength{0};
+		uint16_t	fragIndex{0};
+		uint16_t	fragCount{1};
+		uint16_t	transmissions{0};
+		bool		lost{false};	 // waiting for its retransmission: not on the wire, no timer running
+		TimePoint	sentAt{};		 // latest transmission
+		uint64_t	transmission{0}; // ... and its position among everything this link sent
 	};
 
 	struct BufferedData
@@ -225,127 +210,121 @@ private:
 	struct FragmentCursor
 	{
 		OutboundMessage message;
-		size_t			count{0};
+		size_t			count{1};
 		size_t			next{0};
 	};
 
-	// Everything one channel needs for its reliable stream, in both directions
+	// One transmission, in the order they went out
+	struct SentRecord
+	{
+		uint64_t transmission{0};
+		uint64_t seq{0};
+		Lane	 lane{Lane::Control};
+	};
+
+	// Everything one acknowledged lane needs, in both directions
 	struct Stream
 	{
-		Stream(const size_t queueCapacity, const OverflowPolicy overflow, const size_t maxMessageSize, const size_t fragmentBody)
-			: queue(queueCapacity, overflow), assembler(maxMessageSize, fragmentBody)
-		{
-		}
+		Stream(const size_t window, AssemblyBudget *budget) : inFlight(window), reorder(window), assembler(budget) {}
 
 		// Send side
-		BoundedQueue<OutboundMessage>			 queue;
-		std::optional<FragmentCursor>			 cursor;
-		SequenceBuffer<InFlight, WindowSize>	 inFlight;
-		std::deque<uint64_t>					 lost;			  // seqs waiting for their retransmission, the most urgent first
-		uint64_t								 nextSendSeq{1};
-		uint64_t								 sendBase{1};	  // lowest unacknowledged seq
-		uint64_t								 highestAcked{0}; // highest seq the remote acknowledged
-		size_t									 onTheWire{0};	  // sent and neither acknowledged nor considered lost
-		size_t									 peerWindow{WindowSize};
-		std::optional<TimePoint>				 probeAt;		  // peer window closed: when the next packet may ask again
-		std::vector<SeqRange>					 ackAcks;		  // DataAcks to confirm with the next send pass
-		bool									 ackAckDue{false};
+		std::optional<FragmentCursor> cursor;
+		SequenceBuffer<InFlight>	  inFlight;
+		std::deque<uint64_t>		  lost;				 // seqs waiting for their retransmission, the most urgent first
+		uint64_t					  nextSendSeq{1};
+		uint64_t					  sendBase{1};		 // lowest unacknowledged seq
+		size_t						  onTheWire{0};		 // sent and neither acknowledged nor considered lost
+		bool						  peerPaused{false}; // the remote asked for a pause
+		std::optional<uint32_t>		  ackSerial;		 // of the Ack that pause state was taken from
+		std::optional<TimePoint>	  probeAt;			 // paused: when the remote is asked again
+		std::chrono::milliseconds	  probeInterval{0};
 
 		// Receive side
-		SequenceBuffer<BufferedData, WindowSize> reorder;
-		SequenceBuffer<AckRecord, WindowSize>	 ackRecords; // DataAcks the remote did not confirm yet
-		uint64_t								 nextExpected{1};
-		uint64_t								 ackAckedThrough{0};
-		std::vector<uint64_t>					 dataAcks;	 // seqs to acknowledge with the next send pass
-		MessageAssembler						 assembler;
+		SequenceBuffer<BufferedData>  reorder;
+		uint64_t					  nextExpected{1};
+		bool						  budgetPaused{false}; // a message was refused for lack of room
+		uint32_t					  refusedLength{0};
+		MessageAssembler			  assembler;
 	};
 
-	static size_t									  indexOf(const ChannelId channel) { return channel == ChannelId::Control ? 0 : 1; }
+	static constexpr size_t	 windowOf(const Lane lane) { return lane == Lane::Control ? ControlWindow : lane == Lane::Reliable ? ReliableWindow : BulkWindow; }
+	static constexpr uint8_t bitOf(const Lane lane) { return static_cast<uint8_t>(1u << std::to_underlying(lane)); }
 
-	// Streams are created with their first use: most links only ever carry control signals
-	Stream											 &streamFor(ChannelId channel);
-	Stream											 *existingStream(const ChannelId channel) { return mStreams[indexOf(channel)].get(); }
-	const Stream									 *existingStream(const ChannelId channel) const { return mStreams[indexOf(channel)].get(); }
+	// Streams are created with their first use: most links never use every lane
+	Stream					&streamFor(Lane lane);
+	Stream					*existingStream(const Lane lane) { return mStreams[std::to_underlying(lane)].get(); }
+	const Stream			*existingStream(const Lane lane) const { return mStreams[std::to_underlying(lane)].get(); }
 
-	void											  handleReliableData(ChannelId channel, const PacketHeader &header, std::span<const uint8_t> body, TimePoint now);
-	void											  handleUnreliableData(const PacketHeader &header, std::span<const uint8_t> body);
-	void											  handleDataAck(Stream &stream, ChannelId channel, const PacketHeader &header, std::span<const uint8_t> body, TimePoint now);
-	static void										  handleAckAck(Stream &stream, const PacketHeader &header, std::span<const uint8_t> body);
-
-	// Hands a packet that is next in its stream to the assembler
-	void											  acceptInOrder(Stream &stream, ChannelId channel, const PacketHeader &header, std::span<const uint8_t> body);
-
-	// What a stream would put on the wire next
-	struct Transmission
-	{
-		InFlight *lost{nullptr}; // a retransmission; otherwise the next fragment
-		bool	  probe{false};	 // asks a remote again that paused the channel
-	};
-
-	static ChannelId								  channelOf(const SendClass sendClass) { return sendClass == SendClass::Control ? ChannelId::Control : ChannelId::Application; }
+	// Receiving
+	void					 handleData(Lane lane, const PacketHeader &header, std::span<const uint8_t> body);
+	void					 handleMedia(const PacketHeader &header, std::span<const uint8_t> body);
+	void					 handleAck(Stream &stream, Lane lane, const PacketHeader &header, std::span<const uint8_t> body, TimePoint now);
+	bool					 acceptInOrder(Stream &stream, Lane lane, const PacketHeader &header, std::span<const uint8_t> body);
+	void					 drainReorderBuffer(Stream &stream, Lane lane);
+	void					 retryRefused(Stream &stream, Lane lane);
 
 	// Sending
-	void											  flushAcks(Stream &stream, ChannelId channel);
-	std::optional<Transmission>						  nextTransmission(Stream &stream, ChannelId channel, TimePoint now);
-	bool											  congestionWindowOpen(const Stream &stream, ChannelId channel) const;
-	static InFlight									 *nextLost(Stream &stream);
-	InFlight										  makeFragment(const Stream &stream, ChannelId channel) const;
-	InFlight										 *takeFragment(Stream &stream, ChannelId channel) const;
-	void											  transmit(Stream &stream, InFlight &entry, TimePoint now);
-	static bool										  hasSendable(const Stream &stream);
+	OutgoingDatagram		 makeAck(Lane lane);
+	const OutgoingDatagram	*peekMedia(MessageSource &source);
+	bool					 congestionWindowOpen(Lane lane) const;
+	static InFlight			*nextLost(Stream &stream);
+	static FragmentCursor	 cursorFor(OutboundMessage message);
+	static InFlight			 fragmentAt(const FragmentCursor &cursor);
+	PacketHeader			 headerOf(Lane lane, uint64_t seq, const InFlight &entry) const;
+	const OutgoingDatagram	*offer(const PacketHeader &header, const InFlight &entry);
+	void					 transmit(Stream &stream, Lane lane, uint64_t seq, InFlight &entry, TimePoint now);
 
 	// Loss and congestion
-	bool											  detectLosses(Stream &stream);
-	void											  markLost(Stream &stream, uint64_t seq, InFlight &entry, bool timedOut);
-	void											  growCongestionWindow(size_t acknowledged);
-	static void										  advanceSendBase(Stream &stream);
-	void											  fail();
+	bool					 detectLosses();
+	void					 markLost(const SentRecord &record, Stream &stream, InFlight &entry, bool timedOut);
+	InFlight				*entryOf(const SentRecord &record);
+	void					 setPeerPaused(Stream &stream, bool paused, TimePoint now);
+	void					 updateProgressClock(TimePoint now, bool progress);
+	void					 fail();
 
-	// Encodes with the current stream IDs: they may have become known since the packet was created
-	OutgoingDatagram								  makeDatagram(const PacketHeader &header) const;
-	OutgoingDatagram								  makeDatagram(const PacketHeader &header, std::span<const uint8_t> body) const;
-	PacketHeader									  makeHeader(PacketFlags flags, uint64_t seq) const;
-	void											  scheduleDeadline(TimePoint deadline);
-	size_t											  maxRangesPerDatagram() const;
+	OutgoingDatagram		 makeDatagram(const PacketHeader &header) const;
+	PacketHeader			 makeHeader(PacketFlags flags, uint64_t seq) const;
 
 	// Starts fresh streams: used after a failure (new local stream ID) and after a peer restart
-	void											  resetStreams();
+	void					 resetStreams();
 
 
-	ReliabilityConfig								  mConfig;
-	uint32_t										  mLocalStreamID;
-	std::optional<uint32_t>							  mRemoteStreamID;
-	RttEstimator									  mRtt;
+	LinkTimings				 mTimings;
+	uint32_t				 mLocalStreamID;
+	std::optional<uint32_t>	 mRemoteStreamID;
+	RttEstimator			 mRtt;
+	AssemblyBudget			*mBudget;
 
-	std::array<std::unique_ptr<Stream>, ChannelCount> mStreams;
+	std::array<std::unique_ptr<Stream>, StreamCount> mStreams;
 
-	// Congestion control. The window limits the application channel only (its Stream::onTheWire).
-	double											  mCongestionWindow;
-	double											  mSlowStartThreshold;
-	uint64_t										  mTransmissions{0};	 // counts every Data transmission
-	uint64_t										  mLargestAcked{0};		 // the latest transmission that was acknowledged
-	uint64_t										  mRecoveryStart{0};	 // losses of transmissions up to this one already reduced the window
-	bool											  mWindowLimited{false}; // sending last stopped because the window was full, not because nothing was left
-	std::vector<uint64_t>							  mAcknowledged;		 // scratch: the transmissions one DataAck acknowledged
-	std::optional<TimePoint>						  mStalledSince;		 // data is unacknowledged: when the last acknowledgement arrived
-	int												  mTimeoutsInARow{0};	 // retransmission timeouts since the last acknowledgement
+	// Media: sent once, in fragments numbered by one counter
+	std::optional<FragmentCursor>					 mMediaCursor;
+	uint64_t										 mNextMediaSeq{1};
+	std::unique_ptr<MediaAssembler>					 mMediaAssembler;
+	uint32_t										 mMediaReceived{0};
 
-	bool											  mApplicationReceiving{true};
+	// Loss detection, for all lanes together: the oldest transmission that still counts is at the front
+	std::deque<SentRecord>							 mSent;
+	uint64_t										 mTransmissions{0};	 // counts every Data transmission
+	uint64_t										 mLargestAcked{0};	 // the latest transmission that was acknowledged
+	std::optional<TimePoint>						 mStalledSince;		 // data is unacknowledged: when the last acknowledgement arrived
+	int												 mTimeoutsInARow{0}; // retransmission timeouts since the last acknowledgement
 
-	// Unreliable data and the heartbeat
-	uint64_t										  mNextUnreliableSeq{1};
-	uint64_t										  mLastUnreliableSeq{0};
-	BoundedQueue<OutgoingDatagram>					  mUnreliableQueue; // the oldest dropped when full
-	bool											  mHeartbeatDue{false};
+	// Congestion control, for Reliable and Bulk together
+	double											 mCongestionWindow;
+	uint64_t										 mRecoveryStart{0}; // losses of transmissions up to this one already reduced the window
 
-	std::deque<OutgoingDatagram>					  mPendingAcks;		// built and not sent yet
-	OutgoingDatagram								  mPeeked;			// what the last peek() returned
+	bool											 mPaused{false};	// what the Acks of Reliable and Bulk tell the remote
+	uint32_t										 mAckSerial{0};
+	uint8_t											 mAckDue{0};		// lanes, as bits
+	uint8_t											 mPingDue{0};		// lanes, as bits
 
-	std::optional<TimePoint>						  mNextDeadline;
+	std::deque<OutgoingDatagram>					 mPendingAcks;		// built and not sent yet
+	OutgoingDatagram								 mPeeked;			// what the last peek() returned
 
-	std::vector<DeliveredMessage>					  mDelivered;
-	std::vector<LinkEvent>							  mEvents;
-	LinkStats										  mStats;
+	std::vector<DeliveredMessage>					 mDelivered;
+	std::vector<LinkEvent>							 mEvents;
+	LinkStats										 mStats;
 };
 
 } // namespace netlink::channel

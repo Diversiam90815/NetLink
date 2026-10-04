@@ -16,7 +16,7 @@ namespace netlink::channel
 
 void HeartbeatService::watch(const net::SocketAddress &peer, const TimePoint now)
 {
-	mPeers[peer] = {now, now};
+	mPeers[peer] = {.lastReceived = now, .lastAsked = now};
 }
 
 
@@ -29,13 +29,6 @@ void HeartbeatService::unwatch(const net::SocketAddress &peer)
 bool HeartbeatService::isWatched(const net::SocketAddress &peer) const
 {
 	return mPeers.contains(peer);
-}
-
-
-void HeartbeatService::onSent(const net::SocketAddress &peer, const TimePoint now)
-{
-	if (const auto it = mPeers.find(peer); it != mPeers.end())
-		it->second.lastSent = std::max(it->second.lastSent, now);
 }
 
 
@@ -52,17 +45,17 @@ HeartbeatTick HeartbeatService::tick(const TimePoint now)
 
 	for (auto it = mPeers.begin(); it != mPeers.end();)
 	{
-		if (now - it->second.lastReceived >= mConfig.silenceTimeout)
+		if (now - it->second.lastReceived >= mSilenceTimeout)
 		{
 			result.silentPeers.push_back(it->first);
 			it = mPeers.erase(it);
 			continue;
 		}
 
-		if (now - it->second.lastSent >= mConfig.interval)
+		if (now >= it->second.askAt(mInterval))
 		{
-			result.heartbeatsDue.push_back(it->first);
-			it->second.lastSent = now;
+			result.pingsDue.push_back(it->first);
+			it->second.lastAsked = now;
 		}
 
 		++it;
@@ -76,9 +69,9 @@ std::optional<HeartbeatService::TimePoint> HeartbeatService::nextDeadline() cons
 {
 	std::optional<TimePoint> next;
 
-	for (const auto &[lastSent, lastReceived] : mPeers | std::views::values)
+	for (const auto &state : mPeers | std::views::values)
 	{
-		if (const TimePoint due = std::min(lastSent + mConfig.interval, lastReceived + mConfig.silenceTimeout);!next || due < *next)
+		if (const TimePoint due = std::min(state.askAt(mInterval), state.lastReceived + mSilenceTimeout); !next || due < *next)
 			next = due;
 	}
 

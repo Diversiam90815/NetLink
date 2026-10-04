@@ -18,12 +18,15 @@
 #include <string>
 #include <vector>
 
+#include "NetLink/NetLink.h"
+
 #include "Mailbox.h"
 #include "SendScheduler.h"
 #include "SignalPacket.h"
 #include "TaskQueue.h"
 #include "ThreadBase.h"
 #include "Heartbeat/HeartbeatService.h"
+#include "TransportConstants.h"
 #include "PeerValidation/PeerValidationService.h"
 #include "Reliability/ReliableLink.h"
 #include "Socket/IDatagramSocket.h"
@@ -69,14 +72,13 @@ struct PeerEndpoint
 
 struct PeerChannelConfig
 {
-	channel::ReliabilityConfig reliability{};
-	channel::HeartbeatConfig   heartbeat{};
+	channel::LinkTimings timings{};
 
-	// Application payload that may wait for its callback
-	size_t					   deliveryBacklogLimit{size_t{2} * internal::MaxMessagePayload};
+	// Bytes of messages that may wait to be sent, per acknowledged lane of one peer
+	size_t				 sendQueueBytes{channel::DefaultSendQueueBytes};
 
 	// Datagrams the channel sends per second, to all peers together. 0 = unlimited.
-	uint32_t				   maxSendRate{80'000};
+	uint32_t			 maxSendRate{channel::DefaultMaxSendRate};
 };
 
 
@@ -136,7 +138,7 @@ public:
 	bool		 sendValidationHandshake(const std::string &computerName);
 
 	// Application message. False if the peer is unknown, the message is too large or the send queue refused it.
-	// A reliable message waits up to timeout for room in a full send queue (OverflowPolicy::DropNewest) before it is refused.
+	// A reliable message waits up to timeout for room in a full send queue before it is refused.
 	bool		 sendMessage(const std::string &computerName, uint32_t type, std::span<const uint8_t> data, DeliveryMode mode, std::chrono::milliseconds timeout = {});
 
 	// Heartbeats and silence detection for the peer of a session
@@ -181,18 +183,41 @@ private:
 		channel::DeliveredMessage message;
 	};
 
-	// Counts application payload as waiting for its callback for as long as it exists: the task that delivers the
-	// payload owns it, whether that task runs or is discarded with its queue
+	// Application payload that was handed over and waits for its callback
+	struct DeliveryBacklog
+	{
+		std::atomic<size_t>	  bytes{0};
+		std::atomic<bool>	  paused{false}; // the senders were asked to hold back for it
+
+		std::mutex			  mutex;
+		std::function<void()> onDrained;	 // a paused channel has room again. Gone with the channel.
+	};
+
+	// Counts payload as waiting for as long as it exists: the task that delivers the payload owns it, whether that task
+	// runs or is discarded with its queue
 	struct BacklogShare
 	{
-		BacklogShare(std::shared_ptr<std::atomic<size_t>> backlog, const size_t bytes) : backlog(std::move(backlog)), bytes(bytes) { this->backlog->fetch_add(bytes); }
-		~BacklogShare() { backlog->fetch_sub(bytes); }
+		BacklogShare(std::shared_ptr<DeliveryBacklog> backlog, const size_t bytes) : backlog(std::move(backlog)), bytes(bytes) { this->backlog->bytes.fetch_add(bytes); }
 
-		BacklogShare(const BacklogShare &)									 = delete;
-		BacklogShare						&operator=(const BacklogShare &) = delete;
+		~BacklogShare()
+		{
+			const size_t before = backlog->bytes.fetch_sub(bytes);
 
-		std::shared_ptr<std::atomic<size_t>> backlog;
-		size_t								 bytes;
+			// The moment the backlog falls below what senders are resumed at
+			if (backlog->paused.load() && before >= channel::BacklogResumeBytes && before - bytes < channel::BacklogResumeBytes)
+			{
+				std::lock_guard<std::mutex> lock(backlog->mutex);
+
+				if (backlog->onDrained)
+					backlog->onDrained();
+			}
+		}
+
+		BacklogShare(const BacklogShare &)								 = delete;
+		BacklogShare					&operator=(const BacklogShare &) = delete;
+
+		std::shared_ptr<DeliveryBacklog> backlog;
+		size_t							 bytes;
 	};
 
 	struct LostPeer
@@ -210,13 +235,12 @@ private:
 
 	struct LinkState
 	{
-		explicit LinkState(const channel::ReliabilityConfig &config) : link(config) {}
+		LinkState(const channel::LinkTimings &timings, channel::AssemblyBudget *budget) : link(timings, channel::makeStreamID(), budget) {}
 
-		channel::ReliableLink link;
-		bool				  backlog{false};	// the mailbox may hold messages for this link
-		bool				  unsettled{false}; // flush() callers were not told yet that everything it took is acknowledged
+		channel::ReliableLink	 link;
 		std::optional<TimePoint> deadline;		   // its next timer, as of the last time it was looked at
-		uint8_t					 scheduled{0};	   // the send classes it waits in the scheduler for
+		bool					 unsettled{false}; // flush() callers were not told yet that everything it took is acknowledged
+		uint8_t					 scheduled{0};	   // the lanes it waits in the scheduler for
 	};
 
 	enum class Transmit
@@ -239,9 +263,9 @@ private:
 	void		 receivePending(net::IDatagramSocket &socket, TimePoint now);
 	void		 handleDatagram(const net::SocketAddress &from, std::span<const uint8_t> bytes, TimePoint now);
 	void		 serviceTimers(EventBatch &batch, TimePoint now);
-	void		 feed(const net::SocketAddress &address, LinkState &state);
+	void									  updatePause();
 	void									  collect(const net::SocketAddress &address, LinkState &state, EventBatch &batch);
-	void									  sendAcks(const net::SocketAddress &address, LinkState &state, net::IDatagramSocket &socket, TimePoint now);
+	void									  sendAcks(const net::SocketAddress &address, LinkState &state, net::IDatagramSocket &socket);
 	void									  schedule(const net::SocketAddress &address, LinkState &state, TimePoint now);
 	void									  sendData(net::IDatagramSocket &socket, TimePoint now);
 	Transmit								  transmit(net::IDatagramSocket &socket, const net::SocketAddress &address, const channel::OutgoingDatagram &datagram);
@@ -258,7 +282,7 @@ private:
 	// --- Any thread ------------------------------------------------------------
 
 	bool		 sendSignal(const std::string &computerName, SignalType type, decltype(SignalPacket::payload) payload = PayloadEmpty{});
-	bool		 push(const PeerEndpoint &peer, channel::Mailbox::Lane lane, uint32_t tag, std::vector<uint8_t> body, std::chrono::milliseconds timeout = {});
+	bool									  push(const PeerEndpoint &peer, channel::Lane lane, uint32_t tag, std::vector<uint8_t> body, std::chrono::milliseconds timeout = {});
 
 	PeerEndpoint resolvePeer(const std::string &computerName) const;
 	std::string	 nameOf(const net::SocketAddress &address) const;
@@ -286,7 +310,7 @@ private:
 	TaskQueue								 *mApplicationQueue; // not owned. Null: application messages go through mDelivery as well
 
 	// Application payload handed over and not delivered yet, in bytes
-	std::shared_ptr<std::atomic<size_t>>	  mDeliveryBacklog{std::make_shared<std::atomic<size_t>>(0)};
+	std::shared_ptr<DeliveryBacklog>		  mDeliveryBacklog{std::make_shared<DeliveryBacklog>()};
 
 	std::atomic<bool>						  mInitialized{false};
 	ChannelConnectionCallbacks				  mConnectionCallbacks;
@@ -303,6 +327,8 @@ private:
 	std::map<net::SocketAddress, LinkState>	  mLinks;
 	channel::HeartbeatService				  mHeartbeat;
 	channel::SendScheduler					  mScheduler;
+	channel::AssemblyBudget					  mAssemblyBudget;
+	bool									  mPaused{false}; // too much waits for the application: senders are asked to hold back
 	std::optional<TimePoint>				  mNextWake; // never later than the next timer of any link or heartbeat
 	std::vector<uint8_t>					  mReceiveBuffer;
 	std::vector<net::SocketAddress>			  mTouched;	 // links with something to send, deliver or report in the current step

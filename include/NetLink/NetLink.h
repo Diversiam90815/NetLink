@@ -63,7 +63,7 @@ struct Message
 enum class DeliveryMode : uint8_t
 {
 	ReliableOrdered,	 // Acknowledged and retransmitted until it arrives. Up to 16 MiB, larger messages are fragmented.
-	UnreliableSequenced, // Without acknowledgement: message may be dropped. Must fit into a single datagram (about 1.1 KB)
+	UnreliableSequenced, // Without acknowledgement: message may be dropped or overtaken. Up to 64 KiB.
 };
 
 
@@ -127,7 +127,7 @@ struct NetLinkConfig
 	std::string	   secret{"NetLink"};
 	std::string	   applicationVersion{}; // Two peers are compatible when the major and minor components match; patch and build number are ignored
 
-	// Reliable messages that may wait to be sent, and what happens once that many are waiting
+	// Without effect since the send queue is limited in bytes (64 MiB per peer); removed with the 0.5 API
 	size_t		   sendQueueCapacity{2048};
 	OverflowPolicy sendQueueOverflow{OverflowPolicy::DropNewest};
 };
@@ -188,8 +188,8 @@ public:
 
 	// -- Messaging -----------------------------------
 
-	// Send a message to the connected peer. Returns false when not connected, when an unreliable message does not fit into
-	// one datagram, or when the send queue is full under OverflowPolicy::DropNewest.
+	// Send a message to the connected peer. Returns false when not connected, when the message is too large, or when the
+	// send queue of reliable messages is full.
 	// timeout: how long a reliable message may wait for room in a full send queue before it is refused. With the default
 	// of zero send() never blocks.
 	bool						send(const Message &message, DeliveryMode mode = DeliveryMode::ReliableOrdered, std::chrono::milliseconds timeout = {}) const;

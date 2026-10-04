@@ -13,43 +13,40 @@
 #include <vector>
 
 #include "Socket/SocketTypes.h"
+#include "TransportConstants.h"
 
 
 namespace netlink::channel
 {
 
-struct HeartbeatConfig
-{
-	std::chrono::milliseconds interval{1000};		// idle time before a heartbeat is sent
-	std::chrono::milliseconds silenceTimeout{5000}; // no inbound traffic for this long -> peer lost
-};
-
-
 struct HeartbeatTick
 {
-	std::vector<net::SocketAddress> heartbeatsDue; // send a heartbeat to each
-	std::vector<net::SocketAddress> silentPeers;   // considered lost, no longer watched
+	std::vector<net::SocketAddress> pingsDue;	 // ask each of them for a sign of life
+	std::vector<net::SocketAddress> silentPeers; // considered lost, no longer watched
 };
 
 
+// A peer that was not heard from for a while is asked (it answers every Ping), and given up on when it stays silent
 class HeartbeatService
 {
 public:
 	using Clock		= std::chrono::steady_clock;
 	using TimePoint = Clock::time_point;
 
-	explicit HeartbeatService(const HeartbeatConfig config = {}) : mConfig(config) {}
+	explicit HeartbeatService(const LinkTimings &timings = {}) { setTimings(timings); }
 
-	void					 setConfig(const HeartbeatConfig &config) { mConfig = config; }
-	const HeartbeatConfig	&config() const { return mConfig; }
+	void setTimings(const LinkTimings &timings)
+	{
+		mInterval		= timings.keepAlive;
+		mSilenceTimeout = timings.peerTimeout;
+	}
 
 	// Starts supervising a peer; it counts as alive right now
 	void					 watch(const net::SocketAddress &peer, TimePoint now);
 	void					 unwatch(const net::SocketAddress &peer);
 	bool					 isWatched(const net::SocketAddress &peer) const;
 
-	// Any traffic counts: data, acks and heartbeats. Ignored for peers that are not watched.
-	void					 onSent(const net::SocketAddress &peer, TimePoint now);
+	// Any traffic counts: data, acknowledgements and pings. Ignored for peers that are not watched.
 	void					 onReceived(const net::SocketAddress &peer, TimePoint now);
 
 	// Silent peers are reported once and stop being watched
@@ -62,11 +59,14 @@ public:
 private:
 	struct PeerState
 	{
-		TimePoint lastSent;
 		TimePoint lastReceived;
+		TimePoint lastAsked; // the latest Ping, or what was received after it
+
+		TimePoint askAt(const std::chrono::milliseconds interval) const { return std::max(lastReceived, lastAsked) + interval; }
 	};
 
-	HeartbeatConfig							mConfig;
+	std::chrono::milliseconds				mInterval{};
+	std::chrono::milliseconds				mSilenceTimeout{};
 	std::map<net::SocketAddress, PeerState> mPeers;
 };
 

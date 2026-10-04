@@ -143,15 +143,6 @@ void netlink::NetLinkCore::configure(const NetLinkConfig &config, const NetLinkC
 		mCallbacks = std::make_shared<const NetLinkCallbacks>(callbacks);
 	}
 
-	PeerChannelConfig channelConfig;
-	{
-		std::lock_guard<std::mutex> lock(mConfigMutex);
-		mChannelConfig.reliability.sendQueueCapacity = config.sendQueueCapacity;
-		mChannelConfig.reliability.sendQueueOverflow = config.sendQueueOverflow;
-		channelConfig								 = mChannelConfig;
-	}
-	mChannel.setConfig(channelConfig);
-
 	// A configured secret must match on both sides; an empty secret disables the check
 	PeerValidationConfig validationConfig;
 	validationConfig.enableSecretCheck	= !config.secret.empty();

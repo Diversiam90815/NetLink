@@ -20,29 +20,24 @@ std::optional<AssembledMessage> MessageAssembler::accept(const PacketHeader &hea
 	if (!header.flags.isFragmented())
 	{
 		reset();
-
-		if (body.size() > mMaxMessageSize)
-			return std::nullopt;
-
 		return AssembledMessage{.tag = header.tag, .body = std::vector<uint8_t>(body.begin(), body.end())};
-	}
-
-	if (!header.flags.isLastFragment() && body.size() != mFragmentBody)
-	{
-		NETLINK_LOG_WARNING("Fragment {} of {} carries {} instead of {} bytes, dropping the message", header.fragIndex, header.fragCount, body.size(), mFragmentBody);
-		reset();
-		return std::nullopt;
 	}
 
 	if (header.fragIndex == 0)
 	{
 		reset();
 
-		mAssembling = true;
-		mFragCount	= header.fragCount;
-		mTag		= header.tag;
+		if (header.totalLength > internal::MaxMessagePayload || fragmentsOf(header.totalLength) != header.fragCount || (mBudget && !mBudget->reserve(header.totalLength)))
+		{
+			NETLINK_LOG_WARNING("Message of {} bytes in {} fragments is not taken", header.totalLength, header.fragCount);
+			return std::nullopt;
+		}
 
-		mBody.reserve(std::min({body.size() * header.fragCount, mMaxMessageSize, MaxInitialReserve}));
+		mAssembling	 = true;
+		mFragCount	 = header.fragCount;
+		mTag		 = header.tag;
+		mTotalLength = header.totalLength;
+		mBody.reserve(mTotalLength);
 	}
 
 	if (!mAssembling || header.fragCount != mFragCount || header.fragIndex != mNextIndex)
@@ -52,9 +47,12 @@ std::optional<AssembledMessage> MessageAssembler::accept(const PacketHeader &hea
 		return std::nullopt;
 	}
 
-	if (mBody.size() + body.size() > mMaxMessageSize)
+	// Every fragment but the last one is full, and the last one completes exactly what the first one announced
+	const size_t expected = header.flags.isLastFragment() ? mTotalLength - mBody.size() : MaxFragmentBody;
+
+	if (body.size() != expected)
 	{
-		NETLINK_LOG_WARNING("Message exceeds {} bytes, dropping it", mMaxMessageSize);
+		NETLINK_LOG_WARNING("Fragment {} of {} carries {} instead of {} bytes, dropping the message", header.fragIndex, header.fragCount, body.size(), expected);
 		reset();
 		return std::nullopt;
 	}
@@ -73,11 +71,15 @@ std::optional<AssembledMessage> MessageAssembler::accept(const PacketHeader &hea
 
 void MessageAssembler::reset()
 {
-	mAssembling = false;
-	mFragCount	= 0;
-	mNextIndex	= 0;
-	mTag		= 0;
-	mBody		= {};
+	if (mBudget && mAssembling)
+		mBudget->release(mTotalLength);
+
+	mAssembling	 = false;
+	mFragCount	 = 0;
+	mNextIndex	 = 0;
+	mTag		 = 0;
+	mTotalLength = 0;
+	mBody		 = {};
 }
 
 } // namespace netlink::channel

@@ -27,14 +27,21 @@ struct DiscoveryEndpoint
 };
 
 
+// Announcements of builds that speak another channel protocol are not understood on purpose: such peers could never talk
+inline constexpr int DiscoveryVersion = 3;
+
+
 inline void to_json(nlohmann::json &j, const DiscoveryEndpoint &ep)
 {
-	j = nlohmann::json{{"ip", ep.IPAddress.toString()}, {"port", ep.port}, {"name", ep.displayName}};
+	j = nlohmann::json{{"v", DiscoveryVersion}, {"ip", ep.IPAddress.toString()}, {"port", ep.port}, {"name", ep.displayName}};
 }
 
 inline void from_json(const nlohmann::json &j, DiscoveryEndpoint &ep)
 {
-	// An unparsable address leaves IPAddress unspecified, so isValid() rejects the endpoint
+	// Another version, like an unparsable address, leaves IPAddress unspecified, so isValid() rejects the endpoint
+	if (j.value("v", 0) != DiscoveryVersion)
+		return;
+
 	if (auto ip = netlink::net::IPv4Address::parse(j.at("ip").get<std::string>()); ip.has_value())
 		ep.IPAddress = *ip;
 	j.at("port").get_to(ep.port);
