@@ -40,6 +40,9 @@ public:
 		std::erase_if(mEngines, [&](const auto &entry) { return entry.first == &engine; });
 	}
 
+	// Called before and after every step of an engine, e.g. to count what that engine allocates
+	std::function<void(const netlink::NetworkEngine &engine, bool entering)> aroundStep;
+
 	TimePoint				  now() const { return mNow; }
 	std::chrono::microseconds elapsed() const { return std::chrono::duration_cast<std::chrono::microseconds>(mNow - mStart); }
 
@@ -96,7 +99,15 @@ private:
 
 			for (auto &[engine, sink] : mEngines)
 			{
-				sink(engine->step(mNow));
+				if (aroundStep)
+					aroundStep(*engine, true);
+
+				auto batch = engine->step(mNow);
+
+				if (aroundStep)
+					aroundStep(*engine, false);
+
+				sink(std::move(batch));
 
 				if (const auto next = engine->nextWake(); next && (!wake || *next < *wake))
 					wake = next;

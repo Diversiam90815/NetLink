@@ -49,6 +49,7 @@ set(Socket_Tests
 set(Sim_Tests
     ${Test_Directory}/SimTests/PacingSimTests.cpp
     ${Test_Directory}/SimTests/SessionSimTests.cpp
+    ${Test_Directory}/SimTests/CoexistenceSimTests.cpp
 )
 
 set(Integration_Tests
@@ -68,7 +69,17 @@ set(Test_Fakes
     ${Test_Directory}/Fakes/SimScenario.h
     ${Test_Directory}/Fakes/EngineHarness.h
     ${Test_Directory}/Fakes/QueueSource.h
+    ${Test_Directory}/Fakes/DeadlineTimer.h
+    ${Test_Directory}/Fakes/AllocationCounter.h
+    ${Test_Directory}/Fakes/AllocationCounter.cpp
 )
+
+# The timer the fake network waits on has one backend per platform
+if (WIN32)
+    list(APPEND Test_Fakes ${Test_Directory}/Fakes/DeadlineTimerWindows.cpp)
+else ()
+    list(APPEND Test_Fakes ${Test_Directory}/Fakes/DeadlineTimerStd.cpp)
+endif ()
 
 
 set(All_Tests

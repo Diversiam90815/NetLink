@@ -55,4 +55,30 @@ private:
 	std::array<std::deque<netlink::channel::OutboundMessage>, netlink::channel::LaneCount> mQueues;
 };
 
+// Everything a link has to send right now, in one pass: Acks and Pings first, then the lanes in order of urgency
+inline std::vector<netlink::channel::OutgoingDatagram> takeOutgoing(netlink::channel::ReliableLink &link, const netlink::channel::ReliableLink::TimePoint now,
+																	netlink::channel::MessageSource &source)
+{
+	using netlink::channel::Lane;
+
+	std::vector<netlink::channel::OutgoingDatagram> pass;
+
+	while (const auto *ack = link.peekAck())
+	{
+		pass.push_back(*ack);
+		link.commitAck();
+	}
+
+	for (const Lane lane : {Lane::Control, Lane::Media, Lane::Reliable, Lane::Bulk})
+	{
+		while (const auto *datagram = link.peek(lane, now, source))
+		{
+			pass.push_back(*datagram);
+			link.commit(lane, now);
+		}
+	}
+
+	return pass;
+}
+
 } // namespace FakeNet

@@ -23,9 +23,9 @@
 #include <utility>
 #include <vector>
 
+#include "DeadlineTimer.h"
 #include "Socket/IDatagramSocket.h"
 #include "TestIp.h"
-#include "Util/Timing/DeadlineTimer.h"
 
 
 namespace FakeNet
@@ -57,6 +57,7 @@ struct LinkProfile
 	uint64_t				  bandwidth{0};			// bytes per second a socket puts on the wire, 0 = unlimited
 	size_t					  queueLimit{0};		// datagrams of a socket that may wait for the wire, 0 = unlimited
 	bool					  blockWhenFull{false}; // a full queue refuses the datagram (WouldBlock) instead of dropping it
+	size_t					  receiveBuffer{0};		// bytes a socket keeps for its reader, 0 = unlimited. What arrives beyond is dropped.
 	double					  lossRate{0.0};
 	double					  reorderRate{0.0};		// share of the datagrams that arrive reorderDelay late
 	std::chrono::microseconds reorderDelay{500};
@@ -90,6 +91,7 @@ public:
 		std::lock_guard<std::mutex> lock(mMutex);
 		mProfile = profile;
 		mRandom.seed(profile.seed);
+		mTime->receiveBuffer.store(profile.receiveBuffer);
 	}
 
 	// Sending to a host that is down fails like it does when nobody answers for its address
@@ -148,6 +150,9 @@ public:
 		return it != mSentBy.end() ? it->second : 0;
 	}
 
+	// Datagrams that found the receive buffer of their socket full
+	size_t overflowed() const { return mTime->overflowed.load(); }
+
 	// Sends that were refused because the socket's queue was full
 	size_t blockedSends() const
 	{
@@ -187,6 +192,8 @@ private:
 
 		std::atomic<Clock::rep> virtualNow{0}; // 0: the real clock
 		std::atomic<size_t>		received{0};
+		std::atomic<size_t>		receiveBuffer{0};
+		std::atomic<size_t>		overflowed{0};
 	};
 
 	struct Arrival
@@ -261,6 +268,7 @@ private:
 		std::mutex								 mutex;
 		std::unique_ptr<netlink::IDeadlineTimer> changed{netlink::makeDeadlineTimer()}; // woken with every change below
 		std::deque<Arrival>						 queue;
+		TimePoint								 trimmedAt{};							// the receive buffer was applied to what had arrived by then
 		bool									 shutdown{false};
 		bool									 interrupted{false};
 		bool									 interruptSeen{false}; // by takeInterrupts()
@@ -437,8 +445,28 @@ private:
 		if (mInbox->shutdown)
 			return std::unexpected(SocketError::Closed);
 
-		if (mInbox->queue.empty() || mInbox->queue.front().at > mInbox->time->now())
+		const TimePoint now = mInbox->time->now();
+
+		if (mInbox->queue.empty() || mInbox->queue.front().at > now)
 			return std::unexpected(SocketError::WouldBlock);
+
+		// What arrived since the reader last looked and did not fit into the buffer was dropped on arrival
+		if (const size_t limit = mInbox->time->receiveBuffer.load(); limit > 0 && mInbox->trimmedAt != now)
+		{
+			mInbox->trimmedAt = now;
+			size_t waiting	  = 0;
+
+			std::erase_if(mInbox->queue,
+						  [&](const FakeDatagramNetwork::Arrival &arrival)
+						  {
+							  if (arrival.at > now)
+								  return false;
+
+							  waiting += arrival.payload.size();
+							  mInbox->time->overflowed += waiting > limit ? 1 : 0;
+							  return waiting > limit;
+						  });
+		}
 
 		auto arrival = std::move(mInbox->queue.front());
 		mInbox->queue.pop_front();

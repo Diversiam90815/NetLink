@@ -22,6 +22,19 @@ static std::vector<uint8_t> makeBody(size_t size)
 }
 
 
+// Every fragment of a body, in order
+static std::vector<Fragment> split(const std::span<const uint8_t> body, const size_t maxFragmentBody)
+{
+	std::vector<Fragment> fragments;
+	const size_t		  count = FragmentationService::fragmentCount(body.size(), maxFragmentBody);
+
+	for (size_t i = 0; i < count; ++i)
+		fragments.push_back(FragmentationService::fragmentAt(body, i, maxFragmentBody));
+
+	return fragments;
+}
+
+
 TEST(FragmentationService, FragmentCount)
 {
 	EXPECT_EQ(FragmentationService::fragmentCount(0, MaxBody), 1u) << "An empty message still is one packet";
@@ -36,7 +49,7 @@ TEST(FragmentationService, FragmentCount)
 TEST(FragmentationService, SmallMessageIsNotFragmented)
 {
 	const auto body		 = makeBody(50);
-	const auto fragments = FragmentationService::split(body, MaxBody);
+	const auto fragments = split(body, MaxBody);
 
 	ASSERT_EQ(fragments.size(), 1u);
 	EXPECT_FALSE(fragments[0].isFragmented());
@@ -48,7 +61,7 @@ TEST(FragmentationService, SmallMessageIsNotFragmented)
 TEST(FragmentationService, SplitCoversTheWholeBody)
 {
 	const auto body		 = makeBody(1050);
-	const auto fragments = FragmentationService::split(body, MaxBody);
+	const auto fragments = split(body, MaxBody);
 
 	ASSERT_EQ(fragments.size(), 11u);
 

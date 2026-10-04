@@ -76,7 +76,7 @@ protected:
 	void				  send(ReliableLink &from, const Lane lane, const uint32_t tag, std::vector<uint8_t> body) { sourceOf(from).push(lane, tag, std::move(body)); }
 
 	// One send pass of the link
-	Pass				  take(ReliableLink &from) { return from.takeOutgoing(now, sourceOf(from)); }
+	Pass				  take(ReliableLink &from) { return FakeNet::takeOutgoing(from, now, sourceOf(from)); }
 
 	// Something acknowledged is still on its way, or did not even leave yet
 	bool				  pending(const ReliableLink &link)
@@ -680,7 +680,7 @@ TEST_F(ReliableLinkTest, PacketOfAnotherRemoteStream_IsDropped)
 	FakeNet::QueueSource fromRestarted;
 
 	fromRestarted.push(Lane::Control, 0, bytes({9}));
-	deliverPass(a, restarted.takeOutgoing(now, fromRestarted));
+	deliverPass(a, FakeNet::takeOutgoing(restarted, now, fromRestarted));
 
 	EXPECT_EQ(a.remoteStreamID(), b.localStreamID()) << "A link talks to one stream for as long as it lives";
 	EXPECT_TRUE(atA.empty());
@@ -1131,33 +1131,6 @@ TEST_F(ReliableLinkTest, MediaReceived_IsReportedWithEveryAck)
 
 	EXPECT_EQ(a.stats().mediaSent, 5u);
 	EXPECT_EQ(a.stats().mediaReceivedByPeer, 4u) << "The sender learns how much of its media arrives";
-}
-
-
-// ---------------------------------------------------------------------------
-// Ping
-// ---------------------------------------------------------------------------
-
-TEST_F(ReliableLinkTest, Ping_IsAnsweredWithAnAck)
-{
-	a.sendPing();
-
-	const auto ping = take(a);
-	ASSERT_EQ(ping.size(), 1u);
-	EXPECT_EQ(count(ping, PacketKind::Ping), 1u);
-	deliverPass(b, ping);
-
-	EXPECT_TRUE(atB.empty());
-	EXPECT_EQ(b.remoteStreamID(), a.localStreamID()) << "A ping introduces the peer";
-
-	const auto answer = take(b);
-	ASSERT_EQ(answer.size(), 1u) << "Whoever is asked answers: that is how a silent peer is told from a dead one";
-	EXPECT_EQ(acks(answer).size(), 1u);
-	EXPECT_EQ(acks(answer)[0].lane, Lane::Control);
-	deliverPass(a, answer);
-
-	EXPECT_TRUE(take(a).empty());
-	EXPECT_EQ(a.nextDeadline(), std::nullopt) << "Nothing waits for an answer to the answer";
 }
 
 

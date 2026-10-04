@@ -150,7 +150,7 @@ protected:
 
 	bool start(NetLink &instance, const std::string &name, Seen &seen)
 	{
-		instance.setActiveAdapter(static_cast<uint64_t>(adapter.ID));
+		instance.setActiveAdapter(adapter.ID);
 		return instance.start(configFor(name), seen.callbacks());
 	}
 
@@ -183,7 +183,7 @@ TEST_F(NetLinkApiTest, TwoInstancesOnOneHost_DiscoverAndConnect)
 	ASSERT_TRUE(start(a, "api-a", seenA));
 	ASSERT_TRUE(start(b, "api-b", seenB));
 
-	EXPECT_EQ(a.getActiveAdapterID(), static_cast<uint64_t>(adapter.ID));
+	EXPECT_EQ(a.getActiveAdapterID(), adapter.ID);
 
 	const auto peerB = find(a, seenA, b, "api-b");
 	ASSERT_TRUE(peerB.has_value()) << "Two instances on one machine share the discovery port and still find each other";
@@ -255,7 +255,7 @@ TEST_F(NetLinkApiTest, StopFromCallback_ReturnsAndDeliversShutdownEvents)
 	};
 
 	ASSERT_TRUE(start(a, "api-a", seenA));
-	b.setActiveAdapter(static_cast<uint64_t>(adapter.ID));
+	b.setActiveAdapter(adapter.ID);
 	ASSERT_TRUE(b.start(configFor("api-b"), callbacksB));
 
 	const auto peerB = find(a, seenA, b, "api-b");

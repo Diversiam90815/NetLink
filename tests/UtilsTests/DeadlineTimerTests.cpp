@@ -5,7 +5,7 @@
 #include <future>
 #include <thread>
 
-#include "Util/Timing/DeadlineTimer.h"
+#include "DeadlineTimer.h"
 
 using namespace netlink;
 using namespace std::chrono_literals;

@@ -9,6 +9,8 @@
 #pragma once
 
 #include <chrono>
+#include <deque>
+#include <functional>
 #include <memory>
 #include <string>
 #include <utility>
@@ -30,22 +32,41 @@ struct SimScenario
 
 		netlink::PeerId id() const { return engine->id(); }
 
-		// The application takes nothing anymore: what arrives keeps waiting for it until release()
+		// The application takes nothing anymore: what arrives keeps waiting for it until it is released
 		void			hold() { holding = true; }
+
 		void			release()
 		{
 			holding = false;
 			held.clear();
 		}
 
-		std::string								name;
-		std::string								ip;
-		TestInterface							iface;
-		EventRecorder							events;
-		std::vector<std::chrono::microseconds>	received; // when each message arrived
-		bool									holding{false};
-		std::vector<std::shared_ptr<void>>		held;
-		std::unique_ptr<netlink::NetworkEngine> engine;	  // last: gone first
+		// ... or takes that many bytes of what is waiting, the oldest first
+		void consume(const size_t bytes)
+		{
+			allowance += bytes;
+
+			while (!held.empty() && held.front().first <= allowance)
+			{
+				allowance -= held.front().first;
+				held.pop_front();
+			}
+
+			if (held.empty())
+				allowance = 0;
+		}
+
+		std::string																	  name;
+		std::string																	  ip;
+		TestInterface																  iface;
+		EventRecorder																  events;
+		std::vector<std::chrono::microseconds>										  received;		   // when each message arrived
+		bool																		  recording{true}; // false: messages are counted in `received`, their payload is not kept
+		std::function<void(netlink::PeerId, netlink::Lane, const netlink::Message &)> onMessage;	   // what the application does with a message
+		bool																		  holding{false};
+		size_t																		  allowance{0};
+		std::deque<std::pair<size_t, std::shared_ptr<void>>>						  held;			   // payload bytes of a batch, and what keeps them counted as waiting
+		std::unique_ptr<netlink::NetworkEngine>										  engine;		   // last: gone first
 	};
 
 	static netlink::EngineConfig defaultConfig()
@@ -70,16 +91,36 @@ struct SimScenario
 		driver.add(*node.engine,
 				   [this, &node](netlink::EventBatch &&batch)
 				   {
+					   size_t bytes = 0;
+
 					   for (auto &event : batch.events)
 					   {
 						   if (event.kind == netlink::EngineEvent::Kind::Message)
+						   {
+							   auto message = event.takeMessage();
+							   event.media.reset();
+
+							   // A Media message that newer ones replaced before the application got to it
+							   if (!message)
+								   continue;
+
 							   node.received.push_back(driver.elapsed());
+							   bytes += event.lane != netlink::Lane::Media ? message->data.size() : 0;
+
+							   if (node.onMessage)
+								   node.onMessage(event.peer, event.lane, *message);
+
+							   if (!node.recording)
+								   continue;
+
+							   event.message = std::move(*message);
+						   }
 
 						   node.events.record(event);
 					   }
 
 					   if (node.holding && batch.backlog)
-						   node.held.push_back(std::move(batch.backlog));
+						   node.held.emplace_back(bytes, std::move(batch.backlog));
 				   });
 
 		return node;

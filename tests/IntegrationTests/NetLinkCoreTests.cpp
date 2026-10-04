@@ -2,6 +2,8 @@
 
 #include <atomic>
 #include <chrono>
+#include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -402,6 +404,58 @@ TEST_F(NetLinkCoreTest, VanishedRemote_IsReportedAsLost)
 
 	EXPECT_TRUE(waitUntilTrue([this] { return !a->events.ended().empty(); }, 10s)) << "A lost remote must end the session";
 	EXPECT_EQ(a->events.ended(), std::vector<Ended>({{b->id(), DisconnectReason::Lost}}));
+}
+
+
+TEST_F(NetLinkCoreTest, Log_IsDeliveredOnTheEventThread)
+{
+	std::mutex				  mutex;
+	std::vector<std::string>  lines;
+	std::set<std::thread::id> threads;
+	std::thread::id			  callbackThread;
+
+	auto					  callbacks = a->callbacks();
+	callbacks.onConnected				= [&](const PeerInfo &)
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		callbackThread = std::this_thread::get_id();
+	};
+	callbacks.onLog = [&](LogLevel, const std::string_view message)
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		lines.emplace_back(message);
+		threads.insert(std::this_thread::get_id());
+	};
+
+	NetLinkConfig config;
+	config.displayName = "pc-a";
+	config.appId	   = "core-tests";
+
+	ASSERT_TRUE(a->start(config, callbacks));
+	ASSERT_TRUE(b->start("pc-b"));
+	ASSERT_TRUE(waitUntilTrue(
+		[&]
+		{
+			a->core.startDiscovery();
+			b->core.startDiscovery();
+			return b->events.knows(a->id()) && !a->core.peers().empty();
+		}));
+	ASSERT_TRUE(a->core.connect(b->id()));
+	ASSERT_TRUE(waitUntilTrue([&] { return b->events.isConnectedTo(a->id()); }));
+
+	const auto contains = [&](const std::string_view text)
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		return std::ranges::any_of(lines, [&](const std::string &line) { return line.find(text) != std::string::npos; });
+	};
+
+	EXPECT_TRUE(waitUntilTrue([&] { return contains("starting as 'pc-a'"); })) << "What start() says on the caller's thread";
+	EXPECT_TRUE(waitUntilTrue([&] { return contains("Engine bound to 10.0.0.1"); })) << "What the I/O thread says";
+
+	std::lock_guard<std::mutex> lock(mutex);
+	ASSERT_EQ(threads.size(), 1u) << "The application reads every line on one thread";
+	EXPECT_EQ(*threads.begin(), callbackThread) << "... the one its other callbacks run on";
+	EXPECT_FALSE(threads.contains(std::this_thread::get_id()));
 }
 
 
