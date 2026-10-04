@@ -18,7 +18,7 @@
 
 #include "BenchUtil.h"
 #include "Loopback.h"
-#include "NetLinkConstants.h"
+#include "TransportConstants.h"
 
 using namespace netlink;
 using bench::LoopbackPeers;

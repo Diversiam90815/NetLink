@@ -11,10 +11,9 @@
 #include <vector>
 
 #include "BenchUtil.h"
-#include "Channel/Fragmentation/FragmentationService.h"
 #include "Channel/Fragmentation/MessageAssembler.h"
 #include "Channel/Reliability/ReliableLink.h"
-#include "NetLinkConstants.h"
+#include "TransportConstants.h"
 
 using namespace netlink;
 using namespace netlink::channel;
@@ -31,27 +30,30 @@ struct Arrival
 };
 
 
-// The fragments of a message, cut with the fragment size the channel really uses
+// The fragments of a message, cut the way a link cuts them
 static std::vector<Arrival> arrivalsOf(std::span<const uint8_t> message)
 {
+	const size_t		 count = fragmentsOf(message.size());
 	std::vector<Arrival> arrivals;
-	uint64_t			 seq = 1;
 
-	for (const auto &fragment : FragmentationService::split(message, ReliableLink{}.maxFragmentBody()))
+	for (size_t index = 0; index < count; ++index)
 	{
-		PacketHeader header;
-		header.flags	   = PacketFlags::data(ChannelId::Application, true);
-		header.srcStreamID = 1;
-		header.seq		   = seq++;
+		const size_t offset = index * MaxFragmentBody;
 
-		if (fragment.isFragmented())
+		PacketHeader header;
+		header.flags	   = PacketFlags::data(Lane::Reliable);
+		header.srcStreamID = 1;
+		header.seq		   = 1 + index;
+
+		if (count > 1)
 		{
-			header.flags.setFragment(true, fragment.isLast());
-			header.fragIndex = fragment.index;
-			header.fragCount = fragment.count;
+			header.flags.setFragment(true, index + 1 == count);
+			header.fragIndex   = static_cast<uint16_t>(index);
+			header.fragCount   = static_cast<uint16_t>(count);
+			header.totalLength = static_cast<uint32_t>(message.size());
 		}
 
-		arrivals.push_back({.header = header, .body = fragment.body});
+		arrivals.push_back({.header = header, .body = message.subspan(offset, std::min(MaxFragmentBody, message.size() - offset))});
 	}
 
 	return arrivals;
