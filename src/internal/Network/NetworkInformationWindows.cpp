@@ -18,7 +18,6 @@
 #include <iptypes.h>
 #include <iphlpapi.h>
 #include <netioapi.h>
-#include <wlanapi.h>
 
 #include <unordered_set>
 #include <algorithm>
@@ -49,43 +48,10 @@ struct NetworkInformation::Impl
 		}
 	};
 
-	struct IpForwardTable
-	{
-		MIB_IPFORWARD_TABLE2 *ptr{nullptr};
-		~IpForwardTable()
-		{
-			if (ptr)
-				FreeMibTable(ptr);
-		}
-	};
-
-	struct WlanHandle
-	{
-		HANDLE h{};
-		~WlanHandle()
-		{
-			if (h)
-				WlanCloseHandle(h, nullptr);
-		}
-	};
-
-	struct WlanQueryData
-	{
-		void *ptr{};
-		~WlanQueryData()
-		{
-			if (ptr)
-				WlanFreeMemory(ptr);
-		}
-	};
-
 	using AdapterBuffer = std::unique_ptr<IP_ADAPTER_ADDRESSES, void (*)(IP_ADAPTER_ADDRESSES *)>;
 
 	bool						   getNetworkInformationFromOS();
-	static void					   saveAdapter(std::vector<NetworkAdapterInternal> &adapters,
-											   const PIP_ADAPTER_ADDRESSES			adapter,
-											   const int							ID,
-											   const std::unordered_set<ULONG64>   &defaultRouteLuidValues);
+	static void saveAdapter(std::vector<NetworkAdapterInternal> &adapters, const PIP_ADAPTER_ADDRESSES adapter, const std::unordered_set<ULONG64> &defaultRouteLuidValues);
 
 	static std::string			   sockaddrToString(SOCKADDR *sa);
 	static std::string			   prefixLengthToSubnetMask(USHORT family, ULONG prefixLength);
@@ -93,10 +59,6 @@ struct NetworkInformation::Impl
 	static AdapterPriorityInternal determinePriority(bool isDefaultRoute, bool IPv4Enabled, AdapterTypes type, IF_OPER_STATUS status);
 
 	static bool					   getDefaultInterfaces(std::vector<NET_LUID> &pLUIDs);
-	static std::string			   getHostName(const SOCKADDR *ip, const socklen_t ipLength);
-	static std::string			   getWifiSsid(const AdapterTypes type, const NET_LUID luid);
-	static std::string			   getNetworkGatename(const AdapterTypes type, const NET_LUID luid, const std::string &address);
-	static std::string			   getNetworkName(const AdapterTypes type, const NET_LUID luid, const std::string &address);
 
 
 	static std::string			   WStringToStdString(const std::wstring &wstr)
@@ -214,19 +176,15 @@ void NetworkInformation::processAdapter()
 	for (const auto &luid : defaultRouteAdapters)
 		defaultRouteLuidValues.insert(luid.Value);
 
-	int ID = 1; // Giving each network adapter an ID
-
-	for (auto *node = mImpl->mAdapterAddresses.get(); node; node = node->Next, ++ID)
+	for (auto *node = mImpl->mAdapterAddresses.get(); node; node = node->Next)
 	{
-		mImpl->saveAdapter(mNetworkAdapters, node, ID, defaultRouteLuidValues);
+		mImpl->saveAdapter(mNetworkAdapters, node, defaultRouteLuidValues);
 	}
 }
 
 
-void NetworkInformation::Impl::saveAdapter(std::vector<NetworkAdapterInternal> &adapters,
-										   const PIP_ADAPTER_ADDRESSES			adapter,
-										   const int							ID,
-										   const std::unordered_set<ULONG64>   &defaultRouteLuidValues)
+void NetworkInformation::Impl::saveAdapter(std::vector<NetworkAdapterInternal> &adapters, const PIP_ADAPTER_ADDRESSES adapter,
+										   const std::unordered_set<ULONG64> &defaultRouteLuidValues)
 {
 	const std::string			adapterName = WStringToStdString(adapter->Description);
 
@@ -239,12 +197,13 @@ void NetworkInformation::Impl::saveAdapter(std::vector<NetworkAdapterInternal> &
 			std::string							   addressString	= sockaddrToString(unicast->Address.lpSockaddr);
 			std::string							   subnetMaskString = prefixLengthToSubnetMask(unicast->Address.lpSockaddr->sa_family, unicast->OnLinkPrefixLength);
 			const AdapterTypes					   type				= filterAdapterType(adapter->IfType);
-			std::string							   networkName		= getNetworkName(type, adapter->Luid, addressString);
+			std::string							   networkName		= networkNameOf(type, addressString);
 			const bool							   isDefaultRoute	= defaultRouteLuidValues.contains(adapter->Luid.Value);
 			const bool							   ipv4Enabled		= adapter->Flags & 0x80;
 			const netlink::AdapterPriorityInternal visibility		= determinePriority(isDefaultRoute, ipv4Enabled, type, adapter->OperStatus);
 
-			auto createdAdapter = NetworkAdapterInternal(adapterName, networkName, addressString, subnetMaskString, ID, isDefaultRoute, type, visibility);
+			auto createdAdapter = NetworkAdapterInternal(adapterName, networkName, addressString, subnetMaskString, makeAdapterId(adapter->Luid.Value, addressString),
+														 isDefaultRoute, type, visibility);
 
 			adapters.push_back(createdAdapter);
 		}
@@ -359,135 +318,6 @@ bool NetworkInformation::Impl::getDefaultInterfaces(std::vector<NET_LUID> &pLUID
 
 	FreeMibTable(routingTable);
 	return true;
-}
-
-
-std::string NetworkInformation::Impl::getHostName(const SOCKADDR *ip, const socklen_t ipLength)
-{
-	char nameBuffer[NI_MAXHOST];
-
-	if (const int result = getnameinfo(ip, ipLength, nameBuffer, NI_MAXHOST, nullptr, 0, NI_NAMEREQD); result != NULL)
-		return {};
-
-	return std::string(nameBuffer);
-}
-
-
-std::string NetworkInformation::Impl::getWifiSsid(const AdapterTypes type, const NET_LUID luid)
-{
-	std::string networkName = (type == AdapterTypes::Virtual) ? "Virtual WiFi" : "WiFi";
-
-	GUID		guid;
-	if (ConvertInterfaceLuidToGuid(&luid, &guid) != NOERROR)
-	{
-		NETLINK_LOG_ERROR("Could not convert network interface luid to guid!");
-		return networkName;
-	}
-
-	WlanHandle wlan;
-	DWORD	   negotiatedVersion;
-	if (WlanOpenHandle(2, nullptr, &negotiatedVersion, &wlan.h) != NOERROR)
-	{
-		NETLINK_LOG_ERROR("Could not create wlan handle!");
-		return networkName;
-	}
-
-	WlanQueryData queryData;
-	DWORD		  dataSize{};
-
-	if (const DWORD result = WlanQueryInterface(wlan.h, &guid, wlan_intf_opcode_current_connection, nullptr, &dataSize, &queryData.ptr, nullptr); result == ERROR_ACCESS_DENIED)
-	{
-		NETLINK_LOG_WARNING("Network access denied!");
-		return std::string("Please allow network access");
-	}
-	else if (result != NO_ERROR || !queryData.ptr)
-	{
-		NETLINK_LOG_ERROR("Could not access network ssid");
-		return networkName;
-	}
-
-	const auto *connection = static_cast<WLAN_CONNECTION_ATTRIBUTES *>(queryData.ptr);
-
-	if (connection->isState != wlan_interface_state_connected)
-		return std::string("Not Connected");
-
-	if (const auto &[uSSIDLength, ucSSID] = connection->wlanAssociationAttributes.dot11Ssid; uSSIDLength > 0)
-		networkName.assign(reinterpret_cast<const char *>(ucSSID), uSSIDLength);
-
-	return networkName;
-}
-
-
-std::string NetworkInformation::Impl::getNetworkGatename(const AdapterTypes type, const NET_LUID luid, const std::string &address)
-{
-	std::string networkName = (type == AdapterTypes::Virtual) ? "Virtual Ethernet" : "Ethernet";
-
-	NET_IFINDEX interfaceIndex;
-
-	if (ConvertInterfaceLuidToIndex(&luid, &interfaceIndex) != NOERROR)
-	{
-		NETLINK_LOG_ERROR("Could not convert network interface luid to index!");
-
-		if (!address.empty())
-			networkName += " (" + address + ")";
-
-		return networkName;
-	}
-
-	IpForwardTable table;
-	if (GetIpForwardTable2(AF_UNSPEC, &table.ptr) != NOERROR)
-	{
-		NETLINK_LOG_ERROR("Could not get IP routing table!");
-
-		if (!address.empty())
-			networkName += " (" + address + ")";
-
-		return networkName;
-	}
-
-	for (ULONG i = 0; i < table.ptr->NumEntries; ++i)
-	{
-		const auto &entry = table.ptr->Table[i];
-
-		if (entry.DestinationPrefix.PrefixLength != 0 || entry.InterfaceIndex != interfaceIndex)
-			continue;
-
-		const SOCKADDR_INET &ip = entry.NextHop;
-
-		if (ip.si_family != AF_INET && ip.si_family != AF_INET6)
-			continue;
-
-		std::string host{};
-
-		if (ip.si_family == AF_INET)
-			host = getHostName((SOCKADDR *)&ip, sizeof(ip.Ipv4));
-		else if (ip.si_family == AF_INET6)
-			host = getHostName((SOCKADDR *)&ip, sizeof(ip.Ipv6));
-
-		if (!host.empty())
-		{
-			networkName += " via " + host;
-			return networkName;
-		}
-	}
-
-	if (!address.empty())
-		return networkName + " (" + address + ")";
-
-	return networkName;
-}
-
-
-std::string NetworkInformation::Impl::getNetworkName(const AdapterTypes type, const NET_LUID luid, const std::string &address)
-{
-	std::string networkName = "";
-
-	if (type == AdapterTypes::WiFi)
-		networkName = getWifiSsid(type, luid);
-	else if (type == AdapterTypes::Ethernet)
-		networkName = getNetworkGatename(type, luid, address);
-
-	return networkName;
 }
 
 

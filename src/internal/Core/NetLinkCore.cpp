@@ -433,12 +433,10 @@ bool netlink::NetLinkCore::setActiveAdapter(const uint64_t adapterID)
 	{
 		std::lock_guard<std::mutex> lock(mNetworkMutex);
 
-		const auto				   &adapters = mNetwork.getAvailableNetworkAdapters();
+		enumerateAdapters();
 
-		if (adapters.empty())
-			enumerateAdapters();
-
-		const auto chosen = std::ranges::find_if(adapters, [adapterID](const auto &adapter) { return static_cast<uint64_t>(adapter.ID) == adapterID; });
+		const auto &adapters = mNetwork.getAvailableNetworkAdapters();
+		const auto	chosen	 = std::ranges::find_if(adapters, [adapterID](const auto &adapter) { return adapter.ID == adapterID; });
 
 		if (chosen == adapters.end())
 		{

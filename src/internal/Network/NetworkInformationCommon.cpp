@@ -13,7 +13,7 @@
 #include <ranges>
 
 
-bool netlink::NetworkInformation::setCurrentNetworkAdapter(const int adapterID)
+bool netlink::NetworkInformation::setCurrentNetworkAdapter(const uint64_t adapterID)
 {
 	const auto it = std::ranges::find_if(mNetworkAdapters, [adapterID](const NetworkAdapterInternal &a) { return a.ID == adapterID; });
 
