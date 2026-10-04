@@ -3,22 +3,40 @@
 #include <array>
 #include <vector>
 
+#include "Channel/Protocol/AckRanges.h"
 #include "Channel/Protocol/PacketHeader.h"
 
+using namespace netlink;
 using namespace netlink::channel;
 
 
 namespace ChannelTests
 {
 
-static PacketHeader makeDataHeader(uint64_t seq)
+static PacketHeader makeDataHeader(uint64_t seq, Lane lane = Lane::Reliable)
 {
 	PacketHeader header;
-	header.flags	   = PacketFlags::data(ChannelId::Application, true);
+	header.flags	   = PacketFlags::data(lane);
 	header.srcStreamID = 0xA1B2C3D4;
 	header.dstStreamID = 0x01020304;
 	header.seq		   = seq;
 	return header;
+}
+
+// The header of fragment `index` of a message of that length
+static PacketHeader makeFragmentHeader(uint32_t totalLength, uint16_t index, Lane lane = Lane::Reliable)
+{
+	PacketHeader header = makeDataHeader(10 + index, lane);
+	header.fragCount	= static_cast<uint16_t>(fragmentsOf(totalLength));
+	header.fragIndex	= index;
+	header.totalLength	= totalLength;
+	header.flags.setFragment(true, index + 1 == header.fragCount);
+	return header;
+}
+
+static std::vector<uint8_t> fullFragment()
+{
+	return std::vector<uint8_t>(MaxFragmentBody, 0xAB);
 }
 
 
@@ -45,17 +63,14 @@ TEST(PacketCodec, UnfragmentedRoundTrip)
 
 TEST(PacketCodec, EncodeHeader_MatchesEncodePacket)
 {
-	PacketHeader header = makeDataHeader(77);
+	PacketHeader header = makeFragmentHeader(5000, 0);
 	header.tag			= 5;
-	header.flags.setFragment(true, false);
-	header.fragIndex = 0;
-	header.fragCount = 3;
 
 	std::array<uint8_t, MaxHeaderSize> head{};
 	const size_t					   size = encodeHeader(header, head.data());
 
 	EXPECT_EQ(size, header.encodedSize());
-	EXPECT_EQ(size, MaxHeaderSize) << "The first fragment of a message carries both extensions";
+	EXPECT_EQ(size, MaxHeaderSize) << "The first fragment of a message carries every extension";
 	EXPECT_EQ(std::vector<uint8_t>(head.begin(), head.begin() + size), encodePacket(header)) << "A header sent in front of a separate body is the same header";
 }
 
@@ -66,7 +81,8 @@ TEST(PacketCodec, WireLayoutIsBigEndian)
 
 	EXPECT_EQ(datagram[0], 0x4E);
 	EXPECT_EQ(datagram[1], 0x4C);
-	EXPECT_EQ(datagram[2], ProtocolVersion);
+	EXPECT_EQ(datagram[2], 3) << "Protocol version 3";
+	EXPECT_EQ(datagram[3], 0x04) << "Data on the Reliable lane";
 	EXPECT_EQ(datagram[4], 0xA1);
 	EXPECT_EQ(datagram[7], 0xD4);
 	EXPECT_EQ(datagram[12], 0x01);
@@ -74,87 +90,69 @@ TEST(PacketCodec, WireLayoutIsBigEndian)
 }
 
 
-TEST(PacketCodec, FragmentExtensionRoundTrip)
+TEST(PacketCodec, FirstFragment_CarriesTagAndTotalLength)
 {
-	PacketHeader header = makeDataHeader(42);
-	header.flags.setFragment(true, false);
-	header.fragIndex = 3;
-	header.fragCount = 7;
+	PacketHeader header = makeFragmentHeader(5000, 0);
+	header.tag			= 0x01020304;
 
-	header.tag = 123; // not on the wire: only the first fragment carries it
+	const auto datagram = encodePacket(header, fullFragment());
+	ASSERT_EQ(datagram.size(), internal::MaxDatagramSize) << "A full fragment behind the largest header fills the datagram exactly";
 
-	const std::vector<uint8_t> body(100, 0xAB);
-	const auto				   datagram = encodePacket(header, body);
-	ASSERT_EQ(datagram.size(), BaseHeaderSize + FragmentExtensionSize + body.size());
+	auto decoded = decodePacket(datagram);
+	ASSERT_TRUE(decoded.has_value());
+	EXPECT_EQ(decoded->header.tag, 0x01020304u);
+	EXPECT_EQ(decoded->header.totalLength, 5000u);
+	EXPECT_EQ(decoded->header.fragCount, 5);
+	EXPECT_EQ(decoded->body.size(), MaxFragmentBody);
+	EXPECT_EQ(decoded->body.front(), 0xAB) << "The body starts behind the extensions";
+}
+
+
+TEST(PacketCodec, LaterFragments_CarryOnlyTheirPosition)
+{
+	PacketHeader header = makeFragmentHeader(5000, 3);
+	header.tag			= 123; // not on the wire
+
+	const auto datagram = encodePacket(header, fullFragment());
+	ASSERT_EQ(datagram.size(), BaseHeaderSize + FragmentExtensionSize + MaxFragmentBody);
 
 	auto decoded = decodePacket(datagram);
 	ASSERT_TRUE(decoded.has_value());
 	EXPECT_TRUE(decoded->header.flags.isFragmented());
 	EXPECT_EQ(decoded->header.fragIndex, 3);
-	EXPECT_EQ(decoded->header.fragCount, 7);
+	EXPECT_EQ(decoded->header.fragCount, 5);
+	EXPECT_EQ(decoded->header.tag, 0u);
+	EXPECT_EQ(decoded->header.totalLength, 0u);
+}
+
+
+TEST(PacketCodec, AckAndPing_CarryTheirLaneWithoutATag)
+{
+	PacketHeader ack;
+	ack.flags		   = PacketFlags::ack(Lane::Bulk, true);
+	ack.srcStreamID	   = 7;
+	ack.seq			   = 99;
+	ack.tag			   = 5; // not on the wire: an Ack starts no message
+
+	const auto body	   = encodeAck({.serial = 1, .mediaReceived = 2, .ranges = {{101, 3}}}, 10);
+	auto	   decoded = decodePacket(encodePacket(ack, body));
+	ASSERT_TRUE(decoded.has_value());
+	EXPECT_EQ(decoded->header.flags.kind(), PacketKind::Ack);
+	EXPECT_EQ(decoded->header.flags.lane(), Lane::Bulk) << "Every lane is acknowledged on its own";
+	EXPECT_TRUE(decoded->header.flags.isPaused());
+	EXPECT_EQ(decoded->header.seq, 99u);
 	EXPECT_EQ(decoded->header.tag, 0u);
 	EXPECT_EQ(decoded->body.size(), body.size());
-}
 
+	PacketHeader ping;
+	ping.flags				= PacketFlags::ping(Lane::Control);
+	ping.srcStreamID		= 7;
 
-TEST(PacketCodec, FirstFragmentCarriesTheTag)
-{
-	PacketHeader header = makeDataHeader(42);
-	header.flags.setFragment(true, false);
-	header.fragIndex = 0;
-	header.fragCount = 7;
-	header.tag		 = 0x01020304;
+	const auto pingDatagram = encodePacket(ping);
+	EXPECT_EQ(pingDatagram.size(), BaseHeaderSize);
+	EXPECT_TRUE(decodePacket(pingDatagram).has_value());
 
-	const std::vector<uint8_t> body(100, 0xAB);
-	const auto				   datagram = encodePacket(header, body);
-	ASSERT_EQ(datagram.size(), BaseHeaderSize + FragmentExtensionSize + TagExtensionSize + body.size());
-
-	auto decoded = decodePacket(datagram);
-	ASSERT_TRUE(decoded.has_value());
-	EXPECT_EQ(decoded->header.tag, 0x01020304u);
-	EXPECT_EQ(decoded->body.size(), body.size());
-	EXPECT_EQ(decoded->body.front(), 0xAB) << "The body starts behind the tag";
-}
-
-
-TEST(PacketCodec, UnreliableDataCarriesTheTag)
-{
-	PacketHeader header;
-	header.flags	   = PacketFlags::data(ChannelId::Application, false);
-	header.srcStreamID = 7;
-	header.seq		   = 3;
-	header.tag		   = 99;
-
-	auto decoded	   = decodePacket(encodePacket(header, std::vector<uint8_t>{1}));
-	ASSERT_TRUE(decoded.has_value());
-	EXPECT_FALSE(decoded->header.flags.isReliable());
-	EXPECT_EQ(decoded->header.tag, 99u);
-	EXPECT_EQ(decoded->body.size(), 1u);
-}
-
-
-TEST(PacketCodec, AcksCarryTheirSeqAndChannelWithoutATag)
-{
-	for (const PacketKind kind : {PacketKind::DataAck, PacketKind::AckAck})
-	{
-		PacketHeader header;
-		header.flags	   = PacketFlags::ack(kind, ChannelId::Application);
-		header.srcStreamID = 7;
-		header.seq		   = 99;
-		header.tag		   = 5; // not on the wire: acknowledgements start no message
-
-		const auto datagram = encodePacket(header);
-		EXPECT_EQ(datagram.size(), BaseHeaderSize);
-
-		auto decoded = decodePacket(datagram);
-		ASSERT_TRUE(decoded.has_value());
-		EXPECT_EQ(decoded->header.flags.kind(), kind);
-		EXPECT_EQ(decoded->header.flags.channel(), ChannelId::Application) << "Every channel is acknowledged on its own";
-		EXPECT_EQ(decoded->header.srcStreamID, 7u);
-		EXPECT_EQ(decoded->header.seq, 99u);
-		EXPECT_EQ(decoded->header.tag, 0u);
-		EXPECT_TRUE(decoded->body.empty());
-	}
+	EXPECT_FALSE(decodePacket(encodePacket(ping, std::vector<uint8_t>{1})).has_value()) << "A Ping has no body";
 }
 
 
@@ -166,11 +164,11 @@ TEST(PacketCodec, RejectsForeignOrBrokenDatagrams)
 
 	auto badMagic = valid;
 	badMagic[0]	  = 'X';
-	EXPECT_FALSE(decodePacket(badMagic).has_value()) << "Not our protocol (e.g. a JSON datagram of an older build)";
+	EXPECT_FALSE(decodePacket(badMagic).has_value()) << "Not our protocol";
 
-	auto badVersion = valid;
-	badVersion[2]	= ProtocolVersion + 1;
-	EXPECT_FALSE(decodePacket(badVersion).has_value());
+	auto newerVersion = valid;
+	newerVersion[2]	  = ProtocolVersion + 1;
+	EXPECT_FALSE(decodePacket(newerVersion).has_value());
 
 	auto olderVersion = valid;
 	olderVersion[2]	  = ProtocolVersion - 1;
@@ -179,13 +177,20 @@ TEST(PacketCodec, RejectsForeignOrBrokenDatagrams)
 	auto noTag = encodePacket(makeDataHeader(1));
 	EXPECT_FALSE(decodePacket(std::span(noTag.data(), BaseHeaderSize + 2)).has_value()) << "A Data packet that starts a message without its whole tag";
 
-	auto reservedFlags = valid;
-	reservedFlags[3] |= 0x80;
-	EXPECT_FALSE(decodePacket(reservedFlags).has_value());
+	auto encrypted = valid;
+	encrypted[3] |= 0x80;
+	EXPECT_FALSE(decodePacket(encrypted).has_value());
 
 	PacketHeader noStreamID = makeDataHeader(1);
 	noStreamID.srcStreamID	= 0;
 	EXPECT_FALSE(decodePacket(encodePacket(noStreamID)).has_value());
+
+	EXPECT_FALSE(decodePacket(encodePacket(makeDataHeader(0))).has_value()) << "Data seqs start at 1";
+
+	PacketHeader beacon;
+	beacon.flags	   = PacketFlags{}.setKind(PacketKind::Beacon);
+	beacon.srcStreamID = 7;
+	EXPECT_FALSE(decodePacket(encodePacket(beacon)).has_value()) << "A beacon is not a packet of a link";
 }
 
 
@@ -193,47 +198,73 @@ TEST(PacketCodec, OversizedDatagram_IsDropped)
 {
 	const PacketHeader		   header = makeDataHeader(1);
 
-	const std::vector<uint8_t> fits(netlink::internal::MaxDatagramSize - header.encodedSize());
-	EXPECT_TRUE(decodePacket(encodePacket(header, fits)).has_value()) << "A full datagram, the largest one a link sends";
+	const std::vector<uint8_t> fits(MaxFragmentBody);
+	EXPECT_TRUE(decodePacket(encodePacket(header, fits)).has_value()) << "The largest body a link sends in one piece";
 
-	const std::vector<uint8_t> tooLarge(fits.size() + 1);
-	EXPECT_FALSE(decodePacket(encodePacket(header, tooLarge)).has_value()) << "One byte more than any link sends";
+	const std::vector<uint8_t> tooLong(MaxFragmentBody + 1);
+	EXPECT_FALSE(decodePacket(encodePacket(header, tooLong)).has_value()) << "A sender would have fragmented it";
+
+	const std::vector<uint8_t> tooLarge(internal::MaxDatagramSize);
+	EXPECT_FALSE(decodePacket(encodePacket(header, tooLarge)).has_value()) << "More than any link puts into a datagram";
 }
 
 
-TEST(PacketCodec, FragmentCountBeyondTheLargestMessage_IsRejected)
+TEST(PacketCodec, FragmentCount_MustMatchTheTotalLength)
 {
-	PacketHeader header = makeDataHeader(5);
-	header.flags.setFragment(true, false);
-	header.fragIndex = 0;
+	PacketHeader header = makeFragmentHeader(5000, 0);
+	EXPECT_TRUE(decodePacket(encodePacket(header, fullFragment())).has_value());
 
-	header.fragCount = static_cast<uint16_t>(MaxFragmentCount);
-	EXPECT_TRUE(decodePacket(encodePacket(header)).has_value()) << "The fragments of a 16 MiB message";
+	header.fragCount = 6;
+	EXPECT_FALSE(decodePacket(encodePacket(header, fullFragment())).has_value()) << "5000 bytes are 5 fragments, not 6";
 
-	header.fragCount = static_cast<uint16_t>(MaxFragmentCount + 1);
-	EXPECT_FALSE(decodePacket(encodePacket(header)).has_value());
+	header			   = makeFragmentHeader(5000, 0);
+	header.totalLength = static_cast<uint32_t>(internal::MaxMessagePayload + 1);
+	header.fragCount   = static_cast<uint16_t>(fragmentsOf(header.totalLength));
+	EXPECT_FALSE(decodePacket(encodePacket(header, fullFragment())).has_value()) << "Larger than the largest message";
 
-	header.fragCount = UINT16_MAX;
-	EXPECT_FALSE(decodePacket(encodePacket(header)).has_value());
+	// The largest message there is
+	header = makeFragmentHeader(static_cast<uint32_t>(internal::MaxMessagePayload), 0);
+	EXPECT_TRUE(decodePacket(encodePacket(header, fullFragment())).has_value());
+
+	// Later fragments carry no length, but no lane has more fragments than its largest message needs
+	header			 = makeFragmentHeader(5000, 1);
+	header.fragCount = static_cast<uint16_t>(fragmentsOf(internal::MaxMessagePayload) + 1);
+	EXPECT_FALSE(decodePacket(encodePacket(header, fullFragment())).has_value());
 }
 
 
-TEST(PacketCodec, RejectsInconsistentFragmentExtension)
+TEST(PacketCodec, MediaMessages_AreLimitedToTheirOwnSize)
 {
-	PacketHeader header = makeDataHeader(5);
+	PacketHeader header = makeFragmentHeader(static_cast<uint32_t>(internal::MaxMediaPayload), 0, Lane::Media);
+	EXPECT_TRUE(decodePacket(encodePacket(header, fullFragment())).has_value());
+
+	header = makeFragmentHeader(static_cast<uint32_t>(internal::MaxMediaPayload + 1), 0, Lane::Media);
+	EXPECT_FALSE(decodePacket(encodePacket(header, fullFragment())).has_value()) << "Fine on a reliable lane, too large for Media";
+}
+
+
+TEST(PacketCodec, RejectsInconsistentFragments)
+{
+	PacketHeader			   header = makeFragmentHeader(5000, 4);
+	const std::vector<uint8_t> tail(5000 - 4 * MaxFragmentBody);
+	EXPECT_TRUE(decodePacket(encodePacket(header, tail)).has_value());
+
 	header.flags.setFragment(true, false);
-	header.fragIndex = 1;
-	header.fragCount = 2; // index 1 of 2 is the last one, but the flag says otherwise
+	EXPECT_FALSE(decodePacket(encodePacket(header, tail)).has_value()) << "Index 4 of 5 is the last one, but the flag says otherwise";
 
-	EXPECT_FALSE(decodePacket(encodePacket(header)).has_value());
+	header			 = makeFragmentHeader(5000, 4);
+	header.fragIndex = 5;
+	EXPECT_FALSE(decodePacket(encodePacket(header, tail)).has_value()) << "Index out of range";
 
+	header = makeFragmentHeader(5000, 2);
+	EXPECT_FALSE(decodePacket(encodePacket(header, tail)).has_value()) << "Every fragment but the last one is full";
+
+	header			 = makeFragmentHeader(5000, 0);
+	header.fragCount = 1;
 	header.flags.setFragment(true, true);
-	EXPECT_TRUE(decodePacket(encodePacket(header)).has_value());
+	EXPECT_FALSE(decodePacket(encodePacket(header, tail)).has_value()) << "A message of one fragment is not fragmented";
 
-	header.fragIndex = 2; // out of range
-	EXPECT_FALSE(decodePacket(encodePacket(header)).has_value());
-
-	auto truncated = encodePacket(header);
+	auto truncated = encodePacket(makeFragmentHeader(5000, 2), fullFragment());
 	EXPECT_FALSE(decodePacket(std::span(truncated.data(), BaseHeaderSize + 2)).has_value()) << "Fragment flag without the extension";
 }
 

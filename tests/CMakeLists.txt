@@ -13,13 +13,14 @@ set(Channel_Tests
     ${Test_Directory}/ChannelTests/PacketFlagsTests.cpp
     ${Test_Directory}/ChannelTests/PacketCodecTests.cpp
     ${Test_Directory}/ChannelTests/AckRangesTests.cpp
-    ${Test_Directory}/ChannelTests/BoundedQueueTests.cpp
     ${Test_Directory}/ChannelTests/SequenceBufferTests.cpp
     ${Test_Directory}/ChannelTests/RttEstimatorTests.cpp
     ${Test_Directory}/ChannelTests/FragmentationServiceTests.cpp
     ${Test_Directory}/ChannelTests/MessageAssemblerTests.cpp
+    ${Test_Directory}/ChannelTests/MediaAssemblerTests.cpp
     ${Test_Directory}/ChannelTests/HeartbeatServiceTests.cpp
     ${Test_Directory}/ChannelTests/ReliableLinkTests.cpp
+    ${Test_Directory}/ChannelTests/LinkMemoryTests.cpp
     ${Test_Directory}/ChannelTests/SignalPacketTests.cpp
     ${Test_Directory}/ChannelTests/MailboxTests.cpp
     ${Test_Directory}/ChannelTests/SendSchedulerTests.cpp
@@ -62,6 +63,7 @@ set(Test_Fakes
     ${Test_Directory}/Fakes/LossyDatagramSocket.h
     ${Test_Directory}/Fakes/SpyDatagramSocket.h
     ${Test_Directory}/Fakes/SimDriver.h
+    ${Test_Directory}/Fakes/QueueSource.h
     ${Test_Directory}/Fakes/SpyDeadlineTimer.h
 )
 

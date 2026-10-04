@@ -394,7 +394,7 @@ protected:
 
 		NetLinkCoreDependencies dependencies;
 		dependencies.datagramSocketFactory					  = FakeNet::LossyDatagramSocket::wrap(cuttable(network->factory(address), address), profile);
-		dependencies.channelConfig.reliability.failureTimeout = std::chrono::seconds{20};
+		dependencies.channelConfig.timings.peerTimeout		  = std::chrono::seconds{20};
 		return dependencies;
 	}
 };

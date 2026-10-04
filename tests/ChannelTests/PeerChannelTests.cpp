@@ -42,12 +42,11 @@ bool waitUntilTrue(Predicate predicate, std::chrono::milliseconds timeout = 3s)
 static PeerChannelConfig fastConfig()
 {
 	PeerChannelConfig config;
-	config.reliability.initialRto	  = 50ms;
-	config.reliability.minRto		  = 10ms;
-	config.reliability.maxRto		  = 100ms;
-	config.reliability.failureTimeout = 500ms;
-	config.heartbeat.interval		  = 50ms;
-	config.heartbeat.silenceTimeout	  = 400ms;
+	config.timings.initialRto  = 50ms;
+	config.timings.minRto	   = 10ms;
+	config.timings.maxRto	   = 100ms;
+	config.timings.peerTimeout = 500ms;
+	config.timings.keepAlive   = 50ms;
 	return config;
 }
 
@@ -441,7 +440,13 @@ TEST_F(PeerChannelTest, UnreliableMessages_AreDelivered)
 		ASSERT_TRUE(pcA->sendMessage("pc-b", i, payload(8, 0), DeliveryMode::UnreliableSequenced));
 
 	EXPECT_TRUE(waitUntilTrue([this] { return atB.messageCount() == 10; })) << "Without loss every unreliable message arrives";
-	EXPECT_FALSE(pcA->sendMessage("pc-b", 1, payload(2000, 0), DeliveryMode::UnreliableSequenced)) << "An unreliable message must fit into one datagram";
+
+	const auto large = payload(40'000, 5);
+	ASSERT_TRUE(pcA->sendMessage("pc-b", 11, large, DeliveryMode::UnreliableSequenced)) << "Larger ones are sent in several datagrams";
+	ASSERT_TRUE(waitUntilTrue([this] { return atB.messageCount() == 11; }));
+	EXPECT_EQ(atB.receivedMessages().back().data, large);
+
+	EXPECT_FALSE(pcA->sendMessage("pc-b", 1, payload(internal::MaxMediaPayload + 1, 0), DeliveryMode::UnreliableSequenced)) << "... up to a limit";
 }
 
 
@@ -522,14 +527,13 @@ TEST_F(PeerChannelTest, BurstLargerThanTheCongestionWindow_IsDeliveredCompletely
 class SmallQueuePeerChannelTest : public PeerChannelTest
 {
 protected:
-	static constexpr size_t QueueCapacity = 8;
+	static constexpr size_t	 QueueCapacity = 8; // messages of 8 bytes
 
 	static PeerChannelConfig smallQueueConfig()
 	{
 		PeerChannelConfig config			 = fastConfig();
-		config.reliability.sendQueueCapacity = QueueCapacity;
-		config.reliability.sendQueueOverflow = OverflowPolicy::DropNewest;
-		config.reliability.failureTimeout	 = 30s; // the link must outlive the time B is stopped
+		config.sendQueueBytes				 = QueueCapacity * 8;
+		config.timings.peerTimeout			 = 30s; // the link must outlive the time B is stopped
 		return config;
 	}
 
@@ -711,7 +715,7 @@ TEST_F(PeerChannelTest, IdleChannel_DoesNotWakeUp)
 TEST_F(PeerChannelTest, ExceptionOnTheIoThread_ReportsEveryPeerLostAndWakesWaiters)
 {
 	PeerChannelConfig config		  = fastConfig();
-	config.reliability.failureTimeout = 30s; // the link itself must not give up during the test
+	config.timings.peerTimeout		  = 30s; // the link itself must not give up during the test
 	spyOnA(config);
 
 	ASSERT_TRUE(pcA->sendMessage("pc-b", 1, payload(8, 1), DeliveryMode::ReliableOrdered));
@@ -761,10 +765,9 @@ TEST_F(PeerChannelTest, BlockedMessageCallback_DoesNotHoldUpTheIoLoop)
 
 TEST_F(PeerChannelTest, SlowApplication_PausesItsSenderInsteadOfPilingUpMessages)
 {
-	// B may hold 64 KiB of undelivered payload before it asks its senders to pause
-	PeerChannelConfig config	= fastConfig();
-	config.deliveryBacklogLimit = 64 * 1024;
-	config.reliability.failureTimeout = 30s;
+	PeerChannelConfig config   = fastConfig();
+	config.timings.peerTimeout = 30s;
+	config.maxSendRate		   = 0; // as fast as the test machine goes: only the pause can hold A back
 
 	pcA->deinit();
 	pcB->deinit();
@@ -772,28 +775,30 @@ TEST_F(PeerChannelTest, SlowApplication_PausesItsSenderInsteadOfPilingUpMessages
 
 	atB.holdMessages();
 
-	constexpr uint32_t Messages = 300;
-	for (uint32_t i = 0; i < Messages; ++i)
-		ASSERT_TRUE(pcA->sendMessage("pc-b", i, payload(8 * 1024, static_cast<uint8_t>(i)), DeliveryMode::ReliableOrdered));
+	// Twice what B keeps for an application that does not take its messages
+	constexpr size_t   MessageSize = 1024 * 1024;
+	constexpr uint32_t Messages	   = 2 * channel::BacklogPauseBytes / MessageSize;
 
-	// 2.4 MiB are waiting at A. B took what was on the way when it noticed, and from then on only a trickle.
-	EXPECT_FALSE(pcA->flush("pc-b", 500ms)) << "B's application is stuck: A must be held back instead of handing everything over";
+	for (uint32_t i = 0; i < Messages; ++i)
+		ASSERT_TRUE(pcA->sendMessage("pc-b", i, payload(MessageSize, static_cast<uint8_t>(i)), DeliveryMode::ReliableOrdered, 10s));
+
+	EXPECT_FALSE(pcA->flush("pc-b", 2s)) << "B's application is stuck: A must be held back instead of handing everything over";
 	EXPECT_TRUE(atA.lost().empty()) << "A paused peer is not a lost peer";
 
 	// Control signals still get through
 	ASSERT_TRUE(pcA->sendConnectRequest("pc-b"));
 	ASSERT_TRUE(pcB->sendReadyFlag("pc-a"));
-	EXPECT_TRUE(waitUntilTrue([this] { return atA.readyFlags.load() == 1; })) << "Only the application channel is paused";
+	EXPECT_TRUE(waitUntilTrue([this] { return atA.readyFlags.load() == 1; })) << "Only the application lanes are paused";
 
 	atB.releaseMessages();
 
-	ASSERT_TRUE(waitUntilTrue([this] { return atB.messageCount() == Messages; }, 20s)) << "Only " << atB.messageCount() << " arrived after the application caught up";
+	ASSERT_TRUE(waitUntilTrue([this] { return atB.messageCount() == Messages; }, 30s)) << "Only " << atB.messageCount() << " arrived after the application caught up";
 
 	const auto messages = atB.receivedMessages();
 	for (uint32_t i = 0; i < Messages; ++i)
 	{
 		ASSERT_EQ(messages[i].type, i) << "Order broken at " << i;
-		ASSERT_EQ(messages[i].data, payload(8 * 1024, static_cast<uint8_t>(i)));
+		ASSERT_EQ(messages[i].data, payload(MessageSize, static_cast<uint8_t>(i)));
 	}
 
 	EXPECT_TRUE(pcA->flush("pc-b", 5s));
@@ -924,8 +929,7 @@ protected:
 
 		// At 30% loss per direction a link must not be given up on as quickly as the other tests want it
 		PeerChannelConfig	 config		  = fastConfig();
-		config.reliability.failureTimeout = 10s;
-		config.heartbeat.silenceTimeout	  = 5s;
+		config.timings.peerTimeout		  = 10s;
 
 		connect(FakeNet::LossyDatagramSocket::wrap(network->factory("10.0.0.1"), profileA), FakeNet::LossyDatagramSocket::wrap(network->factory("10.0.0.2"), profileB), config);
 	}

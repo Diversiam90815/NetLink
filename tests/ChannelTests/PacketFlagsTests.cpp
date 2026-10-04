@@ -8,114 +8,97 @@ using namespace netlink::channel;
 namespace ChannelTests
 {
 
-TEST(PacketFlags, DefaultIsAnUnreliableControlDataPacket)
+TEST(PacketFlags, DefaultIsAControlDataPacket)
 {
-	PacketFlags flags;
+	const PacketFlags flags;
 
 	EXPECT_EQ(flags.raw(), 0);
 	EXPECT_EQ(flags.kind(), PacketKind::Data);
-	EXPECT_FALSE(flags.isReliable());
+	EXPECT_EQ(flags.lane(), Lane::Control);
 	EXPECT_FALSE(flags.isFragmented());
 	EXPECT_FALSE(flags.isLastFragment());
-	EXPECT_EQ(flags.channel(), ChannelId::Control);
+	EXPECT_FALSE(flags.isPaused());
 	EXPECT_TRUE(flags.isValid());
 }
 
 
-TEST(PacketFlags, EveryKindFitsIntoTheLowThreeBits)
+TEST(PacketFlags, KindAndLaneShareTheLowFourBits)
 {
-	for (auto kind : {PacketKind::Data, PacketKind::DataAck, PacketKind::AckAck, PacketKind::Heartbeat})
+	for (const auto kind : {PacketKind::Data, PacketKind::Ack, PacketKind::Ping})
 	{
-		PacketFlags flags;
-		flags.setKind(kind);
+		for (const auto lane : {Lane::Control, Lane::Reliable, Lane::Bulk, Lane::Media})
+		{
+			const auto flags = PacketFlags{}.setKind(kind).setLane(lane);
 
-		EXPECT_EQ(flags.kind(), kind);
-		EXPECT_EQ(flags.raw() & ~PacketFlags::KindMask, 0) << "The kind must not touch any flag bit";
+			EXPECT_EQ(flags.kind(), kind);
+			EXPECT_EQ(flags.lane(), lane);
+			EXPECT_EQ(flags.raw() & 0xF0, 0) << "Neither touches the flag bits";
+		}
 	}
+
+	EXPECT_EQ(PacketFlags{}.setKind(PacketKind::Ack).setLane(Lane::Bulk).raw(), 0x09) << "kind in bits 0-1, lane in bits 2-3";
 }
 
 
 TEST(PacketFlags, BitsAreSetAndClearedIndependently)
 {
-	PacketFlags flags = PacketFlags::data(ChannelId::Application, true);
-	flags.setFragment(true, true);
+	PacketFlags flags = PacketFlags::data(Lane::Reliable);
 
-	EXPECT_EQ(flags.raw(), (1u << 3) | (1u << 4) | (1u << 5) | (1u << 6)) << "Wire layout: reliable=bit3, fragmented=bit4, last=bit5, application=bit6";
-	EXPECT_TRUE(flags.isReliable());
+	flags.setFragment(true, false);
 	EXPECT_TRUE(flags.isFragmented());
+	EXPECT_FALSE(flags.isLastFragment());
+
+	flags.setFragment(true, true);
 	EXPECT_TRUE(flags.isLastFragment());
-	EXPECT_EQ(flags.channel(), ChannelId::Application);
+	EXPECT_EQ(flags.lane(), Lane::Reliable) << "Setting one field must not disturb another";
+	EXPECT_EQ(flags.kind(), PacketKind::Data);
 
-	flags.setReliable(false);
-	EXPECT_FALSE(flags.isReliable());
-	EXPECT_TRUE(flags.isFragmented()) << "Clearing one bit must leave the others alone";
-
-	flags.setChannel(ChannelId::Control);
-	EXPECT_EQ(flags.channel(), ChannelId::Control);
-
-	flags.setKind(PacketKind::AckAck);
-	EXPECT_EQ(flags.kind(), PacketKind::AckAck);
-	EXPECT_TRUE(flags.isFragmented()) << "Changing the kind must leave the flag bits alone";
-}
-
-
-TEST(PacketFlags, LastFragmentRequiresFragmented)
-{
-	PacketFlags flags;
 	flags.setFragment(false, true);
-
-	EXPECT_FALSE(flags.isLastFragment()) << "An unfragmented packet is never flagged as a last fragment";
+	EXPECT_FALSE(flags.isFragmented());
+	EXPECT_FALSE(flags.isLastFragment()) << "Only a fragment can be the last one";
 }
 
 
 TEST(PacketFlags, FactoriesProduceValidFlags)
 {
-	EXPECT_TRUE(PacketFlags::data(ChannelId::Control, true).isValid());
-	EXPECT_TRUE(PacketFlags::data(ChannelId::Application, false).isValid());
-	EXPECT_TRUE(PacketFlags::ack(PacketKind::DataAck, ChannelId::Control).isValid());
-	EXPECT_TRUE(PacketFlags::ack(PacketKind::AckAck, ChannelId::Application).isValid());
-	EXPECT_EQ(PacketFlags::ack(PacketKind::DataAck, ChannelId::Application).channel(), ChannelId::Application);
-	EXPECT_EQ(PacketFlags::ack(PacketKind::AckAck, ChannelId::Control).channel(), ChannelId::Control);
-	EXPECT_TRUE(PacketFlags::heartbeat().isValid());
-}
+	for (const auto lane : {Lane::Control, Lane::Reliable, Lane::Bulk, Lane::Media})
+		EXPECT_TRUE(PacketFlags::data(lane).isValid());
 
+	for (const auto lane : {Lane::Control, Lane::Reliable, Lane::Bulk})
+	{
+		EXPECT_TRUE(PacketFlags::ack(lane).isValid());
+		EXPECT_TRUE(PacketFlags::ack(lane, true).isValid());
+		EXPECT_TRUE(PacketFlags::ack(lane, true).isPaused());
+		EXPECT_FALSE(PacketFlags::ack(lane).isPaused());
+		EXPECT_TRUE(PacketFlags::ping(lane).isValid());
+	}
 
-TEST(PacketFlags, ReservedKindsAndBitsAreRejected)
-{
-	for (uint8_t kind = 4; kind <= 7; ++kind)
-		EXPECT_FALSE(PacketFlags::fromRaw(kind).isValid()) << "Kind " << int(kind) << " is reserved";
-
-	EXPECT_FALSE(PacketFlags::fromRaw(0x80).isValid()) << "Bit 7 is reserved";
+	EXPECT_TRUE(PacketFlags::data(Lane::Media).setFragment(true, false).isValid()) << "Media messages are fragmented as well";
 }
 
 
 TEST(PacketFlags, ImpossibleCombinationsAreRejected)
 {
-	PacketFlags lastWithoutFragmented = PacketFlags::fromRaw(static_cast<uint8_t>(FlagBit::LastFragment) | static_cast<uint8_t>(FlagBit::Reliable));
-	EXPECT_FALSE(lastWithoutFragmented.isValid());
+	EXPECT_FALSE(PacketFlags::fromRaw(0x80).isValid()) << "Encrypted datagrams are not understood by this version";
 
-	PacketFlags unreliableFragment = PacketFlags::data(ChannelId::Application, false);
-	unreliableFragment.set(FlagBit::Fragmented);
-	EXPECT_FALSE(unreliableFragment.isValid()) << "Only reliable data is fragmented";
+	EXPECT_FALSE(PacketFlags::data(Lane::Reliable).set(FlagBit::LastFragment).isValid()) << "Last fragment of nothing";
+	EXPECT_FALSE(PacketFlags::ack(Lane::Reliable).set(FlagBit::Fragmented).isValid()) << "Only Data is fragmented";
+	EXPECT_FALSE(PacketFlags::ping(Lane::Reliable).set(FlagBit::Fragmented).isValid());
 
-	PacketFlags fragmentedAck = PacketFlags::ack(PacketKind::DataAck, ChannelId::Control);
-	fragmentedAck.set(FlagBit::Fragmented);
-	EXPECT_FALSE(fragmentedAck.isValid()) << "Acknowledgements carry no content to fragment";
+	EXPECT_FALSE(PacketFlags::data(Lane::Reliable).set(FlagBit::Paused).isValid()) << "Only an Ack asks for a pause";
+	EXPECT_FALSE(PacketFlags::ping(Lane::Reliable).set(FlagBit::Paused).isValid());
 
-	PacketFlags unreliableAck;
-	unreliableAck.setKind(PacketKind::DataAck);
-	EXPECT_FALSE(unreliableAck.isValid()) << "Only reliable packets are acknowledged";
+	EXPECT_FALSE(PacketFlags::ack(Lane::Media).isValid()) << "Media is never acknowledged";
+	EXPECT_FALSE(PacketFlags::ping(Lane::Media).isValid());
 
-	PacketFlags reliableHeartbeat = PacketFlags::heartbeat();
-	reliableHeartbeat.setReliable();
-	EXPECT_FALSE(reliableHeartbeat.isValid()) << "Heartbeats are never acknowledged";
+	EXPECT_TRUE(PacketFlags{}.setKind(PacketKind::Beacon).isValid());
+	EXPECT_FALSE(PacketFlags{}.setKind(PacketKind::Beacon).setLane(Lane::Reliable).isValid()) << "A beacon belongs to no lane";
 }
 
 
 TEST(PacketFlags, RawRoundTrip)
 {
-	PacketFlags flags = PacketFlags::data(ChannelId::Application, true).setFragment(true, false);
-
+	const auto flags = PacketFlags::data(Lane::Bulk).setFragment(true, true);
 	EXPECT_EQ(PacketFlags::fromRaw(flags.raw()), flags);
 }
 

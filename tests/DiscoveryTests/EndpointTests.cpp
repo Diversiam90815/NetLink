@@ -126,12 +126,23 @@ TEST(DiscoveryEndpoint, JsonKeys)
 TEST(DiscoveryEndpoint, FromJsonMissingNameField)
 {
 	// The "name" field is optional in from_json — must not throw
-	nlohmann::json	  j = {{"ip", "1.2.3.4"}, {"port", 42}};
+	nlohmann::json	  j = {{"v", DiscoveryVersion}, {"ip", "1.2.3.4"}, {"port", 42}};
 	DiscoveryEndpoint ep;
 	EXPECT_NO_THROW(ep = j.get<DiscoveryEndpoint>()) << "Deserializing a JSON object without a 'name' field must not throw";
 	EXPECT_EQ(ep.IPAddress, ipv4("1.2.3.4")) << "IPAddress must be read correctly even when 'name' is absent";
 	EXPECT_EQ(ep.port, 42) << "port must be read correctly even when 'name' is absent";
 	EXPECT_EQ(ep.displayName, "") << "displayName must default to empty when the 'name' key is absent from JSON";
+}
+
+
+TEST(DiscoveryEndpoint, AnnouncementOfAnotherVersion_IsNotUnderstood)
+{
+	for (const nlohmann::json &j : {nlohmann::json{{"ip", "1.2.3.4"}, {"port", 42}, {"name", "old"}}, nlohmann::json{{"v", DiscoveryVersion + 1}, {"ip", "1.2.3.4"}, {"port", 42}}})
+	{
+		DiscoveryEndpoint ep;
+		EXPECT_NO_THROW(ep = j.get<DiscoveryEndpoint>());
+		EXPECT_FALSE(ep.isValid()) << "A build that speaks another channel protocol must not show up as a peer: " << j.dump();
+	}
 }
 
 } // namespace DiscoveryTests

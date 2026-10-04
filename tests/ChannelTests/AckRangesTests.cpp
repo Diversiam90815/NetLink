@@ -71,51 +71,65 @@ TEST(AckRanges, ARange_HoldsAtMost65535Seqs)
 
 TEST(AckRanges, RoundTripOverTheWire)
 {
-	const std::vector<SeqRange> ranges{{1, 3}, {0x0102030405060708ull, 500}, {99, 1}};
+	const AckBody ack{.serial = 0x01020304, .mediaReceived = 77, .ranges = {{3, 3}, {0x0102030405060708ull, 500}, {99, 1}}};
 
-	std::vector<uint8_t>		body;
-	for (const auto &range : ranges)
-		appendRange(body, range);
+	const auto	  body = encodeAck(ack, 10);
 
-	ASSERT_EQ(body.size(), ranges.size() * SeqRangeSize);
-	EXPECT_EQ(body[SeqRangeSize], 0x01) << "Big endian, like the packet header";
-	EXPECT_EQ(body[SeqRangeSize + 7], 0x08);
+	ASSERT_EQ(body.size(), AckFieldsSize + ack.ranges.size() * SeqRangeSize);
+	EXPECT_EQ(body[0], 0x01) << "Big endian, like the packet header";
+	EXPECT_EQ(body[3], 0x04);
+	EXPECT_EQ(body[AckFieldsSize + SeqRangeSize], 0x01);
+	EXPECT_EQ(body[AckFieldsSize + SeqRangeSize + 7], 0x08);
 
-	const auto decoded = decodeRanges(body);
+	const auto decoded = decodeAck(body);
 	ASSERT_TRUE(decoded.has_value());
-	EXPECT_EQ(*decoded, ranges);
+	EXPECT_EQ(decoded->serial, ack.serial);
+	EXPECT_EQ(decoded->mediaReceived, 77u);
+	EXPECT_EQ(decoded->ranges, ack.ranges);
 }
 
 
-TEST(AckRanges, EmptyBody_IsNoRanges)
+TEST(AckRanges, AckWithoutRanges_IsOnlyItsTwoFields)
 {
-	const auto decoded = decodeRanges({});
+	const auto body = encodeAck({.serial = 5, .mediaReceived = 0, .ranges = {}}, 10);
+	EXPECT_EQ(body.size(), AckFieldsSize);
+
+	const auto decoded = decodeAck(body);
+	ASSERT_TRUE(decoded.has_value());
+	EXPECT_EQ(decoded->serial, 5u);
+	EXPECT_TRUE(decoded->ranges.empty());
+}
+
+
+TEST(AckRanges, MoreRangesThanFit_KeepsTheLowestSeqs)
+{
+	AckBody ack;
+	for (uint64_t i = 0; i < 20; ++i)
+		ack.ranges.push_back({10 + i * 2, 1});
+
+	const auto decoded = decodeAck(encodeAck(ack, 5));
 
 	ASSERT_TRUE(decoded.has_value());
-	EXPECT_TRUE(decoded->empty());
+	ASSERT_EQ(decoded->ranges.size(), 5u);
+	EXPECT_EQ(decoded->ranges.front().first, 10u);
+	EXPECT_EQ(decoded->ranges.back().first, 18u) << "The sender needs the oldest gaps first";
 }
 
 
 TEST(AckRanges, RejectsBrokenBodies)
 {
-	std::vector<uint8_t> body;
-	appendRange(body, {5, 2});
+	const auto body = encodeAck({.serial = 1, .mediaReceived = 0, .ranges = {{5, 2}}}, 10);
+	ASSERT_TRUE(decodeAck(body).has_value());
 
 	auto truncated = body;
 	truncated.pop_back();
-	EXPECT_FALSE(decodeRanges(truncated).has_value()) << "Not a whole number of ranges";
+	EXPECT_FALSE(decodeAck(truncated).has_value()) << "Not a whole number of ranges";
 
-	std::vector<uint8_t> emptyRange;
-	appendRange(emptyRange, {5, 0});
-	EXPECT_FALSE(decodeRanges(emptyRange).has_value()) << "Empty ranges are never sent";
+	EXPECT_FALSE(decodeAck(std::span(body.data(), AckFieldsSize - 1)).has_value()) << "Without its two fields";
 
-	std::vector<uint8_t> seqZero;
-	appendRange(seqZero, {0, 3});
-	EXPECT_FALSE(decodeRanges(seqZero).has_value()) << "Seqs start at 1";
-
-	std::vector<uint8_t> wrapping;
-	appendRange(wrapping, {UINT64_MAX - 1, 5});
-	EXPECT_FALSE(decodeRanges(wrapping).has_value()) << "A range must not wrap around";
+	EXPECT_FALSE(decodeAck(encodeAck({.serial = 1, .mediaReceived = 0, .ranges = {{5, 0}}}, 10)).has_value()) << "Empty ranges are never sent";
+	EXPECT_FALSE(decodeAck(encodeAck({.serial = 1, .mediaReceived = 0, .ranges = {{0, 3}}}, 10)).has_value()) << "Seqs start at 1";
+	EXPECT_FALSE(decodeAck(encodeAck({.serial = 1, .mediaReceived = 0, .ranges = {{UINT64_MAX - 1, 5}}}, 10)).has_value()) << "A range must not wrap around";
 }
 
 } // namespace ChannelTests

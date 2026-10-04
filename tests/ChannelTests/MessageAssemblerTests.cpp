@@ -3,7 +3,6 @@
 #include <optional>
 #include <vector>
 
-#include "Channel/Fragmentation/FragmentationService.h"
 #include "Channel/Fragmentation/MessageAssembler.h"
 
 using namespace netlink;
@@ -16,10 +15,12 @@ namespace ChannelTests
 class MessageAssemblerTest : public ::testing::Test
 {
 protected:
-	static constexpr size_t		MaxBody = 100;
-
-	// Fragments of these tests are cut small
-	MessageAssembler			assembler{internal::MaxMessagePayload, MaxBody};
+	// One packet of a stream, as a link would send it
+	struct Packet
+	{
+		PacketHeader			 header;
+		std::span<const uint8_t> body;
+	};
 
 	static std::vector<uint8_t> makeBody(size_t size, uint8_t seed = 7)
 	{
@@ -29,33 +30,44 @@ protected:
 		return body;
 	}
 
-	// Header the link would put on the given fragment
-	static PacketHeader headerFor(const Fragment &fragment, uint32_t tag = 0)
+	// The message cut the way a link cuts it
+	static std::vector<Packet> packetsOf(const std::vector<uint8_t> &body, uint32_t tag = 0)
 	{
-		PacketHeader header;
-		header.flags	   = PacketFlags::data(ChannelId::Application, true);
-		header.srcStreamID = 1;
-		header.seq		   = 1 + fragment.index;
-		header.tag		   = tag;
+		const size_t		count = fragmentsOf(body.size());
+		std::vector<Packet> packets;
 
-		if (fragment.isFragmented())
+		for (size_t index = 0; index < count; ++index)
 		{
-			header.flags.setFragment(true, fragment.isLast());
-			header.fragIndex = fragment.index;
-			header.fragCount = fragment.count;
+			const size_t offset = index * MaxFragmentBody;
+
+			PacketHeader header;
+			header.flags	   = PacketFlags::data(Lane::Reliable);
+			header.srcStreamID = 1;
+			header.seq		   = 1 + index;
+			header.tag		   = tag;
+
+			if (count > 1)
+			{
+				header.flags.setFragment(true, index + 1 == count);
+				header.fragIndex   = static_cast<uint16_t>(index);
+				header.fragCount   = static_cast<uint16_t>(count);
+				header.totalLength = static_cast<uint32_t>(body.size());
+			}
+
+			packets.push_back({header, std::span(body).subspan(offset, std::min(MaxFragmentBody, body.size() - offset))});
 		}
 
-		return header;
+		return packets;
 	}
 
 	// Feeds the message the way a stream delivers it: every fragment, in order
-	std::optional<AssembledMessage> feed(MessageAssembler &target, const std::vector<uint8_t> &body, uint32_t tag = 0, size_t maxBody = MaxBody)
+	static std::optional<AssembledMessage> feed(MessageAssembler &target, const std::vector<uint8_t> &body, uint32_t tag = 0)
 	{
 		std::optional<AssembledMessage> result;
 
-		for (const auto &fragment : FragmentationService::split(body, maxBody))
+		for (const auto &[header, fragment] : packetsOf(body, tag))
 		{
-			if (auto message = target.accept(headerFor(fragment, tag), fragment.body))
+			if (auto message = target.accept(header, fragment))
 			{
 				EXPECT_FALSE(result.has_value()) << "A message must complete exactly once";
 				result = std::move(message);
@@ -64,6 +76,8 @@ protected:
 
 		return result;
 	}
+
+	MessageAssembler assembler;
 };
 
 
@@ -91,16 +105,16 @@ TEST_F(MessageAssemblerTest, EmptyMessage_IsDelivered)
 
 TEST_F(MessageAssemblerTest, Fragments_AreJoinedInOrder)
 {
-	const auto body		 = makeBody(1050);
-	const auto fragments = FragmentationService::split(body, MaxBody);
+	const auto body	   = makeBody(10 * MaxFragmentBody + 500);
+	const auto packets = packetsOf(body, 9);
 
-	for (size_t i = 0; i + 1 < fragments.size(); ++i)
+	for (size_t i = 0; i + 1 < packets.size(); ++i)
 	{
-		EXPECT_FALSE(assembler.accept(headerFor(fragments[i], 9), fragments[i].body).has_value()) << "Not complete before the last fragment";
+		EXPECT_FALSE(assembler.accept(packets[i].header, packets[i].body).has_value()) << "Not complete before the last fragment";
 		EXPECT_TRUE(assembler.isAssembling());
 	}
 
-	const auto message = assembler.accept(headerFor(fragments.back(), 9), fragments.back().body);
+	const auto message = assembler.accept(packets.back().header, packets.back().body);
 
 	ASSERT_TRUE(message.has_value());
 	EXPECT_EQ(message->body, body);
@@ -111,9 +125,9 @@ TEST_F(MessageAssemblerTest, Fragments_AreJoinedInOrder)
 
 TEST_F(MessageAssemblerTest, ConsecutiveMessages_StaySeparate)
 {
-	const auto first  = makeBody(250, 1);
+	const auto first  = makeBody(3000, 1);
 	const auto second = makeBody(30, 2);
-	const auto third  = makeBody(420, 3);
+	const auto third  = makeBody(5000, 3);
 
 	const auto a	  = feed(assembler, first, 1);
 	const auto b	  = feed(assembler, second, 2);
@@ -129,12 +143,13 @@ TEST_F(MessageAssemblerTest, ConsecutiveMessages_StaySeparate)
 
 TEST_F(MessageAssemblerTest, AbandonedMessage_IsReplacedByTheNextOne)
 {
-	// The sender dropped the rest of a message (session closed) and went on with the next one
-	const auto abandoned = FragmentationService::split(makeBody(250, 1), MaxBody);
-	EXPECT_FALSE(assembler.accept(headerFor(abandoned[0]), abandoned[0].body).has_value());
-	EXPECT_FALSE(assembler.accept(headerFor(abandoned[1]), abandoned[1].body).has_value());
+	// The sender started a new stream in the middle of a message and went on with the next one
+	const auto abandonedBody = makeBody(4000, 1);
+	const auto abandoned	 = packetsOf(abandonedBody);
+	EXPECT_FALSE(assembler.accept(abandoned[0].header, abandoned[0].body).has_value());
+	EXPECT_FALSE(assembler.accept(abandoned[1].header, abandoned[1].body).has_value());
 
-	const auto next	   = makeBody(250, 2);
+	const auto next	   = makeBody(4000, 2);
 	const auto message = feed(assembler, next);
 
 	ASSERT_TRUE(message.has_value());
@@ -142,135 +157,160 @@ TEST_F(MessageAssemblerTest, AbandonedMessage_IsReplacedByTheNextOne)
 }
 
 
-TEST_F(MessageAssemblerTest, AbandonedMessage_IsReplacedByAnUnfragmentedOne)
-{
-	const auto abandoned = FragmentationService::split(makeBody(250, 1), MaxBody);
-	EXPECT_FALSE(assembler.accept(headerFor(abandoned[0]), abandoned[0].body).has_value());
-
-	const auto next	   = makeBody(10, 2);
-	const auto message = feed(assembler, next);
-
-	ASSERT_TRUE(message.has_value());
-	EXPECT_EQ(message->body, next);
-	EXPECT_FALSE(assembler.isAssembling());
-}
-
-
 TEST_F(MessageAssemblerTest, FragmentWithoutItsBeginning_IsDropped)
 {
-	const auto fragments = FragmentationService::split(makeBody(250), MaxBody);
+	const auto body	   = makeBody(3000);
+	const auto packets = packetsOf(body);
 
-	EXPECT_FALSE(assembler.accept(headerFor(fragments[1]), fragments[1].body).has_value());
-	EXPECT_FALSE(assembler.accept(headerFor(fragments[2]), fragments[2].body).has_value()) << "Fragment 0 never arrived: nothing to complete";
+	EXPECT_FALSE(assembler.accept(packets[1].header, packets[1].body).has_value());
+	EXPECT_FALSE(assembler.accept(packets[2].header, packets[2].body).has_value()) << "Fragment 0 never arrived: nothing to complete";
 	EXPECT_FALSE(assembler.isAssembling());
-}
-
-
-TEST_F(MessageAssemblerTest, InconsistentFragment_AbortsTheMessage)
-{
-	const auto fragments = FragmentationService::split(makeBody(350), MaxBody);
-
-	EXPECT_FALSE(assembler.accept(headerFor(fragments[0]), fragments[0].body).has_value());
-
-	PacketHeader bogus = headerFor(fragments[1]);
-	bogus.fragCount	   = 9;
-	EXPECT_FALSE(assembler.accept(bogus, fragments[1].body).has_value());
-	EXPECT_FALSE(assembler.isAssembling()) << "A contradicting fragment abandons the message";
-
-	EXPECT_FALSE(assembler.accept(headerFor(fragments[2]), fragments[2].body).has_value());
-	EXPECT_FALSE(assembler.accept(headerFor(fragments[3]), fragments[3].body).has_value()) << "The rest of the aborted message must not complete it";
 }
 
 
 TEST_F(MessageAssemblerTest, SkippedFragment_AbortsTheMessage)
 {
-	const auto fragments = FragmentationService::split(makeBody(350), MaxBody);
+	const auto body	   = makeBody(4000);
+	const auto packets = packetsOf(body);
 
-	EXPECT_FALSE(assembler.accept(headerFor(fragments[0]), fragments[0].body).has_value());
-	EXPECT_FALSE(assembler.accept(headerFor(fragments[2]), fragments[2].body).has_value()) << "A stream never skips: this is not the message in progress";
+	EXPECT_FALSE(assembler.accept(packets[0].header, packets[0].body).has_value());
+	EXPECT_FALSE(assembler.accept(packets[2].header, packets[2].body).has_value()) << "A stream never skips: this is not the message in progress";
 	EXPECT_FALSE(assembler.isAssembling());
-}
-
-
-TEST_F(MessageAssemblerTest, OversizedMessage_IsDropped)
-{
-	MessageAssembler small(150, MaxBody);
-
-	EXPECT_FALSE(feed(small, makeBody(250)).has_value());
-	EXPECT_FALSE(small.isAssembling());
-
-	EXPECT_FALSE(feed(small, makeBody(151)).has_value()) << "Also when it fits into one packet";
-
-	const auto fits = makeBody(150);
-	const auto message = feed(small, fits);
-	ASSERT_TRUE(message.has_value()) << "The limit itself is allowed, and the assembler keeps working after a dropped message";
-	EXPECT_EQ(message->body, fits);
-}
-
-
-TEST_F(MessageAssemblerTest, Reset_ForgetsTheMessageInProgress)
-{
-	const auto fragments = FragmentationService::split(makeBody(250), MaxBody);
-	assembler.accept(headerFor(fragments[0]), fragments[0].body);
-
-	assembler.reset();
-
-	EXPECT_FALSE(assembler.isAssembling());
-	EXPECT_FALSE(assembler.accept(headerFor(fragments[1]), fragments[1].body).has_value());
-	EXPECT_FALSE(assembler.accept(headerFor(fragments[2]), fragments[2].body).has_value()) << "Fragment 0 was forgotten";
+	EXPECT_FALSE(assembler.accept(packets[3].header, packets[3].body).has_value()) << "The rest of the aborted message must not complete it";
 }
 
 
 TEST_F(MessageAssemblerTest, ShortNonLastFragment_IsRejected)
 {
-	const auto fragments = FragmentationService::split(makeBody(350), MaxBody);
+	const auto body	   = makeBody(4000);
+	const auto packets = packetsOf(body);
 
-	EXPECT_FALSE(assembler.accept(headerFor(fragments[0]), fragments[0].body.first(MaxBody - 1)).has_value());
+	EXPECT_FALSE(assembler.accept(packets[0].header, packets[0].body.first(MaxFragmentBody - 1)).has_value());
 	EXPECT_FALSE(assembler.isAssembling()) << "A sender fills every fragment but the last one";
 
-	EXPECT_FALSE(assembler.accept(headerFor(fragments[0]), fragments[0].body).has_value());
-	EXPECT_FALSE(assembler.accept(headerFor(fragments[1]), fragments[1].body.first(1)).has_value());
+	EXPECT_FALSE(assembler.accept(packets[0].header, packets[0].body).has_value());
+	EXPECT_FALSE(assembler.accept(packets[1].header, packets[1].body.first(1)).has_value());
 	EXPECT_FALSE(assembler.isAssembling()) << "Also in the middle of a message";
 
-	EXPECT_FALSE(assembler.accept(headerFor(fragments[2]), fragments[2].body).has_value());
-	EXPECT_FALSE(assembler.accept(headerFor(fragments[3]), fragments[3].body).has_value()) << "The rest of the dropped message must not complete it";
-
-	const auto body	   = makeBody(350, 2);
 	const auto message = feed(assembler, body);
-	ASSERT_TRUE(message.has_value()) << "The last fragment may be shorter, and the assembler keeps working after a dropped message";
+	ASSERT_TRUE(message.has_value()) << "The assembler keeps working after a dropped message";
 	EXPECT_EQ(message->body, body);
 }
 
 
-TEST_F(MessageAssemblerTest, ForgedFragmentCount_DoesNotReserveTheMaximum)
+TEST_F(MessageAssemblerTest, ForgedTotalLength_IsRejected)
 {
-	MessageAssembler		   wire; // fragments as a link really cuts them
-	const std::vector<uint8_t> body(MaxFragmentBody);
+	const auto	 body	 = makeBody(4000);
+	auto		 packets = packetsOf(body);
 
-	// The first fragment of what claims to be the largest message there is
-	PacketHeader			   header;
-	header.flags	   = PacketFlags::data(ChannelId::Application, true).setFragment(true, false);
-	header.srcStreamID = 1;
-	header.seq		   = 1;
-	header.fragIndex   = 0;
-	header.fragCount   = static_cast<uint16_t>(MaxFragmentCount);
+	// The first fragment announces less than its fragments will carry
+	PacketHeader forged	 = packets[0].header;
+	forged.totalLength	 = static_cast<uint32_t>(3 * MaxFragmentBody + 10);
+	ASSERT_EQ(fragmentsOf(forged.totalLength), forged.fragCount) << "The count still fits: only the last fragment can tell";
 
-	EXPECT_FALSE(wire.accept(header, body).has_value());
-	ASSERT_TRUE(wire.isAssembling());
-	EXPECT_LE(wire.reservedBytes(), MessageAssembler::MaxInitialReserve) << "One datagram must not make the receiver set 16 MiB aside";
+	EXPECT_FALSE(assembler.accept(forged, packets[0].body).has_value());
+	EXPECT_FALSE(assembler.accept(packets[1].header, packets[1].body).has_value());
+	EXPECT_FALSE(assembler.accept(packets[2].header, packets[2].body).has_value());
+	EXPECT_FALSE(assembler.accept(packets[3].header, packets[3].body).has_value()) << "The message is not as long as it claimed to be";
+	EXPECT_FALSE(assembler.isAssembling());
+
+	// A count that does not belong to the announced length is not even started
+	forged			 = packets[0].header;
+	forged.fragCount = 9;
+	EXPECT_FALSE(assembler.accept(forged, packets[0].body).has_value());
+	EXPECT_FALSE(assembler.isAssembling());
+
+	forged			   = packets[0].header;
+	forged.totalLength = static_cast<uint32_t>(internal::MaxMessagePayload + 1);
+	EXPECT_FALSE(assembler.accept(forged, packets[0].body).has_value());
+	EXPECT_FALSE(assembler.isAssembling()) << "Larger than any message";
 }
 
 
-TEST_F(MessageAssemblerTest, LargeMessageRoundTrip)
+TEST_F(MessageAssemblerTest, Reset_ForgetsTheMessageInProgress)
 {
-	MessageAssembler wire; // fragments as a link really cuts them
+	const auto body	   = makeBody(3000);
+	const auto packets = packetsOf(body);
+	assembler.accept(packets[0].header, packets[0].body);
 
-	const auto		 body	 = makeBody(size_t{4} * 1024 * 1024);
-	const auto		 message = feed(wire, body, 77, MaxFragmentBody);
+	assembler.reset();
 
-	ASSERT_TRUE(message.has_value()) << "Also when the message outgrows what was set aside for it at first";
+	EXPECT_FALSE(assembler.isAssembling());
+	EXPECT_FALSE(assembler.accept(packets[1].header, packets[1].body).has_value());
+	EXPECT_FALSE(assembler.accept(packets[2].header, packets[2].body).has_value()) << "Fragment 0 was forgotten";
+}
+
+
+TEST_F(MessageAssemblerTest, LargestMessageRoundTrip)
+{
+	const auto body	   = makeBody(internal::MaxMessagePayload);
+	const auto message = feed(assembler, body, 77);
+
+	ASSERT_TRUE(message.has_value());
 	EXPECT_EQ(message->body, body);
 	EXPECT_EQ(message->tag, 77u);
+}
+
+
+// ---------------------------------------------------------------------------
+// Budget
+// ---------------------------------------------------------------------------
+
+TEST_F(MessageAssemblerTest, Budget_IsHeldWhileAMessageIsPutTogether)
+{
+	AssemblyBudget	 budget(10'000);
+	MessageAssembler first(&budget);
+	MessageAssembler second(&budget);
+
+	const auto		 body	 = makeBody(6000);
+	const auto		 packets = packetsOf(body);
+
+	ASSERT_TRUE(first.hasRoomFor(packets[0].header));
+	EXPECT_FALSE(first.accept(packets[0].header, packets[0].body).has_value());
+	EXPECT_EQ(budget.used(), 6000u) << "The whole message is set aside with its first fragment";
+
+	EXPECT_FALSE(second.hasRoomFor(packets[0].header)) << "No room for a second message of that size";
+	EXPECT_TRUE(second.hasRoomFor(packets[1].header)) << "Only the beginning of a message can be refused";
+
+	for (size_t i = 1; i < packets.size(); ++i)
+		first.accept(packets[i].header, packets[i].body);
+
+	EXPECT_EQ(budget.used(), 0u) << "A complete message leaves the budget";
+	EXPECT_TRUE(second.hasRoomFor(packets[0].header));
+}
+
+
+TEST_F(MessageAssemblerTest, Budget_IsGivenBackWhenAMessageIsAbandoned)
+{
+	AssemblyBudget budget(10'000);
+	const auto	   body	   = makeBody(6000);
+	const auto	   packets = packetsOf(body);
+
+	{
+		MessageAssembler abandoned(&budget);
+		abandoned.accept(packets[0].header, packets[0].body);
+		EXPECT_EQ(budget.used(), 6000u);
+
+		abandoned.reset();
+		EXPECT_EQ(budget.used(), 0u);
+
+		abandoned.accept(packets[0].header, packets[0].body);
+	}
+
+	EXPECT_EQ(budget.used(), 0u) << "A stream that goes away gives back what it held";
+}
+
+
+TEST_F(MessageAssemblerTest, UnfragmentedMessages_NeedNoBudget)
+{
+	AssemblyBudget	 budget(10);
+	MessageAssembler small(&budget);
+
+	const auto		 body	 = makeBody(1000);
+	const auto		 packets = packetsOf(body);
+
+	EXPECT_TRUE(small.hasRoomFor(packets[0].header));
+	EXPECT_TRUE(small.accept(packets[0].header, packets[0].body).has_value());
 }
 
 } // namespace ChannelTests

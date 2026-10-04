@@ -70,6 +70,8 @@ static std::vector<uint8_t> payload(const size_t size)
 
 TEST(PacingSimTest, DatagramRate_FollowsTheBudget)
 {
+	constexpr size_t DatagramsPerMessage = 4;
+
 	for (const uint32_t rate : {1000u, 5000u, 20'000u, 80'000u})
 	{
 		Scenario		  sim;
@@ -83,11 +85,11 @@ TEST(PacingSimTest, DatagramRate_FollowsTheBudget)
 		// More than the budget allows in every millisecond: what does not fit is dropped before it is sent
 		const auto flood = [&](const int milliseconds)
 		{
-			const auto message = payload(64);
+			const auto message = payload(DatagramsPerMessage * channel::MaxFragmentBody);
 
 			for (int ms = 0; ms < milliseconds; ++ms)
 			{
-				for (int i = 0; i < 100; ++i)
+				for (int i = 0; i < 30; ++i)
 					hub.channel->sendMessage("peer", 1, message, DeliveryMode::UnreliableSequenced);
 
 				sim.driver.run(1ms);
@@ -101,7 +103,7 @@ TEST(PacingSimTest, DatagramRate_FollowsTheBudget)
 		const auto sent = static_cast<double>(sim.network->sentBy(hub.ip) - before);
 
 		EXPECT_NEAR(sent, rate, rate * 0.02) << "at " << rate << " datagrams per second";
-		EXPECT_NEAR(static_cast<double>(peer.received.size()), rate * 1.1, rate * 0.05) << "What was sent arrived";
+		EXPECT_NEAR(static_cast<double>(peer.received.size() * DatagramsPerMessage), rate * 1.1, rate * 0.05) << "What was sent arrived";
 	}
 }
 
@@ -175,17 +177,17 @@ TEST(PacingSimTest, WouldBlock_CausesNoRetransmissions)
 	sim.network->setProfile(profile);
 
 	// Every reliable Data packet that goes out, and those that go out more than once
-	std::set<std::tuple<net::SocketAddress, uint32_t, channel::ChannelId, uint64_t>> seen;
-	size_t																			 repeated = 0;
+	std::set<std::tuple<net::SocketAddress, uint32_t, channel::Lane, uint64_t>> seen;
+	size_t																		repeated = 0;
 
 	sim.network->setTap(
 		[&](const net::SocketAddress &from, const net::SocketAddress &, const std::span<const uint8_t> data)
 		{
 			const auto packet = channel::decodePacket(data);
-			if (!packet || packet->header.flags.kind() != channel::PacketKind::Data || !packet->header.flags.isReliable())
+			if (!packet || packet->header.flags.kind() != channel::PacketKind::Data || packet->header.flags.lane() == channel::Lane::Media)
 				return;
 
-			if (!seen.emplace(from, packet->header.srcStreamID, packet->header.flags.channel(), packet->header.seq).second)
+			if (!seen.emplace(from, packet->header.srcStreamID, packet->header.flags.lane(), packet->header.seq).second)
 				++repeated;
 		});
 
@@ -226,7 +228,7 @@ TEST(PacingSimTest, HostDown_IsTreatedAsLoss)
 
 	const auto since = sim.driver.elapsed();
 	ASSERT_TRUE(sim.driver.runUntil([&] { return !hub.lost.empty(); }, 30s));
-	EXPECT_GE(sim.driver.elapsed() - since, PeerChannelConfig{}.reliability.failureTimeout);
+	EXPECT_GE(sim.driver.elapsed() - since, PeerChannelConfig{}.timings.peerTimeout);
 	EXPECT_EQ(hub.lost.front().first, "peer");
 }
 
