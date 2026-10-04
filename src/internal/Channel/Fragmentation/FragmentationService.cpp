@@ -33,17 +33,4 @@ Fragment FragmentationService::fragmentAt(const std::span<const uint8_t> body, c
 	return {.index = static_cast<uint16_t>(index), .count = static_cast<uint16_t>(count), .body = body.subspan(offset, length)};
 }
 
-
-std::vector<Fragment> FragmentationService::split(const std::span<const uint8_t> body, const size_t maxFragmentBody)
-{
-	std::vector<Fragment> fragments;
-	const size_t		  count = fragmentCount(body.size(), maxFragmentBody);
-
-	fragments.reserve(count);
-	for (size_t i = 0; i < count; ++i)
-		fragments.push_back(fragmentAt(body, i, maxFragmentBody));
-
-	return fragments;
-}
-
 } // namespace netlink::channel

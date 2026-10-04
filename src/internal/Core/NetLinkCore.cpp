@@ -35,7 +35,7 @@ netlink::NetworkAdapter toPublicAdapter(const netlink::NetworkAdapterInternal &i
 	pub.adapterName = internal.AdapterName;
 	pub.networkName = internal.NetworkName;
 	pub.ipv4		= internal.IPv4;
-	pub.id			= static_cast<uint64_t>(internal.ID);
+	pub.id			= internal.ID;
 	pub.priority	= mapPriority(internal.Priority);
 	return pub;
 }
@@ -431,5 +431,5 @@ bool netlink::NetLinkCore::setActiveAdapter(const uint64_t adapterID)
 uint64_t netlink::NetLinkCore::getActiveAdapterID() const
 {
 	std::lock_guard<std::mutex> lock(mNetworkMutex);
-	return static_cast<uint64_t>(mAdapter.ID);
+	return mAdapter.ID;
 }

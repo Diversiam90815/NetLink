@@ -37,8 +37,6 @@ public:
 
 	// The index-th fragment of body. Precondition: index < fragmentCount(body.size(), maxFragmentBody)
 	static Fragment				  fragmentAt(std::span<const uint8_t> body, size_t index, size_t maxFragmentBody);
-
-	static std::vector<Fragment> split(std::span<const uint8_t> body, size_t maxFragmentBody);
 };
 
 } // namespace netlink::channel

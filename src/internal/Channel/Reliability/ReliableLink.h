@@ -132,9 +132,6 @@ public:
 
 	// --- Sending --------------------------------------------------------------
 
-	// Asks the remote for a sign of life: it answers with an Ack
-	void						  sendPing();
-
 	// The next Ack or Ping, null if there is none. These are never held back.
 	const OutgoingDatagram		 *peekAck();
 	void						  commitAck();
@@ -144,9 +141,6 @@ public:
 	// its peek() directly.
 	const OutgoingDatagram		 *peek(Lane lane, TimePoint now, MessageSource &source);
 	void						  commit(Lane lane, TimePoint now);
-
-	// Everything above in one pass, for tests and benchmarks: Acks and Pings first, then the lanes in order of urgency
-	std::vector<OutgoingDatagram> takeOutgoing(TimePoint now, MessageSource &source);
 
 	// --- Receiving -------------------------------------------------------------
 

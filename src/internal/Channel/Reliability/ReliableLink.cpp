@@ -99,35 +99,6 @@ void ReliableLink::supervise(const TimePoint now)
 }
 
 
-void ReliableLink::sendPing()
-{
-	mPingDue |= bitOf(Lane::Control);
-}
-
-
-std::vector<OutgoingDatagram> ReliableLink::takeOutgoing(const TimePoint now, MessageSource &source)
-{
-	std::vector<OutgoingDatagram> pass;
-
-	while (const auto *ack = peekAck())
-	{
-		pass.push_back(*ack);
-		commitAck();
-	}
-
-	for (const Lane lane : {Lane::Control, Lane::Media, Lane::Reliable, Lane::Bulk})
-	{
-		while (const auto *datagram = peek(lane, now, source))
-		{
-			pass.push_back(*datagram);
-			commit(lane, now);
-		}
-	}
-
-	return pass;
-}
-
-
 const OutgoingDatagram *ReliableLink::peekAck()
 {
 	if (mFailed)
