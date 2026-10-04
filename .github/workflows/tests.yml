@@ -54,4 +54,4 @@ jobs:
         run: python build.py --prepare --runtest
 
       - name: Repeat the tests that depend on thread timing
-        run: ctest --test-dir build/x64 -C Release --repeat until-fail:5 -R "PeerChannel|Mailbox|Sim" --output-on-failure
+        run: ctest --test-dir build/x64 -C Release --repeat until-fail:5 -R "NetworkEngine|NetLinkCore|NetLinkApi|Mailbox|Sim" --output-on-failure
