@@ -158,32 +158,112 @@ std::vector<OutgoingDatagram> ReliableLink::takeOutgoing(const TimePoint now)
 {
 	std::vector<OutgoingDatagram> pass;
 
-	// Acknowledgements are never held back: the remote's sending depends on them
-	for (const ChannelId channel : ChannelOrder)
+	while (const auto *ack = peekAck())
 	{
-		if (auto *stream = existingStream(channel))
-			flushAcks(*stream, channel, pass);
+		pass.push_back(*ack);
+		commitAck();
 	}
 
-	if (std::exchange(mHeartbeatDue, false))
-		pass.push_back(makeDatagram(makeHeader(PacketFlags::heartbeat(), 0)));
-
-	while (auto unreliable = mUnreliableQueue.pop())
-		pass.push_back(std::move(*unreliable));
-
-	mWindowLimited = false;
-
-	for (const ChannelId channel : ChannelOrder)
+	for (const SendClass sendClass : {SendClass::Unreliable, SendClass::Control, SendClass::Application})
 	{
-		if (auto *stream = existingStream(channel))
-			sendData(*stream, channel, pass, now);
+		while (const auto *datagram = peek(sendClass, now))
+		{
+			pass.push_back(*datagram);
+			commit(sendClass, now);
+		}
 	}
 
 	return pass;
 }
 
 
-void ReliableLink::flushAcks(Stream &stream, const ChannelId channel, std::vector<OutgoingDatagram> &pass)
+const OutgoingDatagram *ReliableLink::peekAck()
+{
+	// Whatever was not sent yet goes first, and nothing new is built behind it
+	if (mPendingAcks.empty())
+	{
+		for (const ChannelId channel : ChannelOrder)
+		{
+			if (auto *stream = existingStream(channel))
+				flushAcks(*stream, channel);
+		}
+
+		if (std::exchange(mHeartbeatDue, false))
+			mPendingAcks.push_back(makeDatagram(makeHeader(PacketFlags::heartbeat(), 0)));
+	}
+
+	return mPendingAcks.empty() ? nullptr : &mPendingAcks.front();
+}
+
+
+void ReliableLink::commitAck()
+{
+	if (!mPendingAcks.empty())
+		mPendingAcks.pop_front();
+}
+
+
+const OutgoingDatagram *ReliableLink::peek(const SendClass sendClass, const TimePoint now)
+{
+	if (sendClass == SendClass::Unreliable)
+		return mUnreliableQueue.empty() ? nullptr : &mUnreliableQueue.front();
+
+	const ChannelId channel = channelOf(sendClass);
+	Stream		   *stream	= existingStream(channel);
+	if (!stream)
+		return nullptr;
+
+	const auto next = nextTransmission(*stream, channel, now);
+	if (!next)
+		return nullptr;
+
+	const InFlight	fragment = next->lost ? InFlight{} : makeFragment(*stream, channel);
+	const InFlight &entry	 = next->lost ? *next->lost : fragment;
+
+	mPeeked					 = makeDatagram(entry.header);
+	mPeeked.message			 = entry.message;
+	mPeeked.offset			 = entry.offset;
+	mPeeked.length			 = entry.length;
+	return &mPeeked;
+}
+
+
+void ReliableLink::commit(const SendClass sendClass, const TimePoint now)
+{
+	if (sendClass == SendClass::Unreliable)
+	{
+		mUnreliableQueue.pop();
+		return;
+	}
+
+	const ChannelId channel = channelOf(sendClass);
+	Stream		   *stream	= existingStream(channel);
+	if (!stream)
+		return;
+
+	const auto next = nextTransmission(*stream, channel, now);
+	if (!next)
+		return;
+
+	InFlight *entry = next->lost;
+
+	if (entry)
+		stream->lost.pop_front();
+	else
+		entry = takeFragment(*stream, channel);
+
+	if (next->probe)
+		stream->probeAt = now + mConfig.windowProbeInterval;
+
+	// The window was not what ended the sending, unless a later peek finds it closed
+	if (channel == ChannelId::Application)
+		mWindowLimited = false;
+
+	transmit(*stream, *entry, now);
+}
+
+
+void ReliableLink::flushAcks(Stream &stream, const ChannelId channel)
 {
 	const size_t		 perDatagram = maxRangesPerDatagram();
 	std::vector<uint8_t> body;
@@ -214,7 +294,7 @@ void ReliableLink::flushAcks(Stream &stream, const ChannelId channel, std::vecto
 			for (size_t i = first; i < std::min(first + perDatagram, ranges.size()); ++i)
 				appendRange(body, ranges[i]);
 
-			pass.push_back(makeDatagram(makeHeader(PacketFlags::ack(PacketKind::DataAck, channel), stream.nextExpected - 1), body));
+			mPendingAcks.push_back(makeDatagram(makeHeader(PacketFlags::ack(PacketKind::DataAck, channel), stream.nextExpected - 1), body));
 			++mStats.dataAcksSent;
 		}
 
@@ -232,39 +312,13 @@ void ReliableLink::flushAcks(Stream &stream, const ChannelId channel, std::vecto
 			for (size_t i = first; i < std::min(first + perDatagram, stream.ackAcks.size()); ++i)
 				appendRange(body, stream.ackAcks[i]);
 
-			pass.push_back(makeDatagram(makeHeader(PacketFlags::ack(PacketKind::AckAck, channel), stream.sendBase - 1), body));
+			mPendingAcks.push_back(makeDatagram(makeHeader(PacketFlags::ack(PacketKind::AckAck, channel), stream.sendBase - 1), body));
 			++mStats.ackAcksSent;
 
 			first += perDatagram;
 		} while (first < stream.ackAcks.size());
 
 		stream.ackAcks.clear();
-	}
-}
-
-
-void ReliableLink::sendData(Stream &stream, const ChannelId channel, std::vector<OutgoingDatagram> &pass, const TimePoint now)
-{
-	while (true)
-	{
-		// Retransmissions first: the receiver cannot deliver what it buffered behind them
-		InFlight *entry = nextLost(stream);
-
-		if (!entry && !hasSendable(stream))
-			return;
-
-		if (!mayTransmit(stream, channel, now))
-			return;
-
-		if (entry)
-			stream.lost.pop_front();
-		else
-			entry = nextFragment(stream, channel);
-
-		if (!entry)
-			return;
-
-		transmit(stream, *entry, pass, now);
 	}
 }
 
@@ -276,29 +330,35 @@ bool ReliableLink::congestionWindowOpen(const Stream &stream, const ChannelId ch
 }
 
 
-bool ReliableLink::mayTransmit(Stream &stream, const ChannelId channel, const TimePoint now)
+std::optional<ReliableLink::Transmission> ReliableLink::nextTransmission(Stream &stream, const ChannelId channel, const TimePoint now)
 {
+	// Retransmissions first: the receiver cannot deliver what it buffered behind them
+	Transmission next{.lost = nextLost(stream)};
+
+	if (!next.lost && !hasSendable(stream))
+		return std::nullopt;
+
 	if (!congestionWindowOpen(stream, channel))
 	{
 		mWindowLimited = true;
-		return false;
+		return std::nullopt;
 	}
 
 	if (stream.peerWindow > 0)
-		return true;
+		return next;
 
 	// The remote paused this channel. One packet per probe interval keeps asking: its acknowledgement carries the window.
 	if (stream.onTheWire > 0)
-		return false;
+		return std::nullopt;
 
 	if (stream.probeAt && now < *stream.probeAt)
 	{
 		scheduleDeadline(*stream.probeAt);
-		return false;
+		return std::nullopt;
 	}
 
-	stream.probeAt = now + mConfig.windowProbeInterval;
-	return true;
+	next.probe = true;
+	return next;
 }
 
 
@@ -324,26 +384,14 @@ bool ReliableLink::hasSendable(const Stream &stream)
 }
 
 
-ReliableLink::InFlight *ReliableLink::nextFragment(Stream &stream, const ChannelId channel) const
+ReliableLink::InFlight ReliableLink::makeFragment(const Stream &stream, const ChannelId channel) const
 {
-	if (!hasSendable(stream))
-		return nullptr;
+	const OutboundMessage &message	= stream.cursor ? stream.cursor->message : stream.queue.front();
+	const size_t		   index	= stream.cursor ? stream.cursor->next : 0;
+	const Fragment		   fragment = FragmentationService::fragmentAt(*message.body, index, maxFragmentBody());
 
-	if (!stream.cursor)
-	{
-		auto message = stream.queue.pop();
-		if (!message)
-			return nullptr;
-
-		const size_t count = FragmentationService::fragmentCount(message->body->size(), maxFragmentBody());
-		stream.cursor	   = FragmentCursor{.message = std::move(*message), .count = count, .next = 0};
-	}
-
-	auto &[message, count, next] = *stream.cursor;
-	const Fragment fragment		 = FragmentationService::fragmentAt(*message.body, next, maxFragmentBody());
-
-	InFlight	   entry;
-	entry.header	 = makeHeader(PacketFlags::data(channel, true), stream.nextSendSeq++);
+	InFlight			   entry;
+	entry.header	 = makeHeader(PacketFlags::data(channel, true), stream.nextSendSeq);
 	entry.header.tag = message.tag;
 
 	if (fragment.isFragmented())
@@ -356,16 +404,29 @@ ReliableLink::InFlight *ReliableLink::nextFragment(Stream &stream, const Channel
 	entry.message = message.body;
 	entry.offset  = static_cast<uint32_t>(fragment.body.data() - message.body->data());
 	entry.length  = static_cast<uint32_t>(fragment.body.size());
-
-	if (++next >= count)
-		stream.cursor.reset();
-
-	const uint64_t seq = entry.header.seq;
-	return &stream.inFlight.insert(seq, std::move(entry));
+	return entry;
 }
 
 
-void ReliableLink::transmit(Stream &stream, InFlight &entry, std::vector<OutgoingDatagram> &pass, const TimePoint now)
+ReliableLink::InFlight *ReliableLink::takeFragment(Stream &stream, const ChannelId channel) const
+{
+	InFlight entry = makeFragment(stream, channel);
+
+	if (!stream.cursor)
+	{
+		auto		 message = stream.queue.pop();
+		const size_t count	 = FragmentationService::fragmentCount(message->body->size(), maxFragmentBody());
+		stream.cursor		 = FragmentCursor{.message = std::move(*message), .count = count, .next = 0};
+	}
+
+	if (++stream.cursor->next >= stream.cursor->count)
+		stream.cursor.reset();
+
+	return &stream.inFlight.insert(stream.nextSendSeq++, std::move(entry));
+}
+
+
+void ReliableLink::transmit(Stream &stream, InFlight &entry, const TimePoint now)
 {
 	if (entry.transmissions == 0)
 		++mStats.dataSent;
@@ -389,12 +450,6 @@ void ReliableLink::transmit(Stream &stream, InFlight &entry, std::vector<Outgoin
 	}
 
 	++stream.onTheWire;
-
-	OutgoingDatagram datagram = makeDatagram(entry.header);
-	datagram.message		  = entry.message;
-	datagram.offset			  = entry.offset;
-	datagram.length			  = entry.length;
-	pass.push_back(std::move(datagram));
 }
 
 
@@ -878,7 +933,7 @@ bool ReliableLink::hasPendingReliable() const
 
 bool ReliableLink::hasOutgoing() const
 {
-	if (mHeartbeatDue || !mUnreliableQueue.empty())
+	if (mHeartbeatDue || !mPendingAcks.empty() || !mUnreliableQueue.empty())
 		return true;
 
 	return std::ranges::any_of(ChannelOrder,
@@ -943,6 +998,7 @@ void ReliableLink::resetStreams()
 	mTimeoutsInARow		= 0;
 	mStalledSince.reset();
 
+	mPendingAcks.clear();
 	mUnreliableQueue.clear();
 	mNextUnreliableSeq = 1;
 	mLastUnreliableSeq = 0;

@@ -56,6 +56,19 @@ Result<void> setIntOption(const NativeHandle handle, const int level, const int 
 }
 
 
+// 0 if the option cannot be read
+int intOption(const NativeHandle handle, const int level, const int name)
+{
+	int		value  = 0;
+	SockLen length = sizeof(value);
+
+	if (getsockopt(toNative(handle), level, name, reinterpret_cast<char *>(&value), &length) == SocketErrorRet)
+		return 0;
+
+	return value;
+}
+
+
 BufferLength clampLength(const size_t size)
 {
 #if defined(_WIN32)
@@ -100,6 +113,9 @@ Result<void> applyBindOptions(const NativeHandle handle, const BindOptions &opti
 		if (auto result = setIntOption(handle, SOL_SOCKET, SO_SNDBUF, options.sendBufferSize); !result)
 			NETLINK_LOG_WARNING("Send buffer of {} bytes not applied: {}", options.sendBufferSize, toString(result.error()));
 	}
+
+	if (options.receiveBufferSize > 0 || options.sendBufferSize > 0)
+		NETLINK_LOG_INFO("Socket buffers granted: {} bytes to receive, {} bytes to send", intOption(handle, SOL_SOCKET, SO_RCVBUF), intOption(handle, SOL_SOCKET, SO_SNDBUF));
 
 	return {};
 }

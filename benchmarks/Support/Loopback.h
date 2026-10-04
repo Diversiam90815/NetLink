@@ -22,6 +22,15 @@
 namespace bench
 {
 
+// A channel without a send budget: what the code and the machine can do, not what the default rate allows
+inline netlink::PeerChannelConfig unlimitedRate()
+{
+	netlink::PeerChannelConfig config;
+	config.maxSendRate = 0;
+	return config;
+}
+
+
 // One hub and N peers. Every peer knows the hub and the hub knows every peer; a plain pair is LoopbackPeers(1).
 class LoopbackPeers
 {

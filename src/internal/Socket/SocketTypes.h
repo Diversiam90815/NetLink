@@ -49,6 +49,7 @@ enum class SocketError : uint8_t
 	PermissionDenied,	 // e.g. broadcast without SO_BROADCAST, privileged port
 	InvalidArgument,	 // Malformed address or invalid socket state
 	NetworkUnreachable,	 // No route to the remote host
+	NetworkDown,		 // The local network interface is down
 	MessageTooLarge,	 // Datagram larger than the buffer / MTU
 	NotInitialized,		 // Socket subsystem could not be initialized
 	Unknown,
@@ -72,6 +73,7 @@ constexpr std::string_view toString(const SocketError error)
 	case SocketError::PermissionDenied: return "Permission denied";
 	case SocketError::InvalidArgument: return "Invalid argument";
 	case SocketError::NetworkUnreachable: return "Network unreachable";
+	case SocketError::NetworkDown: return "Network down";
 	case SocketError::MessageTooLarge: return "Message too large";
 	case SocketError::NotInitialized: return "Socket subsystem not initialized";
 	case SocketError::Unknown: return "Unknown error";

@@ -18,6 +18,8 @@
 
 using json = nlohmann::json;
 using netlink::channel::Mailbox;
+using netlink::channel::SendClass;
+using netlink::channel::SendScheduler;
 
 
 namespace
@@ -38,6 +40,11 @@ Mailbox::Limits limitsOf(const netlink::PeerChannelConfig &config)
 			.maxUnreliableBody	 = netlink::channel::ReliableLink(reliability).maxUnreliableBody()};
 }
 
+constexpr uint8_t bitOf(const SendClass sendClass)
+{
+	return static_cast<uint8_t>(1u << std::to_underlying(sendClass));
+}
+
 template <typename TimePoint>
 std::optional<TimePoint> earlier(const std::optional<TimePoint> a, const std::optional<TimePoint> b)
 {
@@ -52,7 +59,7 @@ std::optional<TimePoint> earlier(const std::optional<TimePoint> a, const std::op
 
 netlink::PeerChannel::PeerChannel(net::DatagramSocketFactory socketFactory, const PeerChannelConfig &config, TaskQueue *applicationQueue)
 	: mSocketFactory(socketFactory ? std::move(socketFactory) : net::UdpSocket::factory()), mPendingConfig(config), mApplicationQueue(applicationQueue),
-	  mMailbox([this] { wakeIoThread(); }), mConfig(config), mHeartbeat(config.heartbeat), mReceiveBuffer(internal::PackageBufferSize)
+	  mMailbox([this] { wakeIoThread(); }), mConfig(config), mHeartbeat(config.heartbeat), mScheduler(config.maxSendRate), mReceiveBuffer(internal::PackageBufferSize)
 {
 	mMailbox.setLimits(limitsOf(config));
 }
@@ -94,9 +101,7 @@ void netlink::PeerChannel::deinit()
 	}
 
 	// The I/O thread is gone: what it owned and what was still meant for it is discarded here
-	mLinks.clear();
-	mHeartbeat.clear();
-	mNextWake.reset();
+	forgetLinks();
 	mMailbox.reset();
 	mMailbox.drain(mWork);
 
@@ -122,7 +127,16 @@ void netlink::PeerChannel::setLocalIPv4(const net::IPv4Address &localIPv4)
 	if (localIPv4.isUnspecified())
 		return;
 
-	auto socket = mSocketFactory({.ip = localIPv4, .port = 0}, {.receiveBufferSize = internal::ChannelReceiveBufferSize});
+	uint32_t sendRate = 0;
+	{
+		std::lock_guard<std::mutex> lock(mSocketMutex);
+		sendRate = mPendingConfig.maxSendRate;
+	}
+
+	// Room for one burst of the send budget, where the operating system needs to be asked for it
+	const auto burst = static_cast<int>(SendScheduler::burstOf(sendRate > 0 ? sendRate : PeerChannelConfig{}.maxSendRate));
+	auto	   socket =
+		mSocketFactory({.ip = localIPv4, .port = 0}, {.receiveBufferSize = internal::ChannelReceiveBufferSize, .sendBufferSize = burst * internal::ChannelSendBufferPerDatagram});
 
 	if (!socket)
 	{
@@ -488,7 +502,17 @@ void netlink::PeerChannel::loop()
 			continue;
 		}
 
-		EventBatch batch = step(*socket, Clock::now());
+		const auto now = Clock::now();
+
+		// How long a round takes that only waited for the next tick of the send budget
+		if (std::exchange(mTickTimedOut, false))
+		{
+			mBudgetTicks.fetch_add(1, std::memory_order_relaxed);
+			mBudgetTickTime.fetch_add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(now - mStepStartedAt).count()), std::memory_order_relaxed);
+		}
+
+		mStepStartedAt	 = now;
+		EventBatch batch = step(*socket, now);
 		deliver(batch);
 		waitForWork(*socket);
 	}
@@ -498,19 +522,35 @@ void netlink::PeerChannel::loop()
 void netlink::PeerChannel::fail()
 {
 	EventBatch batch;
-
-	for (const auto &address : mLinks | std::views::keys)
-		batch.lostPeers.push_back({.address = address, .reason = "the channel stopped after an internal error"});
-
-	mLinks.clear();
-	mHeartbeat.clear();
-	mNextWake.reset();
+	endAllSessions(batch, "the channel stopped after an internal error");
 
 	// Nothing is acknowledged anymore: whoever waits for it gives up
 	mMailbox.setRunning(false);
-	mMailbox.reset();
 
 	deliver(batch);
+}
+
+
+std::optional<netlink::PeerChannel::TimePoint> netlink::PeerChannel::poll(const TimePoint now)
+{
+	const auto socket = mInitialized.load() ? this->socket() : nullptr;
+	if (!socket)
+		return std::nullopt;
+
+	EventBatch batch = step(*socket, now);
+
+	for (auto &[from, message] : batch.messages)
+	{
+		if (message.channel == channel::ChannelId::Control)
+			routeControl(from, message.body);
+		else
+			routeApplication(from, message.tag, std::move(message.body));
+	}
+
+	for (const auto &lost : batch.lostPeers)
+		reportLostPeer(lost);
+
+	return mNextWake;
 }
 
 
@@ -519,7 +559,10 @@ netlink::PeerChannel::EventBatch netlink::PeerChannel::step(net::IDatagramSocket
 	EventBatch batch;
 
 	mSteps.fetch_add(1, std::memory_order_relaxed);
+
+	// Links whose acknowledgements the socket did not take in the last step get their turn again
 	mTouched.clear();
+	mTouched.swap(mAcksHeldBack);
 
 	mMailbox.drain(mWork);
 
@@ -543,6 +586,10 @@ netlink::PeerChannel::EventBatch netlink::PeerChannel::step(net::IDatagramSocket
 	const auto duplicates = std::ranges::unique(mTouched);
 	mTouched.erase(duplicates.begin(), duplicates.end());
 
+	mScheduler.refill(now);
+	mSocketBlocked = false;
+	mSocketFailed  = false;
+
 	for (const auto &address : mTouched)
 	{
 		auto *state = linkFor(address, false);
@@ -552,13 +599,41 @@ netlink::PeerChannel::EventBatch netlink::PeerChannel::step(net::IDatagramSocket
 		if (state->backlog)
 			feed(address, *state);
 
-		collect(address, *state, socket, batch, now);
+		collect(address, *state, batch);
+		sendAcks(address, *state, socket, now);
+		schedule(address, *state, now);
+	}
+
+	if (!mSocketBlocked)
+		sendData(socket, now);
+
+	for (const auto &address : mTouched)
+	{
+		auto *state = linkFor(address, false);
+		if (!state)
+			continue;
+
+		state->deadline = state->link.nextDeadline();
 
 		if (state->unsettled && !state->backlog && !state->link.hasPendingReliable())
 			state->unsettled = !mMailbox.settle(address);
 	}
 
-	mNextWake = earlier(mNextWake, mHeartbeat.nextDeadline());
+	// A socket that was replaced in the meantime is no failure: the next round runs on the new one
+	if (mSocketFailed && this->socket().get() == &socket)
+		endAllSessions(batch, "the network is not available anymore");
+
+	mNextWake = mHeartbeat.nextDeadline();
+
+	for (const auto &state : mLinks | std::views::values)
+		mNextWake = earlier(mNextWake, state.deadline);
+
+	// Datagrams wait for tokens or for the socket
+	mWaitingForTick = mSocketBlocked || mScheduler.hasBacklog() || !mAcksHeldBack.empty();
+
+	if (mWaitingForTick)
+		mNextWake = earlier(mNextWake, std::optional{now + SendScheduler::Tick});
+
 	return batch;
 }
 
@@ -572,13 +647,10 @@ void netlink::PeerChannel::apply(const Mailbox::PostedCommand &command, const Ti
 	case Mailbox::Command::EraseLink:
 		mLinks.erase(peer);
 		mHeartbeat.unwatch(peer);
+		mScheduler.remove(peer);
 		break;
 
-	case Mailbox::Command::ResetLinks:
-		mLinks.clear();
-		mHeartbeat.clear();
-		mNextWake.reset();
-		break;
+	case Mailbox::Command::ResetLinks: forgetLinks(); break;
 
 	case Mailbox::Command::DropApplication:
 		if (auto *state = linkFor(peer, false))
@@ -600,11 +672,35 @@ void netlink::PeerChannel::apply(const Mailbox::PostedCommand &command, const Ti
 	case Mailbox::Command::Reconfigure:
 	{
 		std::lock_guard<std::mutex> lock(mSocketMutex);
+
+		if (mPendingConfig.maxSendRate != mConfig.maxSendRate)
+			mScheduler.setRate(mPendingConfig.maxSendRate);
+
 		mConfig = mPendingConfig;
 		mHeartbeat.setConfig(mConfig.heartbeat);
 		break;
 	}
 	}
+}
+
+
+void netlink::PeerChannel::forgetLinks()
+{
+	mLinks.clear();
+	mHeartbeat.clear();
+	mScheduler.clear();
+	mAcksHeldBack.clear();
+	mNextWake.reset();
+}
+
+
+void netlink::PeerChannel::endAllSessions(EventBatch &batch, const char *reason)
+{
+	for (const auto &address : mLinks | std::views::keys)
+		batch.lostPeers.push_back({.address = address, .reason = reason});
+
+	forgetLinks();
+	mMailbox.reset();
 }
 
 
@@ -652,24 +748,27 @@ void netlink::PeerChannel::handleDatagram(const net::SocketAddress &from, const 
 
 void netlink::PeerChannel::serviceTimers(EventBatch &batch, const TimePoint now)
 {
-	if (!mNextWake || now < *mNextWake)
-		return;
-
-	// Rebuilt from what the links and the heartbeats report in this step
-	mNextWake.reset();
-
 	for (auto &[address, state] : mLinks)
 	{
-		state.link.onTimer(now);
-		mTouched.push_back(address);
+		if (state.deadline && *state.deadline <= now)
+		{
+			state.link.onTimer(now);
+			mTouched.push_back(address);
+		}
 	}
+
+	if (const auto due = mHeartbeat.nextDeadline(); !due || now < *due)
+		return;
 
 	auto [heartbeatsDue, silentPeers] = mHeartbeat.tick(now);
 
 	for (const auto &address : heartbeatsDue)
 	{
 		if (auto *state = linkFor(address, false))
+		{
 			state->link.sendHeartbeat();
+			mTouched.push_back(address);
+		}
 	}
 
 	for (const auto &address : silentPeers)
@@ -700,7 +799,7 @@ void netlink::PeerChannel::feed(const net::SocketAddress &address, LinkState &st
 }
 
 
-void netlink::PeerChannel::collect(const net::SocketAddress &address, LinkState &state, net::IDatagramSocket &socket, EventBatch &batch, const TimePoint now)
+void netlink::PeerChannel::collect(const net::SocketAddress &address, LinkState &state, EventBatch &batch)
 {
 	auto &link = state.link;
 
@@ -712,26 +811,104 @@ void netlink::PeerChannel::collect(const net::SocketAddress &address, LinkState 
 		batch.lostPeers.push_back({.address = address, .reason = reason});
 	}
 
-	// The acknowledgements of this pass tell the remote whether the application keeps up with what it sends
-	link.setApplicationReceiving(mDeliveryBacklog->load() < mConfig.deliveryBacklogLimit);
-
-	// One send pass: acknowledgements, and as much data as the link's windows allow
-	const auto datagrams = link.takeOutgoing(now);
-
-	if (!datagrams.empty())
-		mHeartbeat.onSent(address, now);
-
-	for (const auto &datagram : datagrams)
-	{
-		// A lost datagram is recovered by retransmission, a failed send is no different
-		if (auto sent = socket.sendParts(address, datagram.header(), datagram.body()); !sent)
-			NETLINK_LOG_DEBUG("Sending to {} failed: {}", address.toString(), net::toString(sent.error()));
-	}
-
-	mNextWake = earlier(mNextWake, link.nextDeadline());
-
 	for (auto &message : link.takeDelivered())
 		batch.messages.push_back({.from = address, .message = std::move(message)});
+}
+
+
+void netlink::PeerChannel::sendAcks(const net::SocketAddress &address, LinkState &state, net::IDatagramSocket &socket, const TimePoint now)
+{
+	auto &link = state.link;
+
+	// The acknowledgements tell the remote whether the application keeps up with what it sends
+	link.setApplicationReceiving(mDeliveryBacklog->load() < mConfig.deliveryBacklogLimit);
+
+	// Not held back by the budget, but counted against it
+	while (const auto *ack = link.peekAck())
+	{
+		if (mSocketBlocked || transmit(socket, address, *ack) == Transmit::Refused)
+		{
+			mAcksHeldBack.push_back(address);
+			return;
+		}
+
+		link.commitAck();
+		mScheduler.spend();
+		mHeartbeat.onSent(address, now);
+	}
+}
+
+
+void netlink::PeerChannel::schedule(const net::SocketAddress &address, LinkState &state, const TimePoint now)
+{
+	for (const SendClass sendClass : {SendClass::Control, SendClass::Unreliable, SendClass::Application})
+	{
+		if ((state.scheduled & bitOf(sendClass)) == 0 && state.link.peek(sendClass, now))
+		{
+			mScheduler.add(sendClass, address);
+			state.scheduled |= bitOf(sendClass);
+		}
+	}
+}
+
+
+void netlink::PeerChannel::sendData(net::IDatagramSocket &socket, const TimePoint now)
+{
+	mScheduler.run(
+		[&](const SendClass sendClass, const net::SocketAddress &address)
+		{
+			auto	   *state	 = linkFor(address, false);
+			const auto *datagram = state ? state->link.peek(sendClass, now) : nullptr;
+
+			if (!datagram)
+			{
+				if (state)
+					state->scheduled &= static_cast<uint8_t>(~bitOf(sendClass));
+
+				return SendScheduler::Result::Empty;
+			}
+
+			const Transmit outcome = transmit(socket, address, *datagram);
+			if (outcome == Transmit::Refused)
+				return SendScheduler::Result::Blocked;
+
+			state->link.commit(sendClass, now);
+			state->deadline = state->link.nextDeadline();
+			mHeartbeat.onSent(address, now);
+
+			return outcome == Transmit::Sent ? SendScheduler::Result::Sent : SendScheduler::Result::Lost;
+		});
+}
+
+
+netlink::PeerChannel::Transmit netlink::PeerChannel::transmit(net::IDatagramSocket &socket, const net::SocketAddress &address, const channel::OutgoingDatagram &datagram)
+{
+	const auto sent = socket.sendParts(address, datagram.header(), datagram.body());
+
+	if (sent)
+	{
+		mDatagramsSent.fetch_add(1, std::memory_order_relaxed);
+		return Transmit::Sent;
+	}
+
+	switch (sent.error())
+	{
+	case net::SocketError::WouldBlock: mSocketBlocked = true; return Transmit::Refused;
+
+	case net::SocketError::NetworkDown:
+	case net::SocketError::AddressNotAvailable:
+	case net::SocketError::Closed:
+	case net::SocketError::NotInitialized:
+		NETLINK_LOG_WARNING("The channel socket cannot send anymore: {}", net::toString(sent.error()));
+		mSocketBlocked = true;
+		mSocketFailed  = true;
+		return Transmit::Refused;
+
+	default:
+		// The destination cannot be reached right now: no different from a datagram that got lost on the way
+		NETLINK_LOG_DEBUG("Sending to {} failed: {}", address.toString(), net::toString(sent.error()));
+		return Transmit::Lost;
+	}
 }
 
 
@@ -754,6 +931,7 @@ void netlink::PeerChannel::waitForWork(net::IDatagramSocket &socket)
 	}
 
 	const auto ready = socket.waitReadable(timeout);
+	mTickTimedOut	 = mWaitingForTick && !ready && ready.error() == net::SocketError::Timeout;
 
 	// A broken socket fails right away: do not spin on it
 	if (!ready && ready.error() != net::SocketError::Timeout && ready.error() != net::SocketError::Cancelled)

@@ -22,6 +22,7 @@ set(Channel_Tests
     ${Test_Directory}/ChannelTests/ReliableLinkTests.cpp
     ${Test_Directory}/ChannelTests/SignalPacketTests.cpp
     ${Test_Directory}/ChannelTests/MailboxTests.cpp
+    ${Test_Directory}/ChannelTests/SendSchedulerTests.cpp
     ${Test_Directory}/ChannelTests/PeerChannelTests.cpp
 )
 
@@ -47,6 +48,10 @@ set(Socket_Tests
     ${Test_Directory}/SocketTests/FakeDatagramTests.cpp
 )
 
+set(Sim_Tests
+    ${Test_Directory}/SimTests/PacingSimTests.cpp
+)
+
 set(Integration_Tests
     ${Test_Directory}/IntegrationTests/NetLinkCoreTests.cpp
 )
@@ -56,6 +61,7 @@ set(Test_Fakes
     ${Test_Directory}/Fakes/FakeDatagramNetwork.h
     ${Test_Directory}/Fakes/LossyDatagramSocket.h
     ${Test_Directory}/Fakes/SpyDatagramSocket.h
+    ${Test_Directory}/Fakes/SimDriver.h
     ${Test_Directory}/Fakes/SpyDeadlineTimer.h
 )
 
@@ -78,6 +84,7 @@ set(All_Tests
     ${Validation_Tests}
     ${Socket_Tests}
     ${Integration_Tests}
+    ${Sim_Tests}
 )
 
 

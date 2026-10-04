@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "Mailbox.h"
+#include "SendScheduler.h"
 #include "SignalPacket.h"
 #include "TaskQueue.h"
 #include "ThreadBase.h"
@@ -73,6 +74,9 @@ struct PeerChannelConfig
 
 	// Application payload that may wait for its callback
 	size_t					   deliveryBacklogLimit{size_t{2} * internal::MaxMessagePayload};
+
+	// Datagrams the channel sends per second, to all peers together. 0 = unlimited.
+	uint32_t				   maxSendRate{80'000};
 };
 
 
@@ -148,9 +152,24 @@ public:
 	{
 		uint64_t steps{0};		  // rounds of the I/O loop
 		uint64_t overdueWaits{0}; // waits that started with a timer already due
+		uint64_t datagramsSent{0};	// what the socket accepted
+		uint64_t budgetTicks{0};	// rounds that only waited for the next tick of the send budget
+		uint64_t budgetTickTime{0}; // ... and how long they took together, in microseconds
 	};
 
-	LoopStats loopStats() const { return {.steps = mSteps.load(), .overdueWaits = mOverdueWaits.load()}; }
+	LoopStats loopStats() const
+	{
+		return {.steps			= mSteps.load(),
+				.overdueWaits	= mOverdueWaits.load(),
+				.datagramsSent	= mDatagramsSent.load(),
+				.budgetTicks	= mBudgetTicks.load(),
+				.budgetTickTime = mBudgetTickTime.load()};
+	}
+
+	// Runs one round of the I/O loop on the calling thread and calls the callbacks before it returns. For a channel
+	// that was not started and whose owner supplies the time, like a test under a virtual clock. Returns when the next
+	// round is due if nothing arrives before.
+	std::optional<std::chrono::steady_clock::time_point> poll(std::chrono::steady_clock::time_point now);
 
 private:
 	using Clock		= std::chrono::steady_clock;
@@ -196,6 +215,15 @@ private:
 		channel::ReliableLink link;
 		bool				  backlog{false};	// the mailbox may hold messages for this link
 		bool				  unsettled{false}; // flush() callers were not told yet that everything it took is acknowledged
+		std::optional<TimePoint> deadline;		   // its next timer, as of the last time it was looked at
+		uint8_t					 scheduled{0};	   // the send classes it waits in the scheduler for
+	};
+
+	enum class Transmit
+	{
+		Sent,
+		Lost,	 // the destination cannot be reached: counts as sent and lost on the way
+		Refused, // the socket did not take it: offered again later
 	};
 
 	// --- I/O thread ------------------------------------------------------------
@@ -212,7 +240,13 @@ private:
 	void		 handleDatagram(const net::SocketAddress &from, std::span<const uint8_t> bytes, TimePoint now);
 	void		 serviceTimers(EventBatch &batch, TimePoint now);
 	void		 feed(const net::SocketAddress &address, LinkState &state);
-	void		 collect(const net::SocketAddress &address, LinkState &state, net::IDatagramSocket &socket, EventBatch &batch, TimePoint now);
+	void									  collect(const net::SocketAddress &address, LinkState &state, EventBatch &batch);
+	void									  sendAcks(const net::SocketAddress &address, LinkState &state, net::IDatagramSocket &socket, TimePoint now);
+	void									  schedule(const net::SocketAddress &address, LinkState &state, TimePoint now);
+	void									  sendData(net::IDatagramSocket &socket, TimePoint now);
+	Transmit								  transmit(net::IDatagramSocket &socket, const net::SocketAddress &address, const channel::OutgoingDatagram &datagram);
+	void									  forgetLinks();
+	void									  endAllSessions(EventBatch &batch, const char *reason);
 	void		 waitForWork(net::IDatagramSocket &socket);
 	LinkState	*linkFor(const net::SocketAddress &address, bool create);
 
@@ -268,13 +302,23 @@ private:
 	PeerChannelConfig						  mConfig;
 	std::map<net::SocketAddress, LinkState>	  mLinks;
 	channel::HeartbeatService				  mHeartbeat;
+	channel::SendScheduler					  mScheduler;
 	std::optional<TimePoint>				  mNextWake; // never later than the next timer of any link or heartbeat
 	std::vector<uint8_t>					  mReceiveBuffer;
 	std::vector<net::SocketAddress>			  mTouched;	 // links with something to send, deliver or report in the current step
+	std::vector<net::SocketAddress>			  mAcksHeldBack;		  // links with acknowledgements the socket did not take yet
+	bool									  mSocketBlocked{false};  // in the current step: the socket takes nothing anymore
+	bool									  mSocketFailed{false};	  // ... and will not recover by itself
+	bool									  mWaitingForTick{false}; // the last step left datagrams waiting for tokens or for the socket
+	bool									  mTickTimedOut{false};	  // ... and nothing else ended the wait that followed
+	TimePoint								  mStepStartedAt{};
 	channel::Mailbox::Work					  mWork;
 
 	std::atomic<uint64_t>					  mSteps{0};
 	std::atomic<uint64_t>					  mOverdueWaits{0};
+	std::atomic<uint64_t>					  mDatagramsSent{0};
+	std::atomic<uint64_t>					  mBudgetTicks{0};
+	std::atomic<uint64_t>					  mBudgetTickTime{0};
 
 	std::map<std::string, PeerEndpoint>		  mPeerRegistry;  // key = displayName
 	std::map<net::SocketAddress, std::string> mNameByAddress; // the same peers by address

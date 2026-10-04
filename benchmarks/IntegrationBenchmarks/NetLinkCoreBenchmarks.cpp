@@ -18,6 +18,7 @@
 
 #include "BenchUtil.h"
 #include "Core/NetLinkCore.h"
+#include "Loopback.h"
 #include "Socket/UdpSocket.h"
 
 using namespace netlink;
@@ -103,8 +104,8 @@ public:
 	uint64_t					 expectedConnected{0};
 	uint64_t					 expectedDisconnected{0};
 
-	std::unique_ptr<NetLinkCore> a = std::make_unique<NetLinkCore>();
-	std::unique_ptr<NetLinkCore> b = std::make_unique<NetLinkCore>();
+	std::unique_ptr<NetLinkCore> a = std::make_unique<NetLinkCore>(NetLinkCoreDependencies{.channelConfig = bench::unlimitedRate()});
+	std::unique_ptr<NetLinkCore> b = std::make_unique<NetLinkCore>(NetLinkCoreDependencies{.channelConfig = bench::unlimitedRate()});
 
 private:
 	static NetLinkConfig makeConfig(const std::string &name)

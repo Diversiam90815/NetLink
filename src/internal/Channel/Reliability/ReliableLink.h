@@ -25,6 +25,7 @@
 #include "Channel/Queue/SequenceBuffer.h"
 #include "ReliabilityConfig.h"
 #include "RttEstimator.h"
+#include "SendClass.h"
 
 
 /*
@@ -148,7 +149,17 @@ public:
 
 	// --- Output ----------------------------------------------------------------
 
-	// One send pass: acknowledgements and the heartbeat first, then unreliable data, then as much reliable data as the windows allow
+	// The next acknowledgement or heartbeat, null if there is none
+	const OutgoingDatagram		 *peekAck();
+	void						  commitAck();
+
+	// The next datagram of that class, null if the class has nothing it may send right now. Peeking changes nothing:
+	// the datagram only counts as sent with commit(), which has to follow its peek() directly.
+	const OutgoingDatagram		 *peek(SendClass sendClass, TimePoint now);
+	void						  commit(SendClass sendClass, TimePoint now);
+
+	// Everything above in one pass, for tests and benchmarks: acknowledgements and the heartbeat first, then unreliable
+	// data, then as much reliable data as the windows allow
 	std::vector<OutgoingDatagram> takeOutgoing(TimePoint now);
 	std::vector<DeliveredMessage> takeDelivered() { return std::exchange(mDelivered, {}); }
 	std::vector<LinkEvent>		  takeEvents() { return std::exchange(mEvents, {}); }
@@ -264,14 +275,23 @@ private:
 	// Hands a packet that is next in its stream to the assembler
 	void											  acceptInOrder(Stream &stream, ChannelId channel, const PacketHeader &header, std::span<const uint8_t> body);
 
-	// Send pass
-	void											  flushAcks(Stream &stream, ChannelId channel, std::vector<OutgoingDatagram> &pass);
-	void											  sendData(Stream &stream, ChannelId channel, std::vector<OutgoingDatagram> &pass, TimePoint now);
-	bool											  mayTransmit(Stream &stream, ChannelId channel, TimePoint now);
+	// What a stream would put on the wire next
+	struct Transmission
+	{
+		InFlight *lost{nullptr}; // a retransmission; otherwise the next fragment
+		bool	  probe{false};	 // asks a remote again that paused the channel
+	};
+
+	static ChannelId								  channelOf(const SendClass sendClass) { return sendClass == SendClass::Control ? ChannelId::Control : ChannelId::Application; }
+
+	// Sending
+	void											  flushAcks(Stream &stream, ChannelId channel);
+	std::optional<Transmission>						  nextTransmission(Stream &stream, ChannelId channel, TimePoint now);
 	bool											  congestionWindowOpen(const Stream &stream, ChannelId channel) const;
 	static InFlight									 *nextLost(Stream &stream);
-	InFlight										 *nextFragment(Stream &stream, ChannelId channel) const;
-	void											  transmit(Stream &stream, InFlight &entry, std::vector<OutgoingDatagram> &pass, TimePoint now);
+	InFlight										  makeFragment(const Stream &stream, ChannelId channel) const;
+	InFlight										 *takeFragment(Stream &stream, ChannelId channel) const;
+	void											  transmit(Stream &stream, InFlight &entry, TimePoint now);
 	static bool										  hasSendable(const Stream &stream);
 
 	// Loss and congestion
@@ -305,7 +325,7 @@ private:
 	uint64_t										  mTransmissions{0};	 // counts every Data transmission
 	uint64_t										  mLargestAcked{0};		 // the latest transmission that was acknowledged
 	uint64_t										  mRecoveryStart{0};	 // losses of transmissions up to this one already reduced the window
-	bool											  mWindowLimited{false}; // the last send pass had more to send than the window allowed
+	bool											  mWindowLimited{false}; // sending last stopped because the window was full, not because nothing was left
 	std::vector<uint64_t>							  mAcknowledged;		 // scratch: the transmissions one DataAck acknowledged
 	std::optional<TimePoint>						  mStalledSince;		 // data is unacknowledged: when the last acknowledgement arrived
 	int												  mTimeoutsInARow{0};	 // retransmission timeouts since the last acknowledgement
@@ -317,6 +337,9 @@ private:
 	uint64_t										  mLastUnreliableSeq{0};
 	BoundedQueue<OutgoingDatagram>					  mUnreliableQueue; // the oldest dropped when full
 	bool											  mHeartbeatDue{false};
+
+	std::deque<OutgoingDatagram>					  mPendingAcks;		// built and not sent yet
+	OutgoingDatagram								  mPeeked;			// what the last peek() returned
 
 	std::optional<TimePoint>						  mNextDeadline;
 

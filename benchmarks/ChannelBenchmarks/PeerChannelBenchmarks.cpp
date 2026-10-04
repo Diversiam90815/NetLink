@@ -35,6 +35,8 @@ static constexpr uint32_t EchoType = 2;
 class SenderReceiver
 {
 public:
+	explicit SenderReceiver(const PeerChannelConfig &config = bench::unlimitedRate()) : peers(1, config) {}
+
 	bool open()
 	{
 		if (!peers.open())
@@ -60,7 +62,7 @@ public:
 	// Declared before the channels: their threads report into these until the channels are gone
 	bench::CompletionCounter received;
 	bench::CompletionCounter replies;
-	LoopbackPeers			 peers{1};
+	LoopbackPeers			 peers;
 };
 
 
@@ -109,6 +111,45 @@ BENCHMARK(BM_PeerChannel_Throughput)
 	->UseRealTime()
 	->MeasureProcessCPUTime()
 	->Unit(benchmark::kMillisecond);
+
+
+// Time: one message of the largest size at the default send budget. datagrams_per_s: what the hub's socket took, data
+// and acknowledgements together. tick_ms: a round of the hub's loop that only waited for the next tick of its budget.
+static void BM_PeerChannel_Paced(benchmark::State &state)
+{
+	const auto	   payload = bench::makePayload(internal::MaxMessagePayload - 4);
+
+	SenderReceiver channels{PeerChannelConfig{}};
+	if (!channels.open())
+	{
+		state.SkipWithError("Could not bind the channels to 127.0.0.1");
+		return;
+	}
+
+	const auto before	= channels.peers.hub().loopStats();
+	double	   seconds	= 0.0;
+	uint64_t   expected = 0;
+
+	for (auto _ : state)
+	{
+		const auto start = bench::Clock::now();
+
+		if (!channels.send(payload, DataType) || !channels.received.waitFor(++expected))
+		{
+			state.SkipWithError("The message did not arrive");
+			break;
+		}
+
+		seconds += bench::secondsSince(start);
+	}
+
+	const auto after				  = channels.peers.hub().loopStats();
+	const auto ticks				  = after.budgetTicks - before.budgetTicks;
+	state.counters["datagrams_per_s"] = seconds > 0.0 ? static_cast<double>(after.datagramsSent - before.datagramsSent) / seconds : 0.0;
+	state.counters["tick_ms"]		  = ticks > 0 ? static_cast<double>(after.budgetTickTime - before.budgetTickTime) / static_cast<double>(ticks) / 1000.0 : 0.0;
+	state.SetBytesProcessed(static_cast<int64_t>(state.iterations() * payload.size()));
+}
+BENCHMARK(BM_PeerChannel_Paced)->UseRealTime()->MeasureProcessCPUTime()->Unit(benchmark::kMillisecond);
 
 
 // Time: one reliable request until its reply arrived back (the receiver answers from its message callback)
@@ -182,7 +223,7 @@ static void BM_PeerChannel_FanIn(benchmark::State &state)
 	std::atomic<uint64_t> linksLost{0};
 	std::atomic<int64_t>  lastArrival{0}; // steady clock ticks of the latest message at the hub
 
-	LoopbackPeers		  peers(senders);
+	LoopbackPeers			 peers(senders, bench::unlimitedRate());
 	if (!peers.open())
 	{
 		state.SkipWithError("Could not bind the channels to 127.0.0.1");
@@ -259,7 +300,7 @@ static void BM_PeerChannel_FanOut(benchmark::State &state)
 	std::atomic<uint64_t>	 linksLost{0};
 	std::atomic<int64_t>	 lastArrival{0}; // steady clock ticks of the latest message at any peer
 
-	LoopbackPeers			 peers(receivers);
+	LoopbackPeers			 peers(receivers, bench::unlimitedRate());
 	if (!peers.open())
 	{
 		state.SkipWithError("Could not bind the channels to 127.0.0.1");

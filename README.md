@@ -123,6 +123,8 @@ flags: bit 0-2 kind (Data, DataAck, AckAck, Heartbeat) · 3 reliable · 4 fragme
 - **Fragmentation**: messages above one datagram (1200 bytes on the wire, below the Ethernet MTU) are split into
   fragments, each with its own `seq`. Fragments are sent straight out of the message and appended straight into the
   reassembled one: a payload byte is copied once on each side.
+- **Send budget**: the channel sends at most 80,000 datagrams per second to all peers together, handed out every
+  millisecond: control signals first, then unreliable, then reliable data, and within each to the peers in turn.
 - **Loss of the peer**: data that stays unacknowledged for 5 s without any acknowledgement arriving, a session peer
   that stays silent for 5 s, or a peer restart ends the session.
 
@@ -298,6 +300,7 @@ sockets on loopback, and services wired the same way `NetLinkCore` wires them. E
 | `BM_PeerChannel_RoundTrip` | How long does a reliable request/reply take? | one request and its reply (µs) |
 | `BM_PeerChannel_FanIn` | Does a hub keep up with many peers sending at once? | all messages arrived or delivery stopped (ms) |
 | `BM_PeerChannel_FanOut` | Does one sender keep up with many peers at once? | all messages arrived or delivery stopped (ms) |
+| `BM_PeerChannel_Paced` | Does the channel reach its send budget, and how precisely does its loop tick? | one 16 MiB message at the default budget (ms) |
 | `BM_TimeoutService_StartCancel` | What does arming and cancelling a timeout cost with many active? | one arm + cancel (µs) |
 | `BM_TimeoutService_FireLatency` | How quickly does a due timeout fire with many active? | arming until the callback ran (µs) |
 | `BM_TimeoutService_TimerResolution` | How precisely do short timeouts fire? | the whole timeout (ms) |

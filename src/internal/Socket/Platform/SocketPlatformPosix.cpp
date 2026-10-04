@@ -52,8 +52,8 @@ SocketError common::mapNativeError(const int code)
 	case EAFNOSUPPORT: return SocketError::InvalidArgument;
 	case ENETUNREACH:
 	case EHOSTUNREACH:
-	case EHOSTDOWN:
-	case ENETDOWN: return SocketError::NetworkUnreachable;
+	case EHOSTDOWN: return SocketError::NetworkUnreachable;
+	case ENETDOWN: return SocketError::NetworkDown;
 	case EMSGSIZE: return SocketError::MessageTooLarge;
 	default: return SocketError::Unknown;
 	}

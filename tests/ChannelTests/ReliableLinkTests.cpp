@@ -1202,6 +1202,87 @@ TEST_F(ReliableLinkTest, SendPass_AcknowledgementsFirstThenUnreliableThenReliabl
 
 
 // ---------------------------------------------------------------------------
+// Peek and commit
+// ---------------------------------------------------------------------------
+
+TEST_F(ReliableLinkTest, Peek_IsIdempotent)
+{
+	b.queueReliable(ChannelId::Application, 0, bytes({9}));
+	transfer(b, a); // something to acknowledge
+
+	a.queueReliable(ChannelId::Application, 7, pattern(3000));
+	a.sendUnreliable(ChannelId::Application, 8, bytes({1}));
+
+	const auto deadline = a.nextDeadline();
+
+	for (const SendClass sendClass : {SendClass::Application, SendClass::Unreliable})
+	{
+		const auto *first = a.peek(sendClass, now);
+		ASSERT_NE(first, nullptr);
+		const auto	offered = first->bytes();
+
+		const auto *again	= a.peek(sendClass, now);
+		ASSERT_NE(again, nullptr);
+		EXPECT_EQ(again->bytes(), offered) << "Until it is committed, the same datagram is offered";
+	}
+
+	const auto *ack = a.peekAck();
+	ASSERT_NE(ack, nullptr);
+	const auto offeredAck = ack->bytes();
+	ASSERT_NE(a.peekAck(), nullptr);
+	EXPECT_EQ(a.peekAck()->bytes(), offeredAck);
+
+	EXPECT_EQ(a.peek(SendClass::Control, now), nullptr) << "Nothing was queued there";
+
+	EXPECT_EQ(a.inFlightCount(), 0u) << "Nothing counts as sent";
+	EXPECT_EQ(a.stats().dataSent, 0u);
+	EXPECT_EQ(a.queuedMessageCount(), 1u);
+	EXPECT_EQ(a.nextDeadline(), deadline) << "No timer runs for a datagram that did not go out";
+
+	settle();
+	EXPECT_EQ(atB.size(), 2u) << "Everything that was only looked at still arrives";
+	EXPECT_EQ(a.stats().retransmissions, 0u);
+}
+
+
+TEST_F(ReliableLinkTest, AbortedDatagram_LeavesNoTrace)
+{
+	const auto body = pattern(3000); // three fragments
+	a.queueReliable(ChannelId::Application, 0, body);
+
+	const auto *first = a.peek(SendClass::Application, now);
+	ASSERT_NE(first, nullptr);
+	const OutgoingDatagram sent = *first;
+	a.commit(SendClass::Application, now);
+
+	// The socket refuses the second fragment: it is not committed
+	const auto *second = a.peek(SendClass::Application, now);
+	ASSERT_NE(second, nullptr);
+	const auto refused = second->bytes();
+
+	EXPECT_EQ(a.inFlightCount(), 1u);
+	EXPECT_EQ(a.stats().dataSent, 1u);
+	EXPECT_EQ(a.queuedMessageCount(), 1u);
+
+	now += 1ms;
+	const auto pass = a.takeOutgoing(now);
+
+	ASSERT_EQ(pass.size(), 2u);
+	EXPECT_EQ(pass[0].bytes(), refused) << "The refused datagram is offered again, with the same seq";
+	EXPECT_EQ(dataSeqs(pass), (std::vector<uint64_t>{2, 3}));
+
+	deliver(b, sent);
+	deliverPass(b, pass);
+	settle();
+
+	ASSERT_EQ(atB.size(), 1u);
+	EXPECT_EQ(atB[0].body, body);
+	EXPECT_EQ(a.stats().dataSent, 3u);
+	EXPECT_EQ(a.stats().retransmissions, 0u) << "A datagram that never went out was not lost either";
+}
+
+
+// ---------------------------------------------------------------------------
 // Congestion window
 // ---------------------------------------------------------------------------
 
