@@ -79,9 +79,6 @@ TEST(IPv4Address, DefaultConstructedIsUnspecified)
 
 TEST(IPv4Address, ClassifiesSpecialAddresses)
 {
-	EXPECT_TRUE(IPv4Address::parse("127.0.0.1")->isLoopback());
-	EXPECT_TRUE(IPv4Address::parse("127.255.255.254")->isLoopback()) << "The whole 127/8 block is loopback";
-	EXPECT_FALSE(IPv4Address::parse("128.0.0.1")->isLoopback());
 	EXPECT_TRUE(IPv4Address::parse("255.255.255.255")->isBroadcast());
 	EXPECT_FALSE(IPv4Address::parse("255.255.255.254")->isBroadcast());
 }

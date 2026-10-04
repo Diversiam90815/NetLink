@@ -35,7 +35,7 @@ static std::int64_t bytesPerLinkAfter(const std::initializer_list<Lane> lanes)
 	{
 		for (const auto &datagram : FakeNet::takeOutgoing(from, now, messages))
 		{
-			const auto bytes = datagram.bytes();
+			const auto bytes = FakeNet::bytesOf(datagram);
 			to.onPacket(*decodePacket(bytes), now);
 		}
 	};

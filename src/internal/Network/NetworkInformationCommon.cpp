@@ -7,50 +7,6 @@
 */
 
 #include "NetworkInformation.h"
-#include "NetLinkLog.h"
-
-#include <algorithm>
-#include <ranges>
-
-
-bool netlink::NetworkInformation::setCurrentNetworkAdapter(const uint64_t adapterID)
-{
-	const auto it = std::ranges::find_if(mNetworkAdapters, [adapterID](const NetworkAdapterInternal &a) { return a.ID == adapterID; });
-
-	if (it == mNetworkAdapters.end())
-	{
-		NETLINK_LOG_WARNING("No adapter found with ID {}", adapterID);
-		return false;
-	}
-
-	return setCurrentNetworkAdapter(*it);
-}
-
-
-bool netlink::NetworkInformation::setCurrentNetworkAdapter(const NetworkAdapterInternal &adapter)
-{
-	if (mCurrentNetworkAdapter == adapter)
-		return false;
-
-	mCurrentNetworkAdapter = adapter;
-
-	NETLINK_LOG_INFO("Set user defined adapter to :");
-	NETLINK_LOG_INFO("\t Adapter:\t {}", adapter.AdapterName);
-	NETLINK_LOG_INFO("\t IPv4: \t\t\t{}", adapter.IPv4);
-	NETLINK_LOG_INFO("\t Subnet: \t\t{}", adapter.Subnet);
-	NETLINK_LOG_INFO("\t ID: \t\t\t{}", adapter.ID);
-
-	if (mOnAdapterChanged)
-		mOnAdapterChanged(adapter.IPv4);
-
-	return true;
-}
-
-
-const netlink::NetworkAdapterInternal &netlink::NetworkInformation::getCurrentNetworkAdapter() const
-{
-	return mCurrentNetworkAdapter;
-}
 
 
 netlink::NetworkAdapterInternal netlink::NetworkInformation::isAdapterCurrentlyAvailable(const NetworkAdapterInternal &adapter)

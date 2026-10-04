@@ -78,9 +78,6 @@ struct OutgoingDatagram
 
 	std::span<const uint8_t>		   header() const { return {head.data(), headSize}; }
 	std::span<const uint8_t>		   body() const { return message ? std::span<const uint8_t>(message->data() + offset, length) : std::span<const uint8_t>(owned); }
-
-	// Header and body joined, as they go onto the wire
-	std::vector<uint8_t>			   bytes() const;
 };
 
 // Where a link takes the messages of a lane from, one at a time, when it is able to send the next one
@@ -111,7 +108,7 @@ struct LinkStats
 };
 
 // Random, non-zero stream ID. Identifies one lifetime of a link's stream, so a peer can tell a fresh stream (seq restarts at 1) from a stale one.
-uint32_t makeStreamID(uint32_t different = 0);
+uint32_t makeStreamID();
 
 
 class ReliableLink

@@ -39,7 +39,7 @@ double initialWindow(const LinkTimings &timings)
 } // namespace
 
 
-uint32_t makeStreamID(const uint32_t different)
+uint32_t makeStreamID()
 {
 	thread_local std::mt19937 generator = []
 	{
@@ -47,26 +47,8 @@ uint32_t makeStreamID(const uint32_t different)
 		std::seed_seq	   seed{device(), device(), device(), device(), device(), device(), device(), device()};
 		return std::mt19937(seed);
 	}();
-	std::uniform_int_distribution<uint32_t> distribution(1, UINT32_MAX);
 
-	uint32_t								id = 0;
-	do
-	{
-		id = distribution(generator);
-	} while (id == different);
-
-	return id;
-}
-
-
-std::vector<uint8_t> OutgoingDatagram::bytes() const
-{
-	const auto			 payload = body();
-	std::vector<uint8_t> datagram(headSize + payload.size());
-
-	std::copy_n(head.begin(), headSize, datagram.begin());
-	std::ranges::copy(payload, datagram.begin() + headSize);
-	return datagram;
+	return std::uniform_int_distribution<uint32_t>(1, UINT32_MAX)(generator);
 }
 
 

@@ -55,6 +55,18 @@ private:
 	std::array<std::deque<netlink::channel::OutboundMessage>, netlink::channel::LaneCount> mQueues;
 };
 
+// Header and body of a datagram joined, as they go onto the wire
+inline std::vector<uint8_t> bytesOf(const netlink::channel::OutgoingDatagram &datagram)
+{
+	const auto			 header = datagram.header();
+	const auto			 body	= datagram.body();
+	std::vector<uint8_t> bytes(header.begin(), header.end());
+
+	bytes.insert(bytes.end(), body.begin(), body.end());
+	return bytes;
+}
+
+
 // Everything a link has to send right now, in one pass: Acks and Pings first, then the lanes in order of urgency
 inline std::vector<netlink::channel::OutgoingDatagram> takeOutgoing(netlink::channel::ReliableLink &link, const netlink::channel::ReliableLink::TimePoint now,
 																	netlink::channel::MessageSource &source)

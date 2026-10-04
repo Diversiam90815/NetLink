@@ -87,7 +87,7 @@ protected:
 
 	void deliver(ReliableLink &to, const OutgoingDatagram &datagram)
 	{
-		const auto bytes  = datagram.bytes();
+		const auto bytes  = FakeNet::bytesOf(datagram);
 		const auto packet = decodePacket(bytes);
 		ASSERT_TRUE(packet.has_value()) << "Links must only produce well formed packets";
 		to.onPacket(*packet, now);
@@ -100,7 +100,7 @@ protected:
 
 		for (const auto &datagram : pass)
 		{
-			const auto bytes  = datagram.bytes();
+			const auto bytes  = FakeNet::bytesOf(datagram);
 			const auto packet = decodePacket(bytes);
 			EXPECT_TRUE(packet.has_value()) << "Links must only produce well formed packets";
 			if (!packet || (drop && drop(packet->header)))
@@ -155,7 +155,7 @@ protected:
 
 	static DecodedPacket decoded(const OutgoingDatagram &datagram, std::vector<uint8_t> &storage)
 	{
-		storage = datagram.bytes();
+		storage = FakeNet::bytesOf(datagram);
 		return *decodePacket(storage);
 	}
 
@@ -1038,9 +1038,9 @@ TEST_F(ReliableLinkTest, NoDatagramExceedsTheMaximumSize)
 	ASSERT_FALSE(pass.empty());
 
 	for (const auto &datagram : pass)
-		EXPECT_LE(datagram.bytes().size(), internal::MaxDatagramSize);
+		EXPECT_LE(FakeNet::bytesOf(datagram).size(), internal::MaxDatagramSize);
 
-	EXPECT_EQ(pass.front().bytes().size(), internal::MaxDatagramSize) << "The first fragment, which carries every extension, uses the datagram completely";
+	EXPECT_EQ(FakeNet::bytesOf(pass.front()).size(), internal::MaxDatagramSize) << "The first fragment, which carries every extension, uses the datagram completely";
 }
 
 
@@ -1150,18 +1150,18 @@ TEST_F(ReliableLinkTest, Peek_IsIdempotent)
 	{
 		const auto *first = a.peek(lane, now, fromA);
 		ASSERT_NE(first, nullptr);
-		const auto	offered = first->bytes();
+		const auto	offered = FakeNet::bytesOf(*first);
 
 		const auto *again	= a.peek(lane, now, fromA);
 		ASSERT_NE(again, nullptr);
-		EXPECT_EQ(again->bytes(), offered) << "Until it is committed, the same datagram is offered";
+		EXPECT_EQ(FakeNet::bytesOf(*again), offered) << "Until it is committed, the same datagram is offered";
 	}
 
 	const auto *ack = a.peekAck();
 	ASSERT_NE(ack, nullptr);
-	const auto offeredAck = ack->bytes();
+	const auto offeredAck = FakeNet::bytesOf(*ack);
 	ASSERT_NE(a.peekAck(), nullptr);
-	EXPECT_EQ(a.peekAck()->bytes(), offeredAck);
+	EXPECT_EQ(FakeNet::bytesOf(*a.peekAck()), offeredAck);
 
 	EXPECT_EQ(a.peek(Lane::Control, now, fromA), nullptr) << "Nothing was queued there";
 
@@ -1189,7 +1189,7 @@ TEST_F(ReliableLinkTest, AbortedDatagram_LeavesNoTrace)
 	// The socket refuses the second fragment: it is not committed
 	const auto *second = a.peek(Lane::Reliable, now, fromA);
 	ASSERT_NE(second, nullptr);
-	const auto refused = second->bytes();
+	const auto refused = FakeNet::bytesOf(*second);
 
 	EXPECT_EQ(a.inFlightCount(), 1u);
 	EXPECT_EQ(a.stats().dataSent, 1u);
@@ -1198,7 +1198,7 @@ TEST_F(ReliableLinkTest, AbortedDatagram_LeavesNoTrace)
 	const auto pass = take(a);
 
 	ASSERT_EQ(pass.size(), 2u);
-	EXPECT_EQ(pass[0].bytes(), refused) << "The refused datagram is offered again, with the same seq";
+	EXPECT_EQ(FakeNet::bytesOf(pass[0]), refused) << "The refused datagram is offered again, with the same seq";
 	EXPECT_EQ(dataSeqs(pass), (std::vector<uint64_t>{2, 3}));
 
 	deliver(b, sent);

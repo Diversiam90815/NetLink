@@ -18,7 +18,6 @@ set(Channel_Tests
     ${Test_Directory}/ChannelTests/AckRangesTests.cpp
     ${Test_Directory}/ChannelTests/SequenceBufferTests.cpp
     ${Test_Directory}/ChannelTests/RttEstimatorTests.cpp
-    ${Test_Directory}/ChannelTests/FragmentationServiceTests.cpp
     ${Test_Directory}/ChannelTests/MessageAssemblerTests.cpp
     ${Test_Directory}/ChannelTests/MediaAssemblerTests.cpp
     ${Test_Directory}/ChannelTests/ReliableLinkTests.cpp

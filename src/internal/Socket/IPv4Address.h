@@ -84,7 +84,6 @@ public:
 	}
 
 	constexpr bool isUnspecified() const { return mValue == 0; }		 // 0.0.0.0
-	constexpr bool isLoopback() const { return (mValue >> 24) == 127; }	 // 127.0.0.0/8
 	constexpr bool isBroadcast() const { return mValue == 0xFFFFFFFFu; } // 255.255.255.255
 
 	// True for a well formed netmask

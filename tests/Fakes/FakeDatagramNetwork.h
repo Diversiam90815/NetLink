@@ -136,12 +136,6 @@ public:
 		mTap = std::move(tap);
 	}
 
-	size_t deliveredCount() const
-	{
-		std::lock_guard<std::mutex> lock(mMutex);
-		return mDelivered;
-	}
-
 	// Datagrams the sockets of that host accepted
 	size_t sentBy(std::string_view hostIp) const
 	{
@@ -361,7 +355,6 @@ private:
 	std::map<IPv4Address, size_t>		mSentBy;
 	Tap									mTap;
 	uint16_t							mNextEphemeralPort{50000};
-	size_t								mDelivered{0};
 	size_t								mBlockedSends{0};
 };
 
@@ -574,7 +567,6 @@ inline Result<size_t> FakeDatagramNetwork::send(const Inbox *sender, const Socke
 		arrival.from	= from;
 
 		targets			= targetsOf(from.ip, to);
-		mDelivered += targets.size();
 	}
 
 	for (size_t i = 0; i < targets.size(); ++i)

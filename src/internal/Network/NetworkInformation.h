@@ -10,7 +10,6 @@
 #include <cstdint>
 #include <vector>
 #include <memory>
-#include <functional>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -20,8 +19,6 @@
 
 namespace netlink
 {
-
-using AdapterChangedCallback = std::function<void(const std::string &newIPv4)>;
 
 enum class AdapterTypes
 {
@@ -122,15 +119,9 @@ public:
 
 	void									   processAdapter();
 
-	bool									   setCurrentNetworkAdapter(const uint64_t adapterID);
-	bool									   setCurrentNetworkAdapter(const NetworkAdapterInternal &adapter);
-	const NetworkAdapterInternal			  &getCurrentNetworkAdapter() const;
-
 	NetworkAdapterInternal					   isAdapterCurrentlyAvailable(const NetworkAdapterInternal &adapter);
 
 	const std::vector<NetworkAdapterInternal> &getAvailableNetworkAdapters() const;
-
-	void									   setOnAdapterChanged(AdapterChangedCallback cb) { mOnAdapterChanged = std::move(cb); }
 
 private:
 	// Platform-specific implementation, defined in NetworkInformation<Platform>.cpp/.mm
@@ -138,9 +129,6 @@ private:
 	std::unique_ptr<Impl>				mImpl;
 
 	std::vector<NetworkAdapterInternal> mNetworkAdapters{};
-	NetworkAdapterInternal				mCurrentNetworkAdapter{};
-
-	AdapterChangedCallback				mOnAdapterChanged;
 };
 
 
