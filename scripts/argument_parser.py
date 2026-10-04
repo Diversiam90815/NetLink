@@ -58,7 +58,7 @@ def create_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--benchmark-filter",
         default=None,
-        help="Only run benchmarks matching this regex, e.g. 'TimeoutService' or 'PeerChannel/Reliable'."
+        help="Only run benchmarks matching this regex, e.g. 'ReliableLink' or 'Engine_Throughput'."
     )
 
     parser.add_argument(
