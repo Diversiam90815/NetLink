@@ -91,12 +91,6 @@ public:
 	virtual std::optional<OutboundMessage> next(Lane lane) = 0;
 };
 
-enum class LinkEvent
-{
-	Failed,		   // Data stayed unacknowledged for too long: the link restarted its stream
-	PeerRestarted, // The remote came back with a new stream ID: all state for it was reset
-};
-
 struct LinkStats
 {
 	uint64_t dataSent{0};			 // Data packets of the acknowledged lanes, first transmissions
@@ -108,6 +102,8 @@ struct LinkStats
 	uint64_t staleDropped{0};
 	uint64_t outOfWindowDropped{0};
 	uint64_t delivered{0};			 // whole messages
+	uint64_t bytesSent{0};			 // payload that was sent for the first time, Control aside
+	uint64_t bytesReceived{0};		 // payload of the delivered messages, Control aside
 	uint64_t mediaSent{0};			 // Media datagrams
 	uint64_t mediaReceived{0};		 // ... that arrived here
 	uint64_t mediaReceivedByPeer{0}; // ... that arrived at the remote, as its latest Ack said
@@ -129,6 +125,10 @@ public:
 
 	// budget: shared by every link that puts large messages together. None: every message is taken.
 	explicit ReliableLink(const LinkTimings &timings = {}, uint32_t localStreamID = makeStreamID(), AssemblyBudget *budget = nullptr);
+
+	// From now on the remote has to be heard from: it is asked for a sign of life after timings.keepAlive of silence,
+	// and the link fails after timings.peerTimeout of it
+	void						  supervise(TimePoint now);
 
 	// --- Sending --------------------------------------------------------------
 
@@ -166,12 +166,18 @@ public:
 	// --- Output ----------------------------------------------------------------
 
 	std::vector<DeliveredMessage> takeDelivered() { return std::exchange(mDelivered, {}); }
-	std::vector<LinkEvent>		  takeEvents() { return std::exchange(mEvents, {}); }
 
 	// --- State -----------------------------------------------------------------
 
+	// The remote stopped answering: the link sends and takes nothing anymore
+	bool						  hasFailed() const { return mFailed; }
+
 	// A message of an acknowledged lane is on its way and not completely acknowledged yet
 	bool						  hasPendingReliable() const;
+	bool						  hasPending(Lane lane) const;
+
+	// Media messages of the remote that were given up on because newer ones arrived
+	uint64_t					  mediaIncomplete() const { return mMediaAssembler ? mMediaAssembler->abandoned() : 0; }
 
 	// Data packets that were sent and are not acknowledged yet (those waiting for their retransmission included)
 	size_t						  inFlightCount() const;
@@ -285,7 +291,6 @@ private:
 	OutgoingDatagram		 makeDatagram(const PacketHeader &header) const;
 	PacketHeader			 makeHeader(PacketFlags flags, uint64_t seq) const;
 
-	// Starts fresh streams: used after a failure (new local stream ID) and after a peer restart
 	void					 resetStreams();
 
 
@@ -308,6 +313,8 @@ private:
 	uint64_t										 mTransmissions{0};	 // counts every Data transmission
 	uint64_t										 mLargestAcked{0};	 // the latest transmission that was acknowledged
 	std::optional<TimePoint>						 mStalledSince;		 // data is unacknowledged: when the last acknowledgement arrived
+	std::optional<TimePoint>						 mLastReceived;		 // supervised: when the remote was last heard from
+	TimePoint										 mPingedAt{};		 // ... and when it was last asked
 	int												 mTimeoutsInARow{0}; // retransmission timeouts since the last acknowledgement
 
 	// Congestion control, for Reliable and Bulk together
@@ -323,7 +330,7 @@ private:
 	OutgoingDatagram								 mPeeked;			// what the last peek() returned
 
 	std::vector<DeliveredMessage>					 mDelivered;
-	std::vector<LinkEvent>							 mEvents;
+	bool											 mFailed{false};
 	LinkStats										 mStats;
 };
 

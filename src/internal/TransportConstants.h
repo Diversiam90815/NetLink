@@ -24,14 +24,14 @@ inline constexpr size_t MaxMessagePayload		 = size_t{16} * 1024 * 1024; // 16 Mi
 // ... and for one that is sent without acknowledgement
 inline constexpr size_t MaxMediaPayload			 = size_t{64} * 1024;
 
-// Largest datagram the peer channel puts on the wire: stays below the Ethernet MTU, so IP never fragments it
+// Largest datagram an engine puts on the wire: stays below the Ethernet MTU, so IP never fragments it
 inline constexpr size_t MaxDatagramSize			 = 1200;
 
-// Receive buffer of the peer channel: large enough to absorb bursts from many peers at once (OS defaults can be as
+// Receive buffer of the channel socket: large enough to absorb bursts from many peers at once (OS defaults can be as
 // small as 64 KB, about 50 datagrams). The OS may cap it.
 inline constexpr int	ChannelReceiveBufferSize = 4 * 1024 * 1024;
 
-// Send buffer of the peer channel, per datagram of one burst of its send budget (what Linux accounts for a full
+// Send buffer of the channel socket, per datagram of one burst of its send budget (what Linux accounts for a full
 // datagram). Windows keeps its default: a larger buffer measurably slowed sending there.
 #if defined(_WIN32)
 inline constexpr int ChannelSendBufferPerDatagram = 0;
@@ -39,8 +39,22 @@ inline constexpr int ChannelSendBufferPerDatagram = 0;
 inline constexpr int ChannelSendBufferPerDatagram = 2304;
 #endif
 
-// How long a worker thread backs off after its socket failed
-inline constexpr auto SocketPollInterval = std::chrono::milliseconds{100};
+// How often an engine announces itself and looks at its network adapter
+inline constexpr auto	BeaconInterval	   = std::chrono::seconds{2};
+
+// A discovered peer that did not announce itself for this long is forgotten
+inline constexpr auto	PeerExpiry		   = std::chrono::seconds{6};
+inline constexpr size_t MaxDiscoveredPeers = 1024;
+
+// How long the application may take to answer a connection request
+inline constexpr auto	DecisionTimeout	   = std::chrono::seconds{30};
+
+// A session that is being ended waits this long for what is still to be sent, then for its goodbye to be acknowledged
+inline constexpr auto	DrainTimeout	   = std::chrono::seconds{1};
+inline constexpr auto	CloseLinger		   = std::chrono::milliseconds{250};
+
+// Sessions that are not connected yet: requests of further peers are ignored
+inline constexpr size_t MaxPendingSessions = 64;
 
 } // namespace netlink::internal
 
@@ -72,13 +86,13 @@ inline constexpr size_t	  MediaAssemblySlots	  = 4;
 inline constexpr size_t	  BacklogPauseBytes		  = size_t{32} * 1024 * 1024;
 inline constexpr size_t	  BacklogResumeBytes	  = size_t{16} * 1024 * 1024;
 
-// Messages that are being put together, all peers of a channel together
+// Messages that are being put together, all peers of an engine together
 inline constexpr size_t	  AssemblyBudgetBytes	  = size_t{256} * 1024 * 1024;
 
 // Messages of one lane to one peer that wait to be sent
 inline constexpr size_t	  DefaultSendQueueBytes	  = size_t{64} * 1024 * 1024;
 
-// Datagrams a channel sends per second, to all peers together
+// Datagrams an engine sends per second, to all peers together
 inline constexpr uint32_t DefaultMaxSendRate	  = 80'000;
 
 

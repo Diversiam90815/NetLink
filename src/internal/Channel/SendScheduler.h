@@ -17,8 +17,9 @@
 #include <utility>
 #include <vector>
 
+#include "NetLink/NetLink.h"
+
 #include "Protocol/PacketFlags.h"
-#include "Socket/SocketTypes.h"
 
 
 namespace netlink::channel
@@ -29,7 +30,7 @@ class SendScheduler
 public:
 	using Clock						= std::chrono::steady_clock;
 	using TimePoint					= Clock::time_point;
-	using Peer						= net::SocketAddress;
+	using Peer						= PeerId;
 
 	// Datagrams a peer sends before the next one of its lane gets its turn
 	static constexpr size_t Quantum = 4;

@@ -92,6 +92,13 @@ ReliableLink::Stream &ReliableLink::streamFor(const Lane lane)
 // Sending
 // ---------------------------------------------------------------------------
 
+void ReliableLink::supervise(const TimePoint now)
+{
+	mLastReceived = now;
+	mPingedAt	  = now;
+}
+
+
 void ReliableLink::sendPing()
 {
 	mPingDue |= bitOf(Lane::Control);
@@ -123,6 +130,9 @@ std::vector<OutgoingDatagram> ReliableLink::takeOutgoing(const TimePoint now, Me
 
 const OutgoingDatagram *ReliableLink::peekAck()
 {
+	if (mFailed)
+		return nullptr;
+
 	if (mPendingAcks.empty())
 	{
 		for (const Lane lane : StreamLanes)
@@ -188,6 +198,9 @@ OutgoingDatagram ReliableLink::makeAck(const Lane lane)
 
 const OutgoingDatagram *ReliableLink::peek(const Lane lane, const TimePoint, MessageSource &source)
 {
+	if (mFailed)
+		return nullptr;
+
 	if (lane == Lane::Media)
 		return peekMedia(source);
 
@@ -256,6 +269,7 @@ void ReliableLink::commit(const Lane lane, const TimePoint now)
 
 		++mNextMediaSeq;
 		++mStats.mediaSent;
+		mStats.bytesSent += mPeeked.length;
 
 		if (++mMediaCursor->next >= mMediaCursor->count)
 			mMediaCursor.reset();
@@ -379,6 +393,9 @@ void ReliableLink::transmit(Stream &stream, const Lane lane, const uint64_t seq,
 	++entry.transmissions;
 	++stream.onTheWire;
 
+	if (entry.transmissions == 1 && lane != Lane::Control)
+		mStats.bytesSent += entry.length;
+
 	mSent.push_back({.transmission = entry.transmission, .seq = seq, .lane = lane});
 	updateProgressClock(now, false);
 }
@@ -392,25 +409,20 @@ void ReliableLink::onPacket(const DecodedPacket &packet, const TimePoint now)
 {
 	const PacketHeader &header = packet.header;
 
-	if (header.dstStreamID != 0 && header.dstStreamID != mLocalStreamID)
+	if (mFailed)
+		return;
+
+	// Of another stream than the one this link talks to
+	if ((header.dstStreamID != 0 && header.dstStreamID != mLocalStreamID) || (mRemoteStreamID && *mRemoteStreamID != header.srcStreamID))
 	{
 		++mStats.staleDropped;
 		return;
 	}
 
-	if (!mRemoteStreamID)
-	{
-		mRemoteStreamID = header.srcStreamID;
-	}
-	else if (*mRemoteStreamID != header.srcStreamID)
-	{
-		NETLINK_LOG_INFO("Peer restarted (stream ID {} -> {}), resetting the link", *mRemoteStreamID, header.srcStreamID);
+	mRemoteStreamID = header.srcStreamID;
 
-		// Whatever was in flight belonged to a session the peer no longer knows
-		resetStreams();
-		mRemoteStreamID = header.srcStreamID;
-		mEvents.push_back(LinkEvent::PeerRestarted);
-	}
+	if (mLastReceived)
+		mLastReceived = now;
 
 	const Lane lane = header.flags.lane();
 
@@ -485,6 +497,7 @@ bool ReliableLink::acceptInOrder(Stream &stream, const Lane lane, const PacketHe
 
 	if (auto message = stream.assembler.accept(header, body))
 	{
+		mStats.bytesReceived += lane != Lane::Control ? message->body.size() : 0;
 		mDelivered.push_back(DeliveredMessage{.lane = lane, .tag = message->tag, .body = std::move(message->body)});
 		++mStats.delivered;
 	}
@@ -527,6 +540,7 @@ void ReliableLink::handleMedia(const PacketHeader &header, const std::span<const
 
 	if (auto message = mMediaAssembler->accept(header, body))
 	{
+		mStats.bytesReceived += message->body.size();
 		mDelivered.push_back(DeliveredMessage{.lane = Lane::Media, .tag = message->tag, .body = std::move(message->body)});
 		++mStats.delivered;
 	}
@@ -714,13 +728,11 @@ void ReliableLink::updateProgressClock(const TimePoint now, const bool progress)
 
 void ReliableLink::fail()
 {
-	NETLINK_LOG_WARNING("Link failed: nothing was acknowledged for {} ms", mTimings.peerTimeout.count());
+	NETLINK_LOG_WARNING("Link failed: the remote did not answer for {} ms", mTimings.peerTimeout.count());
 
-	// The stream cannot continue with a gap: start a new one under a new stream ID, which tells the remote to reset as well
-	mLocalStreamID = makeStreamID(mLocalStreamID);
-	mRemoteStreamID.reset();
 	resetStreams();
-	mEvents.push_back(LinkEvent::Failed);
+	mLastReceived.reset();
+	mFailed = true;
 }
 
 
@@ -730,10 +742,20 @@ void ReliableLink::fail()
 
 void ReliableLink::onTimer(const TimePoint now)
 {
-	if (mStalledSince && now - *mStalledSince >= mTimings.peerTimeout)
+	if (mFailed)
+		return;
+
+	if ((mStalledSince && now - *mStalledSince >= mTimings.peerTimeout) || (mLastReceived && now - *mLastReceived >= mTimings.peerTimeout))
 	{
 		fail();
 		return;
+	}
+
+	// A remote whose stream is not known yet cannot be asked: nothing but the first Control packet goes out without it
+	if (mLastReceived && mRemoteStreamID && now - std::max(*mLastReceived, mPingedAt) >= mTimings.keepAlive)
+	{
+		mPingDue |= bitOf(Lane::Control);
+		mPingedAt = now;
 	}
 
 	// The timeout backs off while nothing at all is acknowledged, not per packet: on a path that merely loses packets,
@@ -798,6 +820,14 @@ std::optional<ReliableLink::TimePoint> ReliableLink::nextDeadline() const
 	if (mStalledSince)
 		consider(*mStalledSince + mTimings.peerTimeout);
 
+	if (mLastReceived)
+	{
+		consider(*mLastReceived + mTimings.peerTimeout);
+
+		if (mRemoteStreamID)
+			consider(std::max(*mLastReceived, mPingedAt) + mTimings.keepAlive);
+	}
+
 	for (const auto &stream : mStreams)
 	{
 		if (stream && stream->peerPaused && stream->probeAt)
@@ -834,6 +864,16 @@ OutgoingDatagram ReliableLink::makeDatagram(const PacketHeader &header) const
 bool ReliableLink::hasPendingReliable() const
 {
 	return std::ranges::any_of(mStreams, [](const auto &stream) { return stream && (!stream->inFlight.empty() || stream->cursor.has_value()); });
+}
+
+
+bool ReliableLink::hasPending(const Lane lane) const
+{
+	if (lane == Lane::Media)
+		return mMediaCursor.has_value();
+
+	const Stream *stream = existingStream(lane);
+	return stream && (!stream->inFlight.empty() || stream->cursor.has_value());
 }
 
 

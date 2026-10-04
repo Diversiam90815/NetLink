@@ -7,160 +7,82 @@
 
 #include "NetLink/NetLink.h"
 
-#include <algorithm>
-
 #include "Core/NetLinkCore.h"
-#include "Network/NetworkInformation.h"
 
 
-// The facade adds network adapter handling on top of the core, which owns and wires all services
 struct netlink::NetLink::Impl
 {
-	NetLinkCore		   core;
-	NetworkInformation network; // destroyed before the core its callback refers to
+	NetLinkCore core;
 };
 
-
-// ---------------------------------------------------------------------------
-// Helpers: map internal <-> public types
-// ---------------------------------------------------------------------------
-
-static netlink::AdapterPriority mapPriority(const netlink::AdapterPriorityInternal internal)
-{
-	switch (internal)
-	{
-	case netlink::AdapterPriorityInternal::Preferred: return netlink::AdapterPriority::Preferred;
-	case netlink::AdapterPriorityInternal::Available: return netlink::AdapterPriority::Available;
-	default: return netlink::AdapterPriority::Suppressed;
-	}
-}
-
-static netlink::NetworkAdapter toPublicAdapter(const netlink::NetworkAdapterInternal &internal)
-{
-	netlink::NetworkAdapter pub;
-	pub.adapterName = internal.AdapterName;
-	pub.networkName = internal.NetworkName;
-	pub.ipv4		= internal.IPv4;
-	pub.id			= internal.ID;
-	pub.priority	= mapPriority(internal.Priority);
-	return pub;
-}
-
-
-// ---------------------------------------------------------------------------
-// Lifecycle
-// ---------------------------------------------------------------------------
 
 netlink::NetLink::NetLink() : pImpl(std::make_unique<Impl>()) {}
 
 
-netlink::NetLink::~NetLink()
+netlink::NetLink::~NetLink() = default;
+
+
+bool netlink::NetLink::start(const NetLinkConfig &config, const NetLinkCallbacks &callbacks)
 {
-	shutdown();
+	return pImpl->core.start(config, callbacks);
 }
 
 
-void netlink::NetLink::configure(const NetLinkConfig &config, const NetLinkCallbacks &callbacks) const
+void netlink::NetLink::stop()
 {
-	pImpl->core.configure(config, callbacks);
-}
-
-
-bool netlink::NetLink::init() const
-{
-	Impl *impl = pImpl.get();
-
-	// Adapter selected (by the app or automatically): move all networking to its address and tell the app
-	impl->network.setOnAdapterChanged(
-		[impl](const std::string &newIPv4)
-		{
-			impl->core.setLocalAddress(newIPv4, impl->network.getCurrentNetworkAdapter().Subnet);
-
-			impl->core.postEvent(
-				[adapter = toPublicAdapter(impl->network.getCurrentNetworkAdapter())](const NetLinkCallbacks &callbacks)
-				{
-					if (callbacks.onNetworkAdapterChanged)
-						callbacks.onNetworkAdapterChanged(adapter);
-				});
-		});
-
-	if (!impl->network.init())
-		return false;
-
-	impl->network.processAdapter();
-
-	if (!impl->core.init())
-		return false;
-
-	if (const auto &current = impl->network.getCurrentNetworkAdapter(); current.isValid())
-	{
-		impl->core.setLocalAddress(current.IPv4, current.Subnet);
-		return true;
-	}
-
-	// No adapter chosen yet: default to the best candidate, the app can still switch via setActiveAdapter()
-	const auto &adapters  = impl->network.getAvailableNetworkAdapters();
-	auto		preferred = std::ranges::find_if(adapters, [](const auto &a) { return a.isValid() && a.Priority == AdapterPriorityInternal::Preferred; });
-
-	if (preferred == adapters.end())
-		preferred = std::ranges::find_if(adapters, [](const auto &a) { return a.isValid() && a.Priority == AdapterPriorityInternal::Available; });
-
-	if (preferred != adapters.end())
-		impl->network.setCurrentNetworkAdapter(*preferred);
-
-	return true;
-}
-
-
-void netlink::NetLink::shutdown() const
-{
-	pImpl->core.shutdown();
+	pImpl->core.stop();
 }
 
 
 // ---------------------------------------------------------------------------
-// Discovery & connection
+// Discovery & sessions
 // ---------------------------------------------------------------------------
 
-bool netlink::NetLink::startDiscovery() const
+bool netlink::NetLink::startDiscovery()
 {
 	return pImpl->core.startDiscovery();
 }
 
 
-void netlink::NetLink::stopDiscovery() const
+void netlink::NetLink::stopDiscovery()
 {
 	pImpl->core.stopDiscovery();
 }
 
 
-std::vector<netlink::Endpoint> netlink::NetLink::getPotentialEndpoints() const
+std::vector<netlink::PeerInfo> netlink::NetLink::peers() const
 {
-	return pImpl->core.getPotentialEndpoints();
+	return pImpl->core.peers();
 }
 
 
-bool netlink::NetLink::connectTo(const Endpoint &remote) const
+bool netlink::NetLink::connect(const PeerId peer)
 {
-	return pImpl->core.connectTo(remote);
+	return pImpl->core.connect(peer);
 }
 
 
-void netlink::NetLink::respondToConnection(const bool accepted) const
+void netlink::NetLink::accept(const PeerId peer)
 {
-	pImpl->core.respondToConnection(accepted);
+	pImpl->core.accept(peer);
 }
 
 
-void netlink::NetLink::disconnect() const
+void netlink::NetLink::decline(const PeerId peer)
 {
-	pImpl->core.disconnect();
+	pImpl->core.decline(peer);
 }
 
 
-netlink::ConnectionState netlink::NetLink::getConnectionState() const
+void netlink::NetLink::disconnect(const PeerId peer)
 {
-	return pImpl->core.getConnectionState();
+	pImpl->core.disconnect(peer);
+}
+
+
+std::vector<netlink::PeerId> netlink::NetLink::connectedPeers() const
+{
+	return pImpl->core.connectedPeers();
 }
 
 
@@ -168,15 +90,27 @@ netlink::ConnectionState netlink::NetLink::getConnectionState() const
 // Messaging
 // ---------------------------------------------------------------------------
 
-bool netlink::NetLink::send(const Message &message, const DeliveryMode mode, const std::chrono::milliseconds timeout) const
+netlink::SendResult netlink::NetLink::send(const PeerId peer, const uint32_t type, const std::span<const uint8_t> data, const Lane lane, const std::chrono::milliseconds timeout)
 {
-	return pImpl->core.send(message.type, message.data, mode, timeout);
+	return pImpl->core.send(peer, type, std::vector<uint8_t>(data.begin(), data.end()), lane, timeout);
 }
 
 
-bool netlink::NetLink::send(const uint32_t type, const std::vector<uint8_t> &payload, const DeliveryMode mode, const std::chrono::milliseconds timeout) const
+netlink::SendResult netlink::NetLink::send(const PeerId peer, const uint32_t type, std::vector<uint8_t> &&data, const Lane lane, const std::chrono::milliseconds timeout)
 {
-	return pImpl->core.send(type, payload, mode, timeout);
+	return pImpl->core.send(peer, type, std::move(data), lane, timeout);
+}
+
+
+size_t netlink::NetLink::broadcast(const uint32_t type, const std::span<const uint8_t> data, const Lane lane)
+{
+	return pImpl->core.broadcast(type, data, lane);
+}
+
+
+std::optional<netlink::PeerStats> netlink::NetLink::stats(const PeerId peer) const
+{
+	return pImpl->core.stats(peer);
 }
 
 
@@ -186,26 +120,17 @@ bool netlink::NetLink::send(const uint32_t type, const std::vector<uint8_t> &pay
 
 std::vector<netlink::NetworkAdapter> netlink::NetLink::getAvailableAdapters() const
 {
-	const auto				   &internal = pImpl->network.getAvailableNetworkAdapters();
-
-	std::vector<NetworkAdapter> result;
-	result.reserve(internal.size());
-
-	for (const auto &adapter : internal)
-		result.push_back(toPublicAdapter(adapter));
-
-	return result;
+	return pImpl->core.getAvailableAdapters();
 }
 
 
-bool netlink::NetLink::setActiveAdapter(const int &adapterID) const
+bool netlink::NetLink::setActiveAdapter(const uint64_t adapterID)
 {
-	// Fires onAdapterChanged, which moves all networking to the new address
-	return pImpl->network.setCurrentNetworkAdapter(adapterID);
+	return pImpl->core.setActiveAdapter(adapterID);
 }
 
 
-int netlink::NetLink::getActiveAdapterID() const
+uint64_t netlink::NetLink::getActiveAdapterID() const
 {
-	return pImpl->network.getCurrentNetworkAdapter().ID;
+	return pImpl->core.getActiveAdapterID();
 }

@@ -32,12 +32,6 @@ if (NETLINK_ENABLE_LOGGING)
     )
 endif ()
 
-CPMAddPackage(
-        NAME nlohmann_json
-        GITHUB_REPOSITORY nlohmann/json
-        VERSION 3.11.3
-)
-
 file(GLOB_RECURSE NETWORKING_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp)
 file(GLOB_RECURSE NETWORKING_HEADERS ${CMAKE_CURRENT_SOURCE_DIR}/include/*.h)
 file(GLOB_RECURSE NETWORKING_INTERNAL_HEADERS ${CMAKE_CURRENT_SOURCE_DIR}/src/*.h)
@@ -106,7 +100,6 @@ target_include_directories(${PROJECT_NAME}
         PRIVATE
         ${CMAKE_CURRENT_BINARY_DIR}/generated
         ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/internal/Discovery
         ${CMAKE_CURRENT_SOURCE_DIR}/src/internal/Util
 )
 
@@ -121,8 +114,6 @@ if (NETLINK_ENABLE_LOGGING)
     target_compile_definitions(${PROJECT_NAME} PRIVATE NETLINK_LOGGING_ENABLED)
     target_link_libraries(${PROJECT_NAME} PRIVATE $<BUILD_INTERFACE:Logger>)
 endif ()
-
-target_link_libraries(${PROJECT_NAME} PRIVATE $<BUILD_INTERFACE:nlohmann_json::nlohmann_json>)
 
 if (WIN32)
     target_link_libraries(${PROJECT_NAME} PRIVATE iphlpapi ws2_32 wlanapi winmm)
@@ -188,17 +179,11 @@ if (NETLINK_BUILD_TESTS OR NETLINK_BUILD_BENCHMARKS)
     # Internal headers for in-tree consumers of the library
     add_library(NetLinkInternal INTERFACE)
 
-    target_link_libraries(NetLinkInternal INTERFACE
-            NetLink
-            nlohmann_json::nlohmann_json
-    )
+    target_link_libraries(NetLinkInternal INTERFACE NetLink)
 
     target_include_directories(NetLinkInternal INTERFACE
             ${PROJECT_BINARY_DIR}/generated
             ${PROJECT_SOURCE_DIR}/src/internal
-            ${PROJECT_SOURCE_DIR}/src/internal/Discovery
-            ${PROJECT_SOURCE_DIR}/src/internal/PeerValidation
-            ${PROJECT_SOURCE_DIR}/src/internal/PeerValidation/Checks
             ${PROJECT_SOURCE_DIR}/src/internal/Util
     )
 endif ()

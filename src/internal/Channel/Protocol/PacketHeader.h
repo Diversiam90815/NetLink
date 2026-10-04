@@ -1,7 +1,7 @@
 /*
   ==============================================================================
 	Module:         PacketHeader
-	Description:    Header of every datagram on the peer channel and its binary encoding (network byte order)
+	Description:    Header of every datagram of a link and its binary encoding (network byte order)
   ==============================================================================
 */
 
