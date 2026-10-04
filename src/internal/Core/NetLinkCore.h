@@ -20,6 +20,7 @@
 #include "NetLink/NetLink.h"
 
 #include "Engine/NetworkEngine.h"
+#include "NetLinkLog.h"
 #include "Network/NetworkInformation.h"
 #include "Socket/IDatagramSocket.h"
 #include "Util/TaskQueue.h"
@@ -77,6 +78,7 @@ private:
 	void									finish();
 
 	void									deliver(EventBatch &&batch);
+	internal::LogSink						logSink() const;
 	void									dispatch(EngineEvent &event, const NetLinkCallbacks &callbacks);
 
 	// Looks the adapters of this machine up again
@@ -92,6 +94,7 @@ private:
 	mutable std::mutex						mEngineMutex;
 	std::shared_ptr<NetworkEngine>			mEngine;
 	std::shared_ptr<const NetLinkCallbacks> mCallbacks;
+	internal::LogSink						mLogSink; // hands a log line of any thread to the event thread
 	std::jthread							mThread;
 	TaskQueue								mEvents;
 

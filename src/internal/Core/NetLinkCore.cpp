@@ -69,10 +69,7 @@ std::shared_ptr<netlink::NetworkEngine> netlink::NetLinkCore::engine() const
 bool netlink::NetLinkCore::start(const NetLinkConfig &config, const NetLinkCallbacks &callbacks)
 {
 	if (config.appId.empty())
-	{
-		NETLINK_LOG_ERROR("NetLink cannot start without an appId");
 		return false;
-	}
 
 	// An engine that was stopped from a callback can only be cleaned up from another thread
 	if (mEvents.isWorkerThread())
@@ -84,6 +81,28 @@ bool netlink::NetLinkCore::start(const NetLinkConfig &config, const NetLinkCallb
 		return false;
 
 	finish();
+
+	// Log lines are written on every thread, the application reads them on the event thread
+	mCallbacks = std::make_shared<const NetLinkCallbacks>(callbacks);
+	internal::LogSink logSink;
+
+	if (callbacks.onLog)
+	{
+		logSink = [this, callbacks = mCallbacks](const LogLevel level, std::string &&text)
+		{ mEvents.post([callbacks, level, text = std::move(text)] { callbacks->onLog(level, text); }); };
+	}
+
+	{
+		std::lock_guard<std::mutex> engineLock(mEngineMutex);
+		mLogSink = logSink;
+	}
+
+	mEvents.start();
+
+	if (logSink)
+		mEvents.post([callbacks = mCallbacks] { internal::setThreadLogSink([callbacks](const LogLevel level, std::string &&text) { callbacks->onLog(level, text); }); });
+
+	const internal::LogScope logScope(logSink);
 
 	LocalInterfaceProvider localInterface = mDependencies.localInterface;
 
@@ -113,17 +132,18 @@ bool netlink::NetLinkCore::start(const NetLinkConfig &config, const NetLinkCallb
 
 	NETLINK_LOG_INFO("NetLink {} starting as '{}' for application '{}'", internal::Version, config.displayName, config.appId);
 
-	mCallbacks = std::make_shared<const NetLinkCallbacks>(callbacks);
-
 	{
 		std::lock_guard<std::mutex> engineLock(mEngineMutex);
 		mEngine = engine;
 	}
 
-	mEvents.start();
-
 	internal::threadsStarted.fetch_add(1);
-	mThread = std::jthread([this, engine](const std::stop_token &stop) { engine->run(stop, [this](EventBatch &&batch) { deliver(std::move(batch)); }); });
+	mThread = std::jthread(
+		[this, engine, logSink](const std::stop_token &stop)
+		{
+			internal::setThreadLogSink(logSink);
+			engine->run(stop, [this](EventBatch &&batch) { deliver(std::move(batch)); });
+		});
 
 	return true;
 }
@@ -157,6 +177,14 @@ void netlink::NetLinkCore::finish()
 
 	std::lock_guard<std::mutex> lock(mEngineMutex);
 	mEngine.reset();
+	mLogSink = {};
+}
+
+
+netlink::internal::LogSink netlink::NetLinkCore::logSink() const
+{
+	std::lock_guard<std::mutex> lock(mEngineMutex);
+	return mLogSink;
 }
 
 
@@ -385,10 +413,9 @@ netlink::NetworkAdapter netlink::NetLinkCore::adapterAt(const std::string &ipv4)
 
 std::vector<netlink::NetworkAdapter> netlink::NetLinkCore::getAvailableAdapters()
 {
+	const internal::LogScope	logScope(logSink());
 	std::lock_guard<std::mutex> lock(mNetworkMutex);
-
-	if (mNetwork.getAvailableNetworkAdapters().empty())
-		enumerateAdapters();
+	enumerateAdapters();
 
 	std::vector<NetworkAdapter> result;
 
@@ -401,6 +428,8 @@ std::vector<netlink::NetworkAdapter> netlink::NetLinkCore::getAvailableAdapters(
 
 bool netlink::NetLinkCore::setActiveAdapter(const uint64_t adapterID)
 {
+	const internal::LogScope logScope(logSink());
+
 	{
 		std::lock_guard<std::mutex> lock(mNetworkMutex);
 

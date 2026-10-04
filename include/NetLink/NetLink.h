@@ -16,6 +16,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 
@@ -116,6 +117,15 @@ struct NetworkAdapter
 };
 
 
+enum class LogLevel : uint8_t
+{
+	Debug,
+	Info,
+	Warning,
+	Error,
+};
+
+
 // Opaque message envelope
 struct Message
 {
@@ -149,6 +159,9 @@ struct NetLinkCallbacks
 
 	// The active network adapter changed (selected automatically in start(), via setActiveAdapter(), or its address changed)
 	std::function<void(const NetworkAdapter &adapter)> onNetworkAdapterChanged;
+
+	// What NetLink has to say about itself, for the application's own log. Unset: nothing is logged.
+	std::function<void(LogLevel, std::string_view message)> onLog;
 };
 
 
