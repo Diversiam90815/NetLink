@@ -5,7 +5,7 @@
 
 cmake_minimum_required(VERSION 4.0)
 
-set(PROJECT_VERSION 0.4.0)
+set(PROJECT_VERSION 0.5.0)
 set(NETLINK_BUILD_NUMBER "0" CACHE STRING "Build number")
 
 project(NetLink VERSION ${PROJECT_VERSION} LANGUAGES CXX)
@@ -19,45 +19,32 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
-option(NETLINK_ENABLE_LOGGING "Enable logging via Logger library" OFF)
 set(NETLINK_SANITIZER "" CACHE STRING "Build the library, tests and benchmarks with a sanitizer: thread or address (clang, gcc)")
 
 include(cpm)
-
-if (NETLINK_ENABLE_LOGGING)
-    CPMAddPackage(
-            NAME Logger
-            GITHUB_REPOSITORY Diversiam90815/Logger
-            VERSION 1.3.81
-    )
-endif ()
 
 file(GLOB_RECURSE NETWORKING_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp)
 file(GLOB_RECURSE NETWORKING_HEADERS ${CMAKE_CURRENT_SOURCE_DIR}/include/*.h)
 file(GLOB_RECURSE NETWORKING_INTERNAL_HEADERS ${CMAKE_CURRENT_SOURCE_DIR}/src/*.h)
 
-# NetworkInformation, the socket platform shim and the deadline timer have one backend per platform
+# NetworkInformation and the socket platform shim have one backend per platform
 list(FILTER NETWORKING_SOURCES EXCLUDE REGEX ".*NetworkInformation(Windows|Linux)\\.cpp$")
 list(FILTER NETWORKING_SOURCES EXCLUDE REGEX ".*SocketPlatform(Windows|Posix)\\.cpp$")
-list(FILTER NETWORKING_SOURCES EXCLUDE REGEX ".*DeadlineTimer(Windows|Std)\\.cpp$")
 
 if (WIN32)
     list(APPEND NETWORKING_SOURCES
             ${CMAKE_CURRENT_SOURCE_DIR}/src/internal/Network/NetworkInformationWindows.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/src/internal/Socket/Platform/SocketPlatformWindows.cpp
-            ${CMAKE_CURRENT_SOURCE_DIR}/src/internal/Util/Timing/DeadlineTimerWindows.cpp
     )
 elseif (APPLE)
     list(APPEND NETWORKING_SOURCES
             ${CMAKE_CURRENT_SOURCE_DIR}/src/internal/Network/NetworkInformationMac.mm
             ${CMAKE_CURRENT_SOURCE_DIR}/src/internal/Socket/Platform/SocketPlatformPosix.cpp
-            ${CMAKE_CURRENT_SOURCE_DIR}/src/internal/Util/Timing/DeadlineTimerStd.cpp
     )
 elseif (UNIX)
     list(APPEND NETWORKING_SOURCES
             ${CMAKE_CURRENT_SOURCE_DIR}/src/internal/Network/NetworkInformationLinux.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/src/internal/Socket/Platform/SocketPlatformPosix.cpp
-            ${CMAKE_CURRENT_SOURCE_DIR}/src/internal/Util/Timing/DeadlineTimerStd.cpp
     )
 endif ()
 
@@ -110,25 +97,14 @@ if (WIN32)
     )
 endif ()
 
-if (NETLINK_ENABLE_LOGGING)
-    target_compile_definitions(${PROJECT_NAME} PRIVATE NETLINK_LOGGING_ENABLED)
-    target_link_libraries(${PROJECT_NAME} PRIVATE $<BUILD_INTERFACE:Logger>)
-endif ()
-
 if (WIN32)
-    target_link_libraries(${PROJECT_NAME} PRIVATE iphlpapi ws2_32 wlanapi winmm)
+    target_link_libraries(${PROJECT_NAME} PRIVATE iphlpapi ws2_32 winmm)
 elseif (APPLE)
     target_link_libraries(${PROJECT_NAME} PRIVATE
-            "-framework CoreWLAN"
             "-framework Foundation"
             "-framework SystemConfiguration"
             "-framework CoreFoundation"
     )
-elseif (UNIX)
-    find_package(PkgConfig REQUIRED)
-    pkg_check_modules(NL REQUIRED libnl-genl-3.0)
-    target_include_directories(${PROJECT_NAME} PRIVATE ${NL_INCLUDE_DIRS})
-    target_link_libraries(${PROJECT_NAME} PRIVATE ${NL_LIBRARIES})
 endif ()
 
 # ---------------------------------------------------------------------------
