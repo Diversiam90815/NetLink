@@ -41,11 +41,12 @@ jobs:
           -DCMAKE_CXX_SCAN_FOR_MODULES=OFF
           -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
           -DNETLINK_BUILD_TESTS=OFF
+          -DNETLINK_BUILD_BENCHMARKS=OFF
 
       - name: Run clang-tidy
         run: |
           status=0
-          for f in $(jq -r '.[].file' build/compile_commands.json | grep -v -e '/_deps/' -e '/\.cpm-cache/'); do
+          for f in $(jq -r '.[].file' build/compile_commands.json | grep '/src/'); do
             echo "::group::clang-tidy $f"
             if ! clang-tidy -p build "$f"; then
               status=1

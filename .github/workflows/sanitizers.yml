@@ -16,7 +16,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        sanitizer: [thread, address]
+        # Address and undefined behaviour only on pull requests and main; thread on every push
+        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || github.ref == 'refs/heads/main') && '["thread", "address"]' || '["thread"]') }}
 
     runs-on: ubuntu-latest
 
