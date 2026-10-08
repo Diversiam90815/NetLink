@@ -3,6 +3,7 @@
 #include <atomic>
 #include <chrono>
 #include <future>
+#include <thread>
 #include <vector>
 
 #include "Channel/Mailbox.h"
