@@ -79,6 +79,11 @@ foreach (flag IN LISTS NETLINK_SANITIZER_FLAGS)
     target_link_options(${PROJECT_NAME} PUBLIC $<BUILD_INTERFACE:${flag}>)
 endforeach ()
 
+if (CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND NOT MSVC)
+    target_compile_options(${PROJECT_NAME} PUBLIC $<BUILD_INTERFACE:-fexperimental-library>)
+    target_link_options(${PROJECT_NAME} PUBLIC $<BUILD_INTERFACE:-fexperimental-library>)
+endif ()
+
 target_include_directories(${PROJECT_NAME} PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)

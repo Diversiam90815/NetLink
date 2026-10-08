@@ -62,6 +62,8 @@ protected:
 		return sent;
 	}
 
+	static void append(Sent &to, const Sent &from) { to.insert(to.end(), from.begin(), from.end()); }
+
 	std::map<std::pair<Lane, int>, size_t>		supply;
 	size_t										asked{0};
 	SendScheduler::TimePoint					now = SendScheduler::Clock::now();
@@ -175,8 +177,8 @@ TEST_F(SendSchedulerTest, Classes_GoInOrderOfUrgency)
 	give(scheduler, Lane::Control, 1, 2);
 
 	Sent expected = turns(Lane::Control, {{1, 2}});
-	expected.append_range(turns(Lane::Media, {{1, 2}}));
-	expected.append_range(turns(Lane::Reliable, {{1, 2}}));
+	append(expected, turns(Lane::Media, {{1, 2}}));
+	append(expected, turns(Lane::Reliable, {{1, 2}}));
 
 	EXPECT_EQ(run(scheduler), expected);
 }
@@ -215,7 +217,7 @@ TEST_F(SendSchedulerTest, UnreliableData_LeavesAQuarterOfTheBudgetToReliableData
 	give(scheduler, Lane::Reliable, 2, 1000);
 
 	Sent expected = turns(Lane::Media, {{1, 120}});
-	expected.append_range(turns(Lane::Reliable, {{2, 40}}));
+	append(expected, turns(Lane::Reliable, {{2, 40}}));
 	EXPECT_EQ(run(scheduler), expected) << "Unreliable data comes first, but must not starve retransmissions";
 }
 
@@ -295,7 +297,7 @@ TEST_F(SendSchedulerTest, Remove_ForgetsThePeerInEveryClass)
 	scheduler.remove(peer(2));
 
 	Sent expected = turns(Lane::Control, {{1, 1}, {3, 1}});
-	expected.append_range(turns(Lane::Reliable, {{1, 4}, {3, 4}, {1, 1}, {3, 1}}));
+	append(expected, turns(Lane::Reliable, {{1, 4}, {3, 4}, {1, 1}, {3, 1}}));
 	EXPECT_EQ(run(scheduler), expected);
 
 	scheduler.add(Lane::Reliable, peer(1));
