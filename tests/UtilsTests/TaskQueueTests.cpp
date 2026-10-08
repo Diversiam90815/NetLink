@@ -250,4 +250,73 @@ TEST(TaskQueue, TaskThrowingNonStandardExceptionIsAlsoContained)
 	EXPECT_TRUE(ranAfterThrow.load()) << "The catch-all must contain exceptions that do not derive from std::exception";
 }
 
+
+TEST(TaskQueue, StopAfterDrain_RunsWhatIsQueuedFirst)
+{
+	TaskQueue		 queue;
+	std::atomic<int> ran{0};
+
+	queue.start();
+
+	for (int i = 0; i < 50; ++i)
+	{
+		queue.post(
+			[&ran]
+			{
+				std::this_thread::sleep_for(1ms);
+				++ran;
+			});
+	}
+
+	queue.stopAfterDrain();
+
+	EXPECT_EQ(ran.load(), 50) << "Nothing that was accepted is dropped";
+	EXPECT_FALSE(queue.isRunning());
+
+	queue.start();
+	queue.post([&ran] { ++ran; });
+	queue.stopAfterDrain();
+	EXPECT_EQ(ran.load(), 51) << "The queue can be started again";
+}
+
+
+TEST(TaskQueue, StopAfterDrain_FromATask_DoesNotWaitForItself)
+{
+	TaskQueue		  queue;
+	std::atomic<bool> returned{false};
+	std::atomic<bool> later{false};
+
+	queue.start();
+	queue.post(
+		[&]
+		{
+			queue.stopAfterDrain();
+			returned.store(true);
+		});
+	queue.post([&] { later.store(true); });
+
+	const auto deadline = std::chrono::steady_clock::now() + 2s;
+	while (queue.isRunning() && std::chrono::steady_clock::now() < deadline)
+		std::this_thread::sleep_for(1ms);
+
+	EXPECT_TRUE(returned.load());
+	EXPECT_TRUE(later.load()) << "What was queued behind it still ran";
+	EXPECT_FALSE(queue.isRunning());
+}
+
+
+TEST(TaskQueue, IsWorkerThread_IsOnlyTrueInsideATask)
+{
+	TaskQueue		 queue;
+	std::atomic<int> inside{-1};
+
+	queue.start();
+	EXPECT_FALSE(queue.isWorkerThread());
+
+	queue.post([&] { inside.store(queue.isWorkerThread() ? 1 : 0); });
+	queue.stopAfterDrain();
+
+	EXPECT_EQ(inside.load(), 1);
+}
+
 } // namespace UtilsTests

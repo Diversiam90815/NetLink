@@ -1,12 +1,13 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <functional>
+#include <optional>
 #include <random>
 #include <vector>
 
-#include "TestIp.h"
-#include "Channel/Fragmentation/FragmentationService.h"
 #include "Channel/Reliability/ReliableLink.h"
+#include "QueueSource.h"
 
 using namespace netlink;
 using namespace netlink::channel;
@@ -21,38 +22,86 @@ class ReliableLinkTest : public ::testing::Test
 {
 protected:
 	using Drop = std::function<bool(const PacketHeader &header)>; // true = lose the packet
+	using Pass = std::vector<OutgoingDatagram>;
 
-	static ReliabilityConfig defaultConfig()
+	// What an Ack says
+	struct Ack
 	{
-		ReliabilityConfig config;
-		config.initialRto		 = 100ms;
-		config.minRto			 = 20ms;
-		config.maxRto			 = 400ms;
-		config.maxRetransmits	 = 5;
-		config.maxAckRetransmits = 3;
+		Lane	 lane{Lane::Control};
+		uint64_t seq{0};
+		bool	 paused{false};
+		AckBody	 body;
+	};
 
-		// These tests are about the protocol, not about send passes: every pass hands out everything
-		config.initialSendBudget = std::numeric_limits<size_t>::max();
-		config.maxSendBudget	 = std::numeric_limits<size_t>::max();
-		return config;
+	static LinkTimings defaultTimings()
+	{
+		LinkTimings timings;
+		timings.initialRto	= 100ms;
+		timings.minRto		= 20ms;
+		timings.maxRto		= 400ms;
+		timings.peerTimeout = 2s;
+
+		// These tests are about the protocol, not about congestion: the window never limits
+		timings.fixedCwnd	= 4096;
+		return timings;
 	}
 
-	ReliabilityConfig			 config = defaultConfig();
-	ReliableLink				 a{config, 0xAAAA0001};
-	ReliableLink				 b{config, 0xBBBB0001};
-	ReliableLink::TimePoint		 now = ReliableLink::Clock::now();
+	// The fixture's timers with the real congestion window (32 packets, adapting)
+	static LinkTimings congestionTimings()
+	{
+		LinkTimings timings = defaultTimings();
+		timings.fixedCwnd	= 0;
+		return timings;
+	}
 
-	std::vector<DeliveredPacket> atA;
-	std::vector<DeliveredPacket> atB;
+	LinkTimings					  timings = defaultTimings();
+	ReliableLink				  a{timings, 0xAAAA0001};
+	ReliableLink				  b{timings, 0xBBBB0001};
+	FakeNet::QueueSource		  fromA; // what a has to send
+	FakeNet::QueueSource		  fromB;
+	ReliableLink::TimePoint		  now = ReliableLink::Clock::now();
 
-	// Carries everything `from` produced so far to `to`. Returns the number of datagrams that arrived.
-	size_t						 transfer(ReliableLink &from, ReliableLink &to, const Drop &drop = {})
+	std::vector<DeliveredMessage> atA;
+	std::vector<DeliveredMessage> atB;
+
+	void						  recreate(const LinkTimings &newTimings)
+	{
+		timings = newTimings;
+		a		= ReliableLink(timings, 0xAAAA0001);
+		b		= ReliableLink(timings, 0xBBBB0001);
+	}
+
+	FakeNet::QueueSource &sourceOf(const ReliableLink &link) { return &link == &a ? fromA : fromB; }
+
+	void				  send(ReliableLink &from, const Lane lane, const uint32_t tag, std::vector<uint8_t> body) { sourceOf(from).push(lane, tag, std::move(body)); }
+
+	// One send pass of the link
+	Pass				  take(ReliableLink &from) { return FakeNet::takeOutgoing(from, now, sourceOf(from)); }
+
+	// Something acknowledged is still on its way, or did not even leave yet
+	bool				  pending(const ReliableLink &link)
+	{
+		const auto &source = sourceOf(link);
+		return link.hasPendingReliable() || source.waiting(Lane::Control) + source.waiting(Lane::Reliable) + source.waiting(Lane::Bulk) > 0;
+	}
+
+	void deliver(ReliableLink &to, const OutgoingDatagram &datagram)
+	{
+		const auto bytes  = FakeNet::bytesOf(datagram);
+		const auto packet = decodePacket(bytes);
+		ASSERT_TRUE(packet.has_value()) << "Links must only produce well formed packets";
+		to.onPacket(*packet, now);
+	}
+
+	// Hands a whole send pass to the other link. Returns the number of datagrams that arrived.
+	size_t deliverPass(ReliableLink &to, const Pass &pass, const Drop &drop = {})
 	{
 		size_t arrived = 0;
 
-		for (const auto &datagram : from.takeOutgoing(now))
+		for (const auto &datagram : pass)
 		{
-			auto packet = decodePacket(datagram);
+			const auto bytes  = FakeNet::bytesOf(datagram);
+			const auto packet = decodePacket(bytes);
 			EXPECT_TRUE(packet.has_value()) << "Links must only produce well formed packets";
 			if (!packet || (drop && drop(packet->header)))
 				continue;
@@ -65,26 +114,29 @@ protected:
 		return arrived;
 	}
 
-	void collect()
+	// Carries everything `from` produced so far to `to`. Returns the number of datagrams that arrived.
+	size_t transfer(ReliableLink &from, ReliableLink &to, const Drop &drop = {}) { return deliverPass(to, take(from), drop); }
+
+	void   collect()
 	{
-		for (auto &p : a.takeDelivered())
-			atA.push_back(std::move(p));
-		for (auto &p : b.takeDelivered())
-			atB.push_back(std::move(p));
+		for (auto &message : a.takeDelivered())
+			atA.push_back(std::move(message));
+		for (auto &message : b.takeDelivered())
+			atB.push_back(std::move(message));
 	}
 
 	// Exchanges packets until nothing moves anymore
 	void settle(const Drop &dropAtoB = {}, const Drop &dropBtoA = {})
 	{
-		for (int round = 0; round < 1000; ++round)
+		for (int round = 0; round < 10'000; ++round)
 		{
-			if (transfer(a, b, dropAtoB) + transfer(b, a, dropBtoA) == 0 && a.takeOutgoing(now).empty() && b.takeOutgoing(now).empty())
+			if (transfer(a, b, dropAtoB) + transfer(b, a, dropBtoA) == 0)
 				return;
 		}
 		FAIL() << "The links never settled";
 	}
 
-	void advance(std::chrono::milliseconds step)
+	void advance(std::chrono::microseconds step)
 	{
 		now += step;
 		a.onTimer(now);
@@ -93,78 +145,179 @@ protected:
 
 	static std::vector<uint8_t> bytes(std::initializer_list<uint8_t> values) { return values; }
 
-	// Stress tests lose so much that the default retry budget would legitimately give up
-	void						recreateWithRetryBudget(int maxRetransmits)
+	static std::vector<uint8_t> pattern(size_t size)
 	{
-		config.maxRetransmits = maxRetransmits;
-		a					  = ReliableLink(config, 0xAAAA0001);
-		b					  = ReliableLink(config, 0xBBBB0001);
+		std::vector<uint8_t> body(size);
+		for (size_t i = 0; i < size; ++i)
+			body[i] = static_cast<uint8_t>(i * 13);
+		return body;
 	}
 
-	static Drop kind(PacketKind packetKind)
+	static DecodedPacket decoded(const OutgoingDatagram &datagram, std::vector<uint8_t> &storage)
 	{
-		return [packetKind](const PacketHeader &header) { return header.flags.kind() == packetKind; };
+		storage = FakeNet::bytesOf(datagram);
+		return *decodePacket(storage);
 	}
 
-	// The fixture's timers with the real send pass budget (700 per pass, adapting)
-	static ReliabilityConfig sendPassConfig(int maxRetransmits = 5)
+	// The datagrams of one lane and kind in a send pass
+	static Pass only(const Pass &pass, const Lane lane, const PacketKind packetKind = PacketKind::Data)
 	{
-		ReliabilityConfig config = defaultConfig();
-		config.initialSendBudget = ReliabilityConfig{}.initialSendBudget;
-		config.maxSendBudget	 = ReliabilityConfig{}.maxSendBudget;
-		config.maxRetransmits	 = maxRetransmits;
-		return config;
+		Pass				 result;
+		std::vector<uint8_t> storage;
+
+		for (const auto &datagram : pass)
+		{
+			const auto packet = decoded(datagram, storage);
+			if (packet.header.flags.kind() == packetKind && packet.header.flags.lane() == lane)
+				result.push_back(datagram);
+		}
+		return result;
+	}
+
+	static size_t count(const Pass &pass, const PacketKind packetKind)
+	{
+		std::vector<uint8_t> storage;
+		return static_cast<size_t>(std::ranges::count_if(pass, [&](const auto &datagram) { return decoded(datagram, storage).header.flags.kind() == packetKind; }));
 	}
 
 	// Seqs of the Data packets in one send pass, in order
-	static std::vector<uint64_t> dataSeqs(const std::vector<std::vector<uint8_t>> &pass)
+	static std::vector<uint64_t> dataSeqs(const Pass &pass, std::optional<Lane> lane = {})
 	{
 		std::vector<uint64_t> seqs;
+		std::vector<uint8_t>  storage;
+
 		for (const auto &datagram : pass)
 		{
-			if (const auto packet = decodePacket(datagram); packet && packet->header.flags.kind() == PacketKind::Data)
-				seqs.push_back(packet->header.seq);
+			const auto packet = decoded(datagram, storage);
+			if (packet.header.flags.kind() == PacketKind::Data && (!lane || packet.header.flags.lane() == *lane))
+				seqs.push_back(packet.header.seq);
 		}
 		return seqs;
 	}
+
+	// The Acks in a send pass
+	static std::vector<Ack> acks(const Pass &pass)
+	{
+		std::vector<Ack>	 result;
+		std::vector<uint8_t> storage;
+
+		for (const auto &datagram : pass)
+		{
+			const auto packet = decoded(datagram, storage);
+			if (packet.header.flags.kind() != PacketKind::Ack)
+				continue;
+
+			result.push_back(
+				{.lane = packet.header.flags.lane(), .seq = packet.header.seq, .paused = packet.header.flags.isPaused(), .body = decodeAck(packet.body).value_or(AckBody{})});
+		}
+		return result;
+	}
+
+	static Drop seqOf(const Lane lane, const uint64_t seq)
+	{
+		return [=](const PacketHeader &header) { return header.flags.kind() == PacketKind::Data && header.flags.lane() == lane && header.seq == seq; };
+	}
+
+	std::vector<uint32_t> tagsAtB() const
+	{
+		std::vector<uint32_t> tags;
+		for (const auto &message : atB)
+			tags.push_back(message.tag);
+		return tags;
+	}
+
+	static bool failed(const ReliableLink &link) { return link.hasFailed(); }
 };
 
 
-TEST_F(ReliableLinkTest, HappyPath_DataAckAckAck)
+// ---------------------------------------------------------------------------
+// Data and Ack
+// ---------------------------------------------------------------------------
+
+TEST_F(ReliableLinkTest, HappyPath_DataAndAck)
 {
-	ASSERT_EQ(a.queueReliable(ChannelId::Application, bytes({1, 2, 3})), PushResult::Accepted);
-	EXPECT_EQ(a.inFlightCount(), 1u);
+	send(a, Lane::Reliable, 7, bytes({1, 2, 3}));
+	EXPECT_TRUE(pending(a));
 
 	EXPECT_EQ(transfer(a, b), 1u) << "One Data packet";
+	EXPECT_EQ(a.inFlightCount(), 1u);
 	ASSERT_EQ(atB.size(), 1u);
 	EXPECT_EQ(atB[0].body, bytes({1, 2, 3}));
-	EXPECT_EQ(atB[0].header.flags.channel(), ChannelId::Application);
+	EXPECT_EQ(atB[0].lane, Lane::Reliable);
+	EXPECT_EQ(atB[0].tag, 7u);
 
-	EXPECT_EQ(transfer(b, a), 1u) << "One DataAck";
+	EXPECT_EQ(transfer(b, a), 1u) << "One Ack";
 	EXPECT_EQ(a.inFlightCount(), 0u);
-	EXPECT_FALSE(a.hasPendingReliable());
+	EXPECT_FALSE(pending(a));
 
-	EXPECT_EQ(transfer(a, b), 1u) << "One AckAck";
-
+	EXPECT_TRUE(take(a).empty()) << "An Ack is not confirmed";
 	EXPECT_EQ(a.stats().dataSent, 1u);
-	EXPECT_EQ(b.stats().dataAcksSent, 1u);
-	EXPECT_EQ(a.stats().ackAcksSent, 1u);
+	EXPECT_EQ(b.stats().acksSent, 1u);
 
-	// Nothing is left to retransmit on either side
+	// Nothing is left to retransmit on either side, and nothing to fail for
 	advance(5s);
-	EXPECT_TRUE(a.takeOutgoing(now).empty());
-	EXPECT_TRUE(b.takeOutgoing(now).empty());
+	EXPECT_TRUE(take(a).empty());
+	EXPECT_TRUE(take(b).empty());
 	EXPECT_EQ(a.stats().retransmissions, 0u);
+	EXPECT_FALSE(failed(a));
+}
+
+
+TEST_F(ReliableLinkTest, OneAck_CoversAWholeBatch)
+{
+	for (uint8_t i = 0; i < 50; ++i)
+		send(a, Lane::Reliable, 0, bytes({i}));
+
+	EXPECT_EQ(transfer(a, b), 50u);
+	ASSERT_EQ(atB.size(), 50u);
+
+	const auto fromRemote = take(b);
+	const auto answer	  = acks(fromRemote);
+
+	ASSERT_EQ(fromRemote.size(), 1u) << "Everything that arrived since the last pass is acknowledged with one datagram";
+	ASSERT_EQ(answer.size(), 1u);
+	EXPECT_EQ(answer[0].lane, Lane::Reliable);
+	EXPECT_EQ(answer[0].seq, 50u) << "The header names the highest seq received without a gap";
+	EXPECT_TRUE(answer[0].body.ranges.empty());
+	EXPECT_FALSE(answer[0].paused);
+
+	deliverPass(a, fromRemote);
+	EXPECT_FALSE(pending(a));
+}
+
+
+TEST_F(ReliableLinkTest, RequestResponse_CostsFourDatagrams)
+{
+	send(a, Lane::Reliable, 1, bytes({1}));
+
+	const auto request = take(a);
+	ASSERT_EQ(request.size(), 1u);
+	deliverPass(b, request);
+
+	send(b, Lane::Reliable, 2, bytes({2}));
+
+	const auto response = take(b);
+	EXPECT_EQ(response.size(), 2u) << "The Ack of the request and the response";
+	deliverPass(a, response);
+
+	const auto confirmation = take(a);
+	EXPECT_EQ(confirmation.size(), 1u) << "The Ack of the response";
+	deliverPass(b, confirmation);
+
+	EXPECT_TRUE(take(a).empty());
+	EXPECT_TRUE(take(b).empty());
+	EXPECT_EQ(atA.size(), 1u);
+	EXPECT_EQ(atB.size(), 1u);
 }
 
 
 TEST_F(ReliableLinkTest, LostData_IsRetransmittedAfterTheRto)
 {
-	a.queueReliable(ChannelId::Application, bytes({7}));
-	a.takeOutgoing(now); // lost on the wire
+	send(a, Lane::Reliable, 0, bytes({7}));
+	take(a); // lost on the wire
 
 	advance(99ms);
-	EXPECT_TRUE(a.takeOutgoing(now).empty()) << "Not before the RTO";
+	EXPECT_TRUE(take(a).empty()) << "Not before the RTO";
 
 	advance(1ms);
 	settle();
@@ -172,15 +325,15 @@ TEST_F(ReliableLinkTest, LostData_IsRetransmittedAfterTheRto)
 	ASSERT_EQ(atB.size(), 1u);
 	EXPECT_EQ(atB[0].body, bytes({7}));
 	EXPECT_EQ(a.stats().retransmissions, 1u);
-	EXPECT_FALSE(a.hasPendingReliable());
+	EXPECT_FALSE(pending(a));
 }
 
 
-TEST_F(ReliableLinkTest, LostDataAck_DataIsResentButDeliveredOnce)
+TEST_F(ReliableLinkTest, LostAck_DataIsResentButDeliveredOnce)
 {
-	a.queueReliable(ChannelId::Application, bytes({7}));
+	send(a, Lane::Reliable, 0, bytes({7}));
 	transfer(a, b);
-	b.takeOutgoing(now); // the DataAck is lost
+	take(b); // the Ack is lost
 	ASSERT_EQ(atB.size(), 1u);
 
 	advance(100ms);
@@ -188,309 +341,604 @@ TEST_F(ReliableLinkTest, LostDataAck_DataIsResentButDeliveredOnce)
 
 	EXPECT_EQ(atB.size(), 1u) << "A retransmitted Data packet must not be delivered twice";
 	EXPECT_GE(b.stats().duplicatesReceived, 1u);
-	EXPECT_FALSE(a.hasPendingReliable()) << "The re-sent DataAck completes the message";
+	EXPECT_FALSE(pending(a)) << "The duplicate is acknowledged again";
 }
 
 
-TEST_F(ReliableLinkTest, LostAckAck_DataAckIsResentAndConfirmedAgain)
+TEST_F(ReliableLinkTest, LostAck_IsCoveredByTheNextOne)
 {
-	a.queueReliable(ChannelId::Application, bytes({7}));
+	send(a, Lane::Reliable, 0, bytes({1}));
 	transfer(a, b);
-	transfer(b, a);
-	a.takeOutgoing(now); // the AckAck is lost
-	EXPECT_EQ(b.stats().dataAcksSent, 1u);
+	take(b); // the Ack for seq 1 is lost
 
-	advance(100ms);
-	EXPECT_EQ(b.stats().dataAcksSent, 2u) << "Without AckAck the receiver resends its DataAck";
-
-	settle();
-	EXPECT_EQ(a.stats().ackAcksSent, 2u) << "An already completed key is confirmed again";
-
-	// The AckAck arrived: the receiver stops resending
-	advance(1s);
-	advance(1s);
-	EXPECT_EQ(b.stats().dataAcksSent, 2u);
-	EXPECT_EQ(atB.size(), 1u);
-}
-
-
-TEST_F(ReliableLinkTest, ReceiverStopsResendingDataAckAfterItsLimit)
-{
-	a.queueReliable(ChannelId::Application, bytes({7}));
+	send(a, Lane::Reliable, 0, bytes({2}));
 	transfer(a, b);
-	transfer(b, a);
-	a.takeOutgoing(now); // every AckAck gets lost from here on
 
-	for (int i = 0; i < 20; ++i)
-	{
-		advance(500ms);
-		b.takeOutgoing(now);
-	}
+	const auto fromRemote = take(b);
+	const auto answer	  = acks(fromRemote);
+	ASSERT_EQ(answer.size(), 1u);
+	EXPECT_EQ(answer[0].seq, 2u) << "It says that everything up to seq 2 arrived";
 
-	EXPECT_EQ(b.stats().dataAcksSent, 1u + static_cast<uint64_t>(config.maxAckRetransmits)) << "DataAck resends are bounded";
+	deliverPass(a, fromRemote);
+
+	EXPECT_FALSE(pending(a)) << "Seq 1 is acknowledged without an Ack of its own";
+	EXPECT_EQ(a.stats().retransmissions, 0u) << "... and without sending it again";
 }
 
 
 TEST_F(ReliableLinkTest, ReorderedData_IsDeliveredInOrder)
 {
-	a.queueReliable(ChannelId::Application, bytes({1}));
-	a.queueReliable(ChannelId::Application, bytes({2}));
-	a.queueReliable(ChannelId::Application, bytes({3}));
+	send(a, Lane::Reliable, 0, bytes({1}));
+	send(a, Lane::Reliable, 0, bytes({2}));
+	send(a, Lane::Reliable, 0, bytes({3}));
 
-	auto datagrams = a.takeOutgoing(now);
+	const auto datagrams = take(a);
 	ASSERT_EQ(datagrams.size(), 3u);
 
-	for (size_t index : {2u, 0u, 1u})
-		b.onPacket(*decodePacket(datagrams[index]), now);
+	deliver(b, datagrams[2]);
+	collect();
+	EXPECT_TRUE(atB.empty()) << "Seq 3 waits for the gap before it to close";
+
+	const auto early = acks(take(b));
+	ASSERT_EQ(early.size(), 1u);
+	EXPECT_EQ(early[0].seq, 0u) << "Nothing arrived in order yet";
+	EXPECT_EQ(early[0].body.ranges, (std::vector<SeqRange>{{3, 1}})) << "A buffered packet is acknowledged right away";
+
+	deliver(b, datagrams[0]);
+	deliver(b, datagrams[1]);
 	collect();
 
 	ASSERT_EQ(atB.size(), 3u);
 	EXPECT_EQ(atB[0].body, bytes({1}));
 	EXPECT_EQ(atB[1].body, bytes({2}));
 	EXPECT_EQ(atB[2].body, bytes({3}));
-	EXPECT_EQ(b.stats().dataAcksSent, 3u) << "Each message is acknowledged individually, also when buffered";
+}
+
+
+TEST_F(ReliableLinkTest, Ack_ListsOnlyTheReorderBuffer)
+{
+	for (uint8_t i = 1; i <= 10; ++i)
+		send(a, Lane::Reliable, 0, bytes({i}));
+
+	const auto datagrams = take(a);
+	ASSERT_EQ(datagrams.size(), 10u);
+
+	for (const size_t arrived : {0u, 1u, 2u, 3u, 6u, 7u, 9u})
+		deliver(b, datagrams[arrived]);
+
+	auto answer = acks(take(b));
+	ASSERT_EQ(answer.size(), 1u);
+	EXPECT_EQ(answer[0].seq, 4u);
+	EXPECT_EQ(answer[0].body.ranges, (std::vector<SeqRange>{{7, 2}, {10, 1}})) << "What arrived in order is named by the seq alone";
+
+	deliver(b, datagrams[4]);
+	deliver(b, datagrams[5]);
+
+	answer = acks(take(b));
+	ASSERT_EQ(answer.size(), 1u);
+	EXPECT_EQ(answer[0].seq, 8u);
+	EXPECT_EQ(answer[0].body.ranges, (std::vector<SeqRange>{{10, 1}})) << "What left the reorder buffer is not listed anymore";
+
+	deliver(b, datagrams[8]);
+
+	answer = acks(take(b));
+	ASSERT_EQ(answer.size(), 1u);
+	EXPECT_EQ(answer[0].seq, 10u);
+	EXPECT_TRUE(answer[0].body.ranges.empty());
 }
 
 
 TEST_F(ReliableLinkTest, DuplicatedDatagram_IsDeliveredOnce)
 {
-	a.queueReliable(ChannelId::Application, bytes({1}));
-	auto datagrams = a.takeOutgoing(now);
+	send(a, Lane::Reliable, 0, bytes({1}));
+	const auto datagrams = take(a);
 
-	b.onPacket(*decodePacket(datagrams[0]), now);
-	b.onPacket(*decodePacket(datagrams[0]), now);
+	deliver(b, datagrams[0]);
+	take(b);
+
+	deliver(b, datagrams[0]);
 	collect();
 
 	EXPECT_EQ(atB.size(), 1u);
 	EXPECT_EQ(b.stats().duplicatesReceived, 1u);
-	EXPECT_EQ(b.stats().dataAcksSent, 2u) << "The duplicate is acknowledged too, its sender may have missed the first DataAck";
+
+	const auto again = acks(take(b));
+	ASSERT_EQ(again.size(), 1u) << "The duplicate is acknowledged too, its sender may have missed the first Ack";
+	EXPECT_EQ(again[0].seq, 1u);
 }
 
 
-TEST_F(ReliableLinkTest, ExhaustedRetransmissions_FailTheLinkAndStartANewStream)
+TEST_F(ReliableLinkTest, BrokenAcknowledgements_AreIgnored)
 {
-	const uint32_t streamID = a.localStreamID();
-	a.queueReliable(ChannelId::Application, bytes({1}));
+	send(a, Lane::Reliable, 0, bytes({1}));
+	transfer(a, b);
+	take(b);
 
-	bool failed = false;
-	for (int i = 0; i < 30 && !failed; ++i)
+	PacketHeader header;
+	header.flags			 = PacketFlags::ack(Lane::Reliable);
+	header.srcStreamID = b.localStreamID();
+	header.dstStreamID = a.localStreamID();
+	header.seq		   = 1;
+
+	const auto withoutFields = encodePacket(header, bytes({1}));
+	a.onPacket(*decodePacket(withoutFields), now);
+	EXPECT_EQ(a.inFlightCount(), 1u) << "An Ack without its two fields";
+
+	const auto halfARange = encodePacket(header, bytes({0, 0, 0, 1, 0, 0, 0, 0, 1, 2, 3}));
+	a.onPacket(*decodePacket(halfARange), now);
+	EXPECT_EQ(a.inFlightCount(), 1u) << "An Ack whose ranges are cut off";
+
+	header.flags		 = PacketFlags::ack(Lane::Bulk);
+	const auto otherLane = encodePacket(header, encodeAck({.serial = 1, .mediaReceived = 0, .ranges = {}}, 1));
+	a.onPacket(*decodePacket(otherLane), now);
+	EXPECT_EQ(a.inFlightCount(), 1u) << "An Ack for a lane nothing was sent on";
+}
+
+
+TEST_F(ReliableLinkTest, AcknowledgementOfUnsentSeqs_ReleasesOnlyWhatWasSent)
+{
+	send(a, Lane::Reliable, 0, bytes({1}));
+	take(a);
+
+	PacketHeader header;
+	header.flags		= PacketFlags::ack(Lane::Reliable);
+	header.srcStreamID = b.localStreamID();
+	header.seq		   = 1'000'000; // far beyond anything a sent
+
+	const auto datagram = encodePacket(header, encodeAck({.serial = 1, .mediaReceived = 0, .ranges = {{5'000'000, 60'000}}}, 10));
+	a.onPacket(*decodePacket(datagram), now);
+
+	EXPECT_FALSE(pending(a)) << "Seq 1 is covered";
+
+	// The stream continues with seq 2 as if nothing happened
+	send(a, Lane::Reliable, 0, bytes({2}));
+	EXPECT_EQ(dataSeqs(take(a)), (std::vector<uint64_t>{2}));
+}
+
+
+// ---------------------------------------------------------------------------
+// Liveness
+// ---------------------------------------------------------------------------
+
+TEST_F(ReliableLinkTest, Unsupervised_NeverAsksAndNeverGivesUp)
+{
+	send(a, Lane::Reliable, 0, bytes({1}));
+	settle();
+
+	advance(10 * timings.peerTimeout);
+
+	EXPECT_TRUE(take(a).empty());
+	EXPECT_FALSE(failed(a));
+	EXPECT_FALSE(a.nextDeadline().has_value());
+}
+
+
+TEST_F(ReliableLinkTest, Supervised_AsksARemoteThatWentQuiet)
+{
+	send(a, Lane::Reliable, 0, bytes({1}));
+	settle();
+	a.supervise(now);
+
+	ASSERT_EQ(a.nextDeadline(), now + timings.keepAlive);
+
+	advance(timings.keepAlive - 1ms);
+	EXPECT_TRUE(take(a).empty()) << "Not before it was quiet for that long";
+
+	advance(1ms);
+	const auto asked = take(a);
+	ASSERT_EQ(count(asked, PacketKind::Ping), 1u);
+
+	deliverPass(b, asked);
+	const auto answer = take(b);
+	ASSERT_EQ(acks(answer).size(), 1u);
+	deliverPass(a, answer);
+
+	EXPECT_EQ(a.nextDeadline(), now + timings.keepAlive) << "The answer counts: the remote is asked again that much later";
+	EXPECT_FALSE(failed(a));
+}
+
+
+TEST_F(ReliableLinkTest, Supervised_AsksOncePerInterval)
+{
+	timings.peerTimeout = 10 * timings.keepAlive;
+	recreate(timings);
+
+	send(a, Lane::Reliable, 0, bytes({1}));
+	settle();
+	a.supervise(now);
+
+	size_t pings = 0;
+	for (int i = 0; i < 30; ++i)
 	{
-		advance(400ms);
-		a.takeOutgoing(now); // everything is lost
-
-		for (auto event : a.takeEvents())
-			failed |= event == LinkEvent::Failed;
+		advance(timings.keepAlive / 10);
+		pings += count(take(a), PacketKind::Ping);
 	}
 
-	ASSERT_TRUE(failed);
-	EXPECT_EQ(a.stats().retransmissions, static_cast<uint64_t>(config.maxRetransmits));
+	EXPECT_EQ(pings, 3u) << "Three intervals of silence, three questions";
+}
+
+
+TEST_F(ReliableLinkTest, Supervised_FailsWhenTheRemoteStaysSilent)
+{
+	send(a, Lane::Reliable, 0, bytes({1}));
+	settle();
+	a.supervise(now);
+
+	const auto started = now;
+	while (!failed(a) && now - started < 10 * timings.peerTimeout)
+	{
+		take(a); // the questions get lost
+		advance(50ms);
+	}
+
+	ASSERT_TRUE(failed(a));
+	EXPECT_GE(now - started, timings.peerTimeout);
+	EXPECT_LE(now - started, timings.peerTimeout + 100ms);
+}
+
+
+TEST_F(ReliableLinkTest, Supervised_AnyPacketCountsAsASignOfLife)
+{
+	send(a, Lane::Reliable, 0, bytes({1}));
+	settle();
+	a.supervise(now);
+
+	// B keeps sending, A never has to ask
+	for (int i = 0; i < 40; ++i)
+	{
+		advance(timings.keepAlive / 2);
+		send(b, Lane::Media, 0, bytes({1}));
+		const auto fromA = take(a);
+		EXPECT_EQ(count(fromA, PacketKind::Ping), 0u);
+		deliverPass(a, take(b));
+	}
+
+	EXPECT_FALSE(failed(a));
+}
+
+
+TEST_F(ReliableLinkTest, Supervised_DoesNotAskARemoteItDoesNotKnowYet)
+{
+	a.supervise(now);
+	send(a, Lane::Control, 1, bytes({1}));
+	take(a); // lost
+
+	advance(timings.keepAlive);
+
+	EXPECT_EQ(count(take(a), PacketKind::Ping), 0u) << "Only the first Control packet may go out without the remote's stream ID";
+	EXPECT_EQ(a.stats().pingsSent, 0u);
+}
+
+
+// ---------------------------------------------------------------------------
+// Failure and restart
+// ---------------------------------------------------------------------------
+
+TEST_F(ReliableLinkTest, UnacknowledgedData_FailsTheLinkAfterThePeerTimeout)
+{
+	const auto started = now;
+
+	send(a, Lane::Reliable, 0, bytes({1}));
+
+	bool linkFailed = false;
+	for (int i = 0; i < 100 && !linkFailed; ++i)
+	{
+		take(a); // everything is lost
+		advance(100ms);
+		linkFailed = failed(a);
+	}
+
+	ASSERT_TRUE(linkFailed);
+	EXPECT_GE(now - started, timings.peerTimeout) << "Not before the timeout";
+	EXPECT_LE(now - started, timings.peerTimeout + 200ms);
+	EXPECT_GT(a.stats().retransmissions, 0u) << "It kept trying until then";
 	EXPECT_FALSE(a.hasPendingReliable()) << "The failed stream is discarded";
-	EXPECT_NE(a.localStreamID(), streamID) << "A new stream needs a new stream ID";
+
+	send(a, Lane::Reliable, 0, bytes({2}));
+	EXPECT_TRUE(take(a).empty()) << "A failed link sends nothing anymore: its session is over";
+	EXPECT_FALSE(a.nextDeadline().has_value());
 }
 
 
-TEST_F(ReliableLinkTest, AfterFailure_BothSidesResynchronise)
+TEST_F(ReliableLinkTest, SlowProgress_DoesNotFailTheLink)
 {
-	// Establish both streams first
-	a.queueReliable(ChannelId::Application, bytes({1}));
-	b.queueReliable(ChannelId::Application, bytes({2}));
-	settle();
-	ASSERT_EQ(atB.size(), 1u);
-	ASSERT_EQ(atA.size(), 1u);
+	for (uint8_t i = 0; i < 40; ++i)
+		send(a, Lane::Reliable, 0, bytes({i}));
 
-	// A's next message never gets through: A fails
-	a.queueReliable(ChannelId::Application, bytes({3}));
-	bool failed = false;
-	for (int i = 0; i < 30 && !failed; ++i)
+	// A path that is nearly dead: one Data packet gets through per timeout. That is slow, but it is not a failed link.
+	for (int i = 0; i < 200 && pending(a); ++i)
 	{
+		bool	   passed	 = false;
+		const Drop allButOne = [&passed](const PacketHeader &header)
+		{
+			if (header.flags.kind() != PacketKind::Data)
+				return false;
+
+			return std::exchange(passed, true);
+		};
+
+		transfer(a, b, allButOne);
+		transfer(b, a);
 		advance(400ms);
-		a.takeOutgoing(now);
-		b.takeOutgoing(now);
-		for (auto event : a.takeEvents())
-			failed |= event == LinkEvent::Failed;
+
+		ASSERT_FALSE(failed(a)) << "after " << i << " rounds";
 	}
-	ASSERT_TRUE(failed);
 
-	// The network recovers
-	a.queueReliable(ChannelId::Application, bytes({4}));
-	settle();
-
-	ASSERT_EQ(atB.size(), 2u);
-	EXPECT_EQ(atB[1].body, bytes({4}));
-
-	auto eventsB = b.takeEvents();
-	ASSERT_EQ(eventsB.size(), 1u);
-	EXPECT_EQ(eventsB[0], LinkEvent::PeerRestarted) << "The new stream ID tells B to reset as well";
-
-	b.queueReliable(ChannelId::Application, bytes({5}));
-	settle();
-	ASSERT_EQ(atA.size(), 2u);
-	EXPECT_EQ(atA[1].body, bytes({5})) << "B's stream to A continues after the reset";
+	EXPECT_FALSE(pending(a));
+	EXPECT_EQ(atB.size(), 40u) << "Everything arrives, long after the peer timeout would have passed";
 }
 
 
-TEST_F(ReliableLinkTest, PeerRestart_ResetsTheLink)
+TEST_F(ReliableLinkTest, PacketOfAnotherRemoteStream_IsDropped)
 {
-	a.queueReliable(ChannelId::Application, bytes({1}));
+	send(a, Lane::Reliable, 0, bytes({1}));
 	settle();
 	ASSERT_EQ(a.remoteStreamID(), b.localStreamID());
 
-	// B restarts: a brand-new link with a new stream ID starts at seq 1 again
-	ReliableLink restarted(config, 0xBBBB0002);
-	a.queueReliable(ChannelId::Application, bytes({2})); // queued towards the old B
-	a.takeOutgoing(now);
+	// B was started again: a brand-new link with a new stream ID. That is another session, not this one.
+	ReliableLink		 restarted(timings, 0xBBBB0002);
+	FakeNet::QueueSource fromRestarted;
 
-	restarted.queueReliable(ChannelId::Control, bytes({9}));
-	for (const auto &datagram : restarted.takeOutgoing(now))
-		a.onPacket(*decodePacket(datagram), now);
-	collect();
+	fromRestarted.push(Lane::Control, 0, bytes({9}));
+	deliverPass(a, FakeNet::takeOutgoing(restarted, now, fromRestarted));
 
-	auto events = a.takeEvents();
-	ASSERT_EQ(events.size(), 1u);
-	EXPECT_EQ(events[0], LinkEvent::PeerRestarted);
-	EXPECT_EQ(a.remoteStreamID(), 0xBBBB0002u);
-	EXPECT_FALSE(a.hasPendingReliable()) << "Messages for the old stream are dropped";
-
-	ASSERT_EQ(atA.size(), 1u) << "seq 1 of the new stream is not mistaken for a duplicate";
-	EXPECT_EQ(atA[0].body, bytes({9}));
+	EXPECT_EQ(a.remoteStreamID(), b.localStreamID()) << "A link talks to one stream for as long as it lives";
+	EXPECT_TRUE(atA.empty());
+	EXPECT_EQ(a.stats().staleDropped, 1u);
+	EXPECT_TRUE(take(a).empty()) << "... and does not acknowledge what is not meant for it";
 }
 
 
 TEST_F(ReliableLinkTest, PacketForAnOldStream_IsDropped)
 {
-	a.queueReliable(ChannelId::Application, bytes({1}));
+	send(a, Lane::Reliable, 0, bytes({1}));
 	settle();
 
 	PacketHeader header;
-	header.flags	   = PacketFlags::data(ChannelId::Application, true);
+	header.flags		= PacketFlags::data(Lane::Reliable);
 	header.srcStreamID = a.localStreamID();
 	header.dstStreamID = 0x12345678; // not B
 	header.seq		   = 2;
 
-	b.onPacket(*decodePacket(encodePacket(header, bytes({5}))), now);
+	const auto datagram = encodePacket(header, bytes({5}));
+	b.onPacket(*decodePacket(datagram), now);
 	collect();
 
 	EXPECT_EQ(b.stats().staleDropped, 1u);
 	EXPECT_EQ(atB.size(), 1u);
-	EXPECT_TRUE(b.takeOutgoing(now).empty()) << "A stale packet is not acknowledged";
+	EXPECT_TRUE(take(b).empty()) << "A stale packet is not acknowledged";
 }
 
+
+// ---------------------------------------------------------------------------
+// Windows
+// ---------------------------------------------------------------------------
 
 TEST_F(ReliableLinkTest, DataBeyondTheReceiveWindow_IsNotAcknowledged)
 {
 	PacketHeader header;
-	header.flags	   = PacketFlags::data(ChannelId::Application, true);
+	header.flags		= PacketFlags::data(Lane::Reliable);
 	header.srcStreamID = a.localStreamID();
-	header.seq		   = 1 + WindowSize;
+	header.seq			= 1 + ReliableWindow;
 
-	b.onPacket(*decodePacket(encodePacket(header, bytes({5}))), now);
+	const auto datagram = encodePacket(header, bytes({5}));
+	b.onPacket(*decodePacket(datagram), now);
 
 	EXPECT_EQ(b.stats().outOfWindowDropped, 1u);
-	EXPECT_TRUE(b.takeOutgoing(now).empty());
+	EXPECT_TRUE(take(b).empty());
 }
 
 
 TEST_F(ReliableLinkTest, SendWindowLimitsPacketsInFlight)
 {
-	const size_t total = WindowSize + 44;
+	const size_t total = ReliableWindow + 44;
 	for (size_t i = 0; i < total; ++i)
-		ASSERT_EQ(a.queueReliable(ChannelId::Application, {static_cast<uint8_t>(i), static_cast<uint8_t>(i >> 8)}), PushResult::Accepted);
+		send(a, Lane::Reliable, 0, {static_cast<uint8_t>(i), static_cast<uint8_t>(i >> 8)});
 
-	EXPECT_EQ(a.inFlightCount(), WindowSize);
-	EXPECT_EQ(a.queuedMessageCount(), 44u);
+	const auto first = take(a);
+	EXPECT_EQ(first.size(), ReliableWindow) << "Never more unacknowledged seqs than the receiver can buffer";
+	EXPECT_EQ(a.inFlightCount(), ReliableWindow);
+	EXPECT_EQ(fromA.waiting(Lane::Reliable), 44u) << "What cannot go out yet is not even taken";
+	EXPECT_TRUE(take(a).empty()) << "The window is full until Acks arrive";
 
+	deliverPass(b, first);
 	settle();
 
 	ASSERT_EQ(atB.size(), total);
 	for (size_t i = 0; i < total; ++i)
 		EXPECT_EQ(atB[i].body, (std::vector<uint8_t>{static_cast<uint8_t>(i), static_cast<uint8_t>(i >> 8)})) << "in order at " << i;
-	EXPECT_FALSE(a.hasPendingReliable());
+	EXPECT_FALSE(pending(a));
 }
 
 
-TEST_F(ReliableLinkTest, DropNewest_RejectsWhenTheQueueIsFull)
+TEST_F(ReliableLinkTest, ControlLane_HasASmallWindow)
 {
-	config.sendQueueCapacity = 2;
-	config.sendQueueOverflow = OverflowPolicy::DropNewest;
-	ReliableLink link(config);
+	for (uint8_t i = 0; i < 40; ++i)
+		send(a, Lane::Control, 0, bytes({i}));
 
-	for (size_t i = 0; i < WindowSize; ++i)
-		link.queueReliable(ChannelId::Application, bytes({1}));
+	EXPECT_EQ(take(a).size(), ControlWindow);
 
-	EXPECT_EQ(link.queueReliable(ChannelId::Application, bytes({2})), PushResult::Accepted);
-	EXPECT_EQ(link.queueReliable(ChannelId::Application, bytes({3})), PushResult::Accepted);
-	EXPECT_EQ(link.queueReliable(ChannelId::Application, bytes({4})), PushResult::Rejected);
-	EXPECT_EQ(link.queueReliable(ChannelId::Control, bytes({5})), PushResult::Accepted) << "Control signals never compete with application backpressure";
+	settle();
+	advance(100ms);
+	settle();
+	EXPECT_EQ(atB.size(), 40u);
 }
 
 
-TEST_F(ReliableLinkTest, DropOldest_EvictsUnsentMessagesWithoutLeavingAGap)
+// ---------------------------------------------------------------------------
+// Lanes
+// ---------------------------------------------------------------------------
+
+TEST_F(ReliableLinkTest, Lanes_AreOrderedIndependently)
 {
-	config.sendQueueCapacity = 4;
-	config.sendQueueOverflow = OverflowPolicy::DropOldest;
-	ReliableLink sender(config, 0xAAAA0009);
+	send(a, Lane::Reliable, 1, bytes({1}));
+	send(a, Lane::Reliable, 2, bytes({2}));
+	send(a, Lane::Bulk, 3, bytes({3}));
+	send(a, Lane::Bulk, 4, bytes({4}));
+	send(a, Lane::Control, 5, bytes({5}));
 
-	for (size_t i = 0; i < WindowSize; ++i)
-		sender.queueReliable(ChannelId::Application, bytes({0}));
+	// The first Reliable packet is lost
+	transfer(a, b, seqOf(Lane::Reliable, 1));
 
-	for (uint8_t value = 1; value <= 6; ++value)
-	{
-		const auto result = sender.queueReliable(ChannelId::Application, bytes({value}));
-		EXPECT_EQ(result, value <= 4 ? PushResult::Accepted : PushResult::EvictedOldest);
-	}
+	EXPECT_EQ(tagsAtB(), (std::vector<uint32_t>{5, 3, 4})) << "Only the lane with the gap waits";
 
-	// Run the exchange to completion
-	for (int round = 0; round < 1000; ++round)
-	{
-		size_t moved = 0;
-		for (const auto &datagram : sender.takeOutgoing(now))
-		{
-			b.onPacket(*decodePacket(datagram), now);
-			++moved;
-		}
-		for (const auto &datagram : b.takeOutgoing(now))
-		{
-			sender.onPacket(*decodePacket(datagram), now);
-			++moved;
-		}
-		if (moved == 0)
-			break;
-	}
-	collect();
-
-	ASSERT_EQ(atB.size(), WindowSize + 4) << "Every message that was kept arrives: evicting never created a gap in the stream";
-	EXPECT_EQ(atB[WindowSize].body, bytes({3})) << "1 and 2 were the oldest unsent messages";
-	EXPECT_EQ(atB.back().body, bytes({6}));
-	EXPECT_FALSE(sender.hasPendingReliable());
-}
-
-
-TEST_F(ReliableLinkTest, ControlSignalsOvertakeQueuedApplicationMessages)
-{
-	for (size_t i = 0; i < WindowSize + 5; ++i)
-		a.queueReliable(ChannelId::Application, bytes({1}));
-
-	a.queueReliable(ChannelId::Control, bytes({42}));
 	settle();
 
-	ASSERT_EQ(atB.size(), WindowSize + 6);
-	EXPECT_EQ(atB[WindowSize].header.flags.channel(), ChannelId::Control) << "The first free window slot goes to the control signal";
+	EXPECT_EQ(tagsAtB(), (std::vector<uint32_t>{5, 3, 4, 1, 2})) << "... and delivers in its own order once the gap is closed";
 }
 
 
-TEST_F(ReliableLinkTest, LargeMessageIsFragmentedAndReassembledUnderLoss)
+TEST_F(ReliableLinkTest, BulkLoss_DoesNotDelayReliable)
 {
-	std::vector<uint8_t> body(100 * 1024);
-	for (size_t i = 0; i < body.size(); ++i)
-		body[i] = static_cast<uint8_t>(i * 13);
+	send(a, Lane::Bulk, 1, pattern(10'000));
+	send(a, Lane::Reliable, 2, bytes({7}));
 
-	recreateWithRetryBudget(20);
-	ASSERT_EQ(a.queueReliable(ChannelId::Application, body), PushResult::Accepted);
+	transfer(a, b, seqOf(Lane::Bulk, 3));
+
+	ASSERT_EQ(atB.size(), 1u) << "The small message does not wait for the blob in front of it";
+	EXPECT_EQ(atB[0].tag, 2u);
+
+	settle();
+
+	ASSERT_EQ(atB.size(), 2u);
+	EXPECT_EQ(atB[1].body, pattern(10'000));
+	EXPECT_EQ(atB[1].lane, Lane::Bulk);
+}
+
+
+TEST_F(ReliableLinkTest, ControlSignal_IsNotHeldUpByAFullCongestionWindow)
+{
+	recreate(congestionTimings());
+
+	for (int i = 0; i < 100; ++i)
+		send(a, Lane::Reliable, 0, bytes({1}));
+
+	EXPECT_EQ(dataSeqs(take(a)).size(), InitialCongestionWindow) << "The congestion window is full, and nothing of it is acknowledged";
+
+	send(a, Lane::Control, 0, bytes({42}));
+
+	const auto pass = take(a);
+	ASSERT_EQ(pass.size(), 1u) << "The congestion window only holds Reliable and Bulk back";
+	EXPECT_EQ(dataSeqs(pass, Lane::Control), (std::vector<uint64_t>{1}));
+
+	deliverPass(b, pass);
+
+	ASSERT_EQ(atB.size(), 1u);
+	EXPECT_EQ(atB[0].lane, Lane::Control);
+	EXPECT_EQ(atB[0].body, bytes({42}));
+}
+
+
+TEST_F(ReliableLinkTest, ReliableAndBulk_ShareTheCongestionWindow)
+{
+	recreate(congestionTimings());
+
+	for (int i = 0; i < 20; ++i)
+		send(a, Lane::Reliable, 0, bytes({1}));
+	for (int i = 0; i < 100; ++i)
+		send(a, Lane::Bulk, 0, bytes({2}));
+
+	const auto pass = take(a);
+
+	EXPECT_EQ(dataSeqs(pass, Lane::Reliable).size(), 20u);
+	EXPECT_EQ(dataSeqs(pass, Lane::Bulk).size(), InitialCongestionWindow - 20) << "Bulk gets what Reliable leaves of the window";
+}
+
+
+TEST_F(ReliableLinkTest, SendPass_GoesInOrderOfUrgency)
+{
+	// Something to acknowledge
+	send(b, Lane::Reliable, 0, bytes({9}));
+	transfer(b, a);
+
+	send(a, Lane::Bulk, 0, bytes({1}));
+	send(a, Lane::Reliable, 0, bytes({2}));
+	send(a, Lane::Media, 0, bytes({3}));
+	send(a, Lane::Control, 0, bytes({4}));
+
+	const auto pass = take(a);
+	ASSERT_EQ(pass.size(), 5u);
+
+	std::vector<DecodedPacket>		  packets;
+	std::vector<std::vector<uint8_t>> storage(pass.size());
+	for (size_t i = 0; i < pass.size(); ++i)
+		packets.push_back(decoded(pass[i], storage[i]));
+
+	EXPECT_EQ(packets[0].header.flags.kind(), PacketKind::Ack) << "The remote's sending depends on Acks";
+	EXPECT_EQ(packets[1].header.flags.lane(), Lane::Control);
+	EXPECT_EQ(packets[2].header.flags.lane(), Lane::Media);
+	EXPECT_EQ(packets[3].header.flags.lane(), Lane::Reliable);
+	EXPECT_EQ(packets[4].header.flags.lane(), Lane::Bulk);
+}
+
+
+TEST_F(ReliableLinkTest, Lanes_AreAcknowledgedSeparately)
+{
+	send(a, Lane::Control, 0, bytes({1}));
+	send(a, Lane::Reliable, 0, bytes({2}));
+	send(a, Lane::Reliable, 0, bytes({3}));
+	send(a, Lane::Bulk, 0, bytes({4}));
+	transfer(a, b);
+
+	const auto answer = acks(take(b));
+	ASSERT_EQ(answer.size(), 3u);
+
+	EXPECT_EQ(answer[0].lane, Lane::Control);
+	EXPECT_EQ(answer[0].seq, 1u);
+	EXPECT_EQ(answer[1].lane, Lane::Reliable);
+	EXPECT_EQ(answer[1].seq, 2u);
+	EXPECT_EQ(answer[2].lane, Lane::Bulk);
+	EXPECT_EQ(answer[2].seq, 1u);
+	EXPECT_LT(answer[0].body.serial, answer[1].body.serial) << "Every Ack of a link has a serial of its own";
+	EXPECT_LT(answer[1].body.serial, answer[2].body.serial);
+}
+
+
+// ---------------------------------------------------------------------------
+// Messages
+// ---------------------------------------------------------------------------
+
+TEST_F(ReliableLinkTest, LargeMessage_ArrivesAsOneMessageWithItsTag)
+{
+	const auto body = pattern(100 * 1024);
+	send(a, Lane::Reliable, 0xCAFE, body);
+
+	settle();
+
+	ASSERT_EQ(atB.size(), 1u) << "Fragments are put together by the link";
+	EXPECT_EQ(atB[0].body, body);
+	EXPECT_EQ(atB[0].tag, 0xCAFEu);
+	EXPECT_EQ(b.stats().delivered, 1u);
+	EXPECT_GT(a.stats().dataSent, 80u);
+}
+
+
+TEST_F(ReliableLinkTest, Fragments_AreSentFromTheMessageWithoutCopyingIt)
+{
+	send(a, Lane::Reliable, 0, pattern(5000));
+
+	const auto pass = take(a);
+	ASSERT_EQ(pass.size(), 5u);
+
+	for (size_t i = 0; i < pass.size(); ++i)
+	{
+		ASSERT_TRUE(pass[i].message) << "A fragment refers to its message";
+		EXPECT_EQ(pass[i].message, pass[0].message) << "... the same one for every fragment";
+		EXPECT_EQ(pass[i].offset, i * MaxFragmentBody);
+		EXPECT_TRUE(pass[i].owned.empty());
+	}
+}
+
+
+TEST_F(ReliableLinkTest, LargeMessage_IsReassembledUnderLoss)
+{
+	const auto body = pattern(100 * 1024);
+	send(a, Lane::Reliable, 3, body);
 
 	std::mt19937 random(3);
 	auto		 lossy = [&random](const PacketHeader &) { return std::uniform_real_distribution<double>(0.0, 1.0)(random) < 0.2; };
 
-	for (int i = 0; i < 400 && a.hasPendingReliable(); ++i)
+	for (int i = 0; i < 1000 && pending(a); ++i)
 	{
 		transfer(a, b, lossy);
 		transfer(b, a, lossy);
@@ -498,38 +946,28 @@ TEST_F(ReliableLinkTest, LargeMessageIsFragmentedAndReassembledUnderLoss)
 	}
 	settle();
 
-	ASSERT_FALSE(a.hasPendingReliable());
+	ASSERT_FALSE(pending(a));
+	EXPECT_FALSE(failed(a));
 
-	FragmentationService			  reassembly;
-	std::optional<ReassembledMessage> message;
-	for (const auto &packet : atB)
-	{
-		EXPECT_TRUE(packet.header.flags.isFragmented());
-		if (auto m = reassembly.accept({ipv4("10.0.0.1"), 1}, packet.header, packet.body))
-			message = std::move(m);
-	}
-
-	ASSERT_TRUE(message.has_value());
-	EXPECT_EQ(message->body, body);
+	ASSERT_EQ(atB.size(), 1u);
+	EXPECT_EQ(atB[0].body, body);
 	EXPECT_GT(a.stats().retransmissions, 0u) << "The loss must actually have been exercised";
 }
 
 
 TEST_F(ReliableLinkTest, ManyMessagesUnderLossDuplicationAndReordering)
 {
-	recreateWithRetryBudget(40);
-
 	std::mt19937 random(11);
 	auto		 roll	= [&random](double p) { return std::uniform_real_distribution<double>(0.0, 1.0)(random) < p; };
 
 	const int	 total	= 2000;
 	int			 queued = 0;
 
-	for (int step = 0; step < 5000 && (queued < total || a.hasPendingReliable()); ++step)
+	for (int step = 0; step < 20'000 && (queued < total || pending(a)); ++step)
 	{
-		while (queued < total && a.queuedMessageCount() < 64)
+		while (queued < total && fromA.waiting(Lane::Reliable) < 64)
 		{
-			a.queueReliable(ChannelId::Application, {static_cast<uint8_t>(queued), static_cast<uint8_t>(queued >> 8)});
+			send(a, Lane::Reliable, static_cast<uint32_t>(queued), {static_cast<uint8_t>(queued), static_cast<uint8_t>(queued >> 8)});
 			++queued;
 		}
 
@@ -538,16 +976,16 @@ TEST_F(ReliableLinkTest, ManyMessagesUnderLossDuplicationAndReordering)
 		{
 			ReliableLink &from		= *pair;
 			ReliableLink &to		= pair == &a ? b : a;
-			auto		  datagrams = from.takeOutgoing(now);
+			auto		  datagrams = take(from);
 			std::shuffle(datagrams.begin(), datagrams.end(), random);
 
 			for (const auto &datagram : datagrams)
 			{
 				if (roll(0.25))
 					continue;
-				to.onPacket(*decodePacket(datagram), now);
+				deliver(to, datagram);
 				if (roll(0.1))
-					to.onPacket(*decodePacket(datagram), now);
+					deliver(to, datagram);
 			}
 		}
 
@@ -555,83 +993,60 @@ TEST_F(ReliableLinkTest, ManyMessagesUnderLossDuplicationAndReordering)
 		advance(10ms);
 	}
 
+	EXPECT_FALSE(failed(a));
 	ASSERT_EQ(atB.size(), static_cast<size_t>(total)) << "Every message exactly once";
 	for (int i = 0; i < total; ++i)
+	{
 		ASSERT_EQ(atB[i].body, (std::vector<uint8_t>{static_cast<uint8_t>(i), static_cast<uint8_t>(i >> 8)})) << "in order at " << i;
+		ASSERT_EQ(atB[i].tag, static_cast<uint32_t>(i));
+	}
 }
 
 
-TEST_F(ReliableLinkTest, Unreliable_StaleMessagesAreDiscarded)
+TEST_F(ReliableLinkTest, LargeMessage_DeliveredUnderLossWithCongestionControl)
 {
-	ASSERT_TRUE(a.sendUnreliable(ChannelId::Application, bytes({1})));
-	ASSERT_TRUE(a.sendUnreliable(ChannelId::Application, bytes({2})));
-	ASSERT_TRUE(a.sendUnreliable(ChannelId::Application, bytes({3})));
+	recreate(congestionTimings());
 
-	auto datagrams = a.takeOutgoing(now);
-	ASSERT_EQ(datagrams.size(), 3u);
+	const auto body = pattern(512 * 1024);
+	send(a, Lane::Bulk, 0, body);
 
-	b.onPacket(*decodePacket(datagrams[1]), now);
-	b.onPacket(*decodePacket(datagrams[0]), now); // older than what was delivered
-	b.onPacket(*decodePacket(datagrams[2]), now);
-	collect();
+	std::mt19937 random(5);
+	auto		 lossy = [&random](const PacketHeader &) { return std::uniform_real_distribution<double>(0.0, 1.0)(random) < 0.2; };
 
-	ASSERT_EQ(atB.size(), 2u);
-	EXPECT_EQ(atB[0].body, bytes({2}));
-	EXPECT_EQ(atB[1].body, bytes({3}));
-	EXPECT_TRUE(b.takeOutgoing(now).empty()) << "Unreliable messages are never acknowledged";
-	EXPECT_FALSE(a.hasPendingReliable());
-}
+	for (int i = 0; i < 50'000 && pending(a); ++i)
+	{
+		transfer(a, b, lossy);
+		transfer(b, a, lossy);
+		advance(5ms);
+	}
+	settle();
 
+	ASSERT_FALSE(pending(a));
+	EXPECT_FALSE(failed(a)) << "A lossy path is slow, not broken";
 
-TEST_F(ReliableLinkTest, Unreliable_MustFitIntoOneDatagram)
-{
-	std::vector<uint8_t> fits(a.maxUnreliableBody());
-	std::vector<uint8_t> tooLarge(a.maxUnreliableBody() + 1);
-
-	EXPECT_TRUE(a.sendUnreliable(ChannelId::Application, fits));
-	EXPECT_FALSE(a.sendUnreliable(ChannelId::Application, tooLarge));
-
-	for (const auto &datagram : a.takeOutgoing(now))
-		EXPECT_LE(datagram.size(), config.maxDatagramSize);
+	ASSERT_EQ(atB.size(), 1u);
+	EXPECT_EQ(atB[0].body, body);
+	EXPECT_GT(a.stats().fastRetransmissions, 0u) << "Losses must have been repaired without waiting for the timeout as well";
 }
 
 
 TEST_F(ReliableLinkTest, NoDatagramExceedsTheMaximumSize)
 {
-	a.queueReliable(ChannelId::Application, std::vector<uint8_t>(10000, 1));
+	send(a, Lane::Reliable, 0, std::vector<uint8_t>(10'000, 1));
 
-	for (const auto &datagram : a.takeOutgoing(now))
-		EXPECT_LE(datagram.size(), config.maxDatagramSize);
-}
+	const auto pass = take(a);
+	ASSERT_FALSE(pass.empty());
 
+	for (const auto &datagram : pass)
+		EXPECT_LE(FakeNet::bytesOf(datagram).size(), internal::MaxDatagramSize);
 
-TEST_F(ReliableLinkTest, OversizedMessage_IsRejected)
-{
-	config.maxMessageSize = 1000;
-	ReliableLink link(config);
-
-	EXPECT_EQ(link.queueReliable(ChannelId::Application, std::vector<uint8_t>(1001)), PushResult::Rejected);
-	EXPECT_FALSE(link.hasPendingReliable());
-}
-
-
-TEST_F(ReliableLinkTest, DropQueuedApplicationMessages_KeepsControlSignals)
-{
-	for (size_t i = 0; i < WindowSize + 3; ++i)
-		a.queueReliable(ChannelId::Application, bytes({1}));
-	a.queueReliable(ChannelId::Control, bytes({2}));
-
-	a.dropQueuedApplicationMessages();
-	EXPECT_EQ(a.queuedMessageCount(), 1u) << "Only the control signal is left in the queue";
-
-	settle();
-	EXPECT_EQ(atB.size(), WindowSize + 1) << "Messages already in flight still complete";
+	EXPECT_EQ(FakeNet::bytesOf(pass.front()).size(), internal::MaxDatagramSize) << "The first fragment, which carries every extension, uses the datagram completely";
 }
 
 
 TEST_F(ReliableLinkTest, RttIsSampledFromUnretransmittedPackets)
 {
-	a.queueReliable(ChannelId::Application, bytes({1}));
+	send(a, Lane::Reliable, 0, bytes({1}));
 	transfer(a, b);
 	now += 30ms;
 	transfer(b, a);
@@ -641,207 +1056,607 @@ TEST_F(ReliableLinkTest, RttIsSampledFromUnretransmittedPackets)
 }
 
 
-TEST_F(ReliableLinkTest, HeartbeatIsNeitherDeliveredNorAcknowledged)
-{
-	a.sendHeartbeat();
-	transfer(a, b);
+// ---------------------------------------------------------------------------
+// Media
+// ---------------------------------------------------------------------------
 
-	EXPECT_TRUE(atB.empty());
-	EXPECT_TRUE(b.takeOutgoing(now).empty());
-	EXPECT_EQ(b.remoteStreamID(), a.localStreamID()) << "A heartbeat still introduces the peer";
+TEST_F(ReliableLinkTest, Media_IsNeitherAckedNorRetransmitted)
+{
+	send(a, Lane::Media, 11, bytes({1}));
+	send(a, Lane::Media, 12, bytes({2}));
+	send(a, Lane::Media, 13, bytes({3}));
+
+	const auto datagrams = take(a);
+	ASSERT_EQ(datagrams.size(), 3u);
+
+	deliver(b, datagrams[1]);
+	deliver(b, datagrams[0]); // overtaken; the third one is lost
+	collect();
+
+	EXPECT_EQ(tagsAtB(), (std::vector<uint32_t>{12, 11})) << "Delivered as it arrives";
+	EXPECT_EQ(atB[0].lane, Lane::Media);
+	EXPECT_TRUE(take(b).empty()) << "Media is never acknowledged";
+	EXPECT_FALSE(a.hasPendingReliable());
+
+	advance(5s);
+	EXPECT_TRUE(take(a).empty()) << "... and never sent again";
+	EXPECT_FALSE(failed(a));
+	EXPECT_EQ(a.stats().mediaSent, 3u);
+	EXPECT_EQ(a.stats().retransmissions, 0u);
+}
+
+
+TEST_F(ReliableLinkTest, Media_LargeMessageIsPutTogetherInAnyOrder)
+{
+	const auto body = pattern(50'000);
+	send(a, Lane::Media, 4, body);
+
+	auto datagrams = take(a);
+	ASSERT_EQ(datagrams.size(), fragmentsOf(body.size()));
+
+	std::mt19937 random(9);
+	std::ranges::shuffle(datagrams, random);
+	deliverPass(b, datagrams);
+
+	ASSERT_EQ(atB.size(), 1u);
+	EXPECT_EQ(atB[0].body, body);
+	EXPECT_EQ(atB[0].tag, 4u);
+}
+
+
+TEST_F(ReliableLinkTest, Media_DoesNotWaitForTheCongestionWindow)
+{
+	recreate(congestionTimings());
+
+	for (int i = 0; i < 100; ++i)
+		send(a, Lane::Reliable, 0, bytes({1}));
+	EXPECT_EQ(take(a).size(), InitialCongestionWindow);
+
+	send(a, Lane::Media, 0, bytes({2}));
+
+	const auto pass = take(a);
+	ASSERT_EQ(pass.size(), 1u);
+	EXPECT_EQ(dataSeqs(pass, Lane::Media).size(), 1u);
+}
+
+
+TEST_F(ReliableLinkTest, MediaReceived_IsReportedWithEveryAck)
+{
+	for (uint8_t i = 0; i < 5; ++i)
+		send(a, Lane::Media, 0, bytes({i}));
+	send(a, Lane::Reliable, 0, bytes({9}));
+
+	transfer(a, b, seqOf(Lane::Media, 2));
+	transfer(b, a);
+
+	EXPECT_EQ(a.stats().mediaSent, 5u);
+	EXPECT_EQ(a.stats().mediaReceivedByPeer, 4u) << "The sender learns how much of its media arrives";
 }
 
 
 // ---------------------------------------------------------------------------
-// Send passes
+// Peek and commit
 // ---------------------------------------------------------------------------
 
-TEST_F(ReliableLinkTest, SendPass_PushesAtMostTheBudget)
+TEST_F(ReliableLinkTest, Peek_IsIdempotent)
 {
-	ReliableLink sender(sendPassConfig(), 0xAAAA0010);
-	for (int i = 0; i < 2000; ++i)
-		sender.queueReliable(ChannelId::Application, bytes({1}));
+	send(b, Lane::Reliable, 0, bytes({9}));
+	transfer(b, a); // something to acknowledge
 
-	EXPECT_EQ(sender.takeOutgoing(now).size(), 700u) << "One pass pushes at most the budget";
-	EXPECT_EQ(sender.takeOutgoing(now).size(), WindowSize - 700) << "The next pass sends the rest of the window";
-	EXPECT_TRUE(sender.takeOutgoing(now).empty()) << "The window is full until acknowledgements arrive";
-}
+	send(a, Lane::Reliable, 7, pattern(3000));
+	send(a, Lane::Media, 8, bytes({1}));
 
-
-TEST_F(ReliableLinkTest, SendPass_KeepsTheOrder)
-{
-	ReliableLink sender(sendPassConfig(), 0xAAAA0011);
-	for (int i = 0; i < 1000; ++i)
-		sender.queueReliable(ChannelId::Application, bytes({1}));
-
-	std::vector<uint64_t> seqs;
-	while (sender.hasOutgoing())
+	for (const Lane lane : {Lane::Reliable, Lane::Media})
 	{
-		const auto pass = dataSeqs(sender.takeOutgoing(now));
-		seqs.insert(seqs.end(), pass.begin(), pass.end());
+		const auto *first = a.peek(lane, now, fromA);
+		ASSERT_NE(first, nullptr);
+		const auto	offered = FakeNet::bytesOf(*first);
+
+		const auto *again	= a.peek(lane, now, fromA);
+		ASSERT_NE(again, nullptr);
+		EXPECT_EQ(FakeNet::bytesOf(*again), offered) << "Until it is committed, the same datagram is offered";
 	}
 
-	ASSERT_EQ(seqs.size(), 1000u);
-	for (size_t i = 0; i < seqs.size(); ++i)
-		EXPECT_EQ(seqs[i], i + 1) << "in order at " << i;
+	const auto *ack = a.peekAck();
+	ASSERT_NE(ack, nullptr);
+	const auto offeredAck = FakeNet::bytesOf(*ack);
+	ASSERT_NE(a.peekAck(), nullptr);
+	EXPECT_EQ(FakeNet::bytesOf(*a.peekAck()), offeredAck);
+
+	EXPECT_EQ(a.peek(Lane::Control, now, fromA), nullptr) << "Nothing was queued there";
+
+	EXPECT_EQ(a.inFlightCount(), 0u) << "Nothing counts as sent";
+	EXPECT_EQ(a.stats().dataSent, 0u);
+	EXPECT_EQ(a.stats().mediaSent, 0u);
+	EXPECT_EQ(a.nextDeadline(), std::nullopt) << "No timer runs for a datagram that did not go out";
+
+	settle();
+	EXPECT_EQ(atB.size(), 2u) << "Everything that was only looked at still arrives";
+	EXPECT_EQ(a.stats().retransmissions, 0u);
 }
 
 
-TEST_F(ReliableLinkTest, SendBudget_HalvesAfterLoss)
+TEST_F(ReliableLinkTest, AbortedDatagram_LeavesNoTrace)
 {
-	ReliableLink sender(sendPassConfig(), 0xAAAA0012);
-	for (int i = 0; i < 10; ++i)
-		sender.queueReliable(ChannelId::Application, bytes({1}));
+	const auto body = pattern(3000); // three fragments
+	send(a, Lane::Reliable, 0, body);
 
-	sender.takeOutgoing(now); // lost on the wire
-	now += 1s;
-	sender.onTimer(now);
+	const auto *first = a.peek(Lane::Reliable, now, fromA);
+	ASSERT_NE(first, nullptr);
+	const OutgoingDatagram sent = *first;
+	a.commit(Lane::Reliable, now);
 
-	EXPECT_EQ(sender.takeOutgoing(now).size(), 10u) << "Every lost fragment is sent again";
-	EXPECT_EQ(sender.sendBudget(), 350u) << "A loss halves the budget";
-}
+	// The socket refuses the second fragment: it is not committed
+	const auto *second = a.peek(Lane::Reliable, now, fromA);
+	ASSERT_NE(second, nullptr);
+	const auto refused = FakeNet::bytesOf(*second);
 
+	EXPECT_EQ(a.inFlightCount(), 1u);
+	EXPECT_EQ(a.stats().dataSent, 1u);
 
-TEST_F(ReliableLinkTest, SendBudget_GrowsWhilePassesAreFull)
-{
-	ReliableLink sender(sendPassConfig(), 0xAAAA0013);
-	for (int i = 0; i < 2000; ++i)
-		sender.queueReliable(ChannelId::Application, bytes({1}));
+	now += 1ms;
+	const auto pass = take(a);
 
-	sender.takeOutgoing(now); // full: more was waiting than the budget allowed
-	sender.takeOutgoing(now);
+	ASSERT_EQ(pass.size(), 2u);
+	EXPECT_EQ(FakeNet::bytesOf(pass[0]), refused) << "The refused datagram is offered again, with the same seq";
+	EXPECT_EQ(dataSeqs(pass), (std::vector<uint64_t>{2, 3}));
 
-	EXPECT_EQ(sender.sendBudget(), 787u) << "A full pass without loss raises the budget by an eighth";
-}
-
-
-TEST_F(ReliableLinkTest, SendBudget_StaysWithinBounds)
-{
-	ReliabilityConfig budgetConfig = sendPassConfig(1000);
-
-	ReliableLink	  lossy(budgetConfig, 0xAAAA0014);
-	lossy.queueReliable(ChannelId::Application, bytes({1}));
-	for (int i = 0; i < 20; ++i)
-	{
-		lossy.takeOutgoing(now); // lost every time
-		now += 1s;
-		lossy.onTimer(now);
-	}
-	lossy.takeOutgoing(now);
-	EXPECT_EQ(lossy.sendBudget(), budgetConfig.minSendBudget);
-
-	budgetConfig.initialSendBudget = 1000;
-	budgetConfig.sendQueueCapacity = 4000;
-	ReliableLink busy(budgetConfig, 0xAAAA0015);
-	for (int i = 0; i < 3000; ++i)
-		busy.queueReliable(ChannelId::Application, bytes({1}));
-
-	busy.takeOutgoing(now);
-	busy.takeOutgoing(now);
-	EXPECT_EQ(busy.sendBudget(), budgetConfig.maxSendBudget);
-}
-
-
-TEST_F(ReliableLinkTest, SendPass_SignalsFirstThenUnreliableThenReliable)
-{
-	ReliableLink sender(sendPassConfig(), 0xAAAA0016);
-	sender.queueReliable(ChannelId::Application, bytes({1}));
-	sender.sendUnreliable(ChannelId::Application, bytes({2}));
-	sender.sendHeartbeat();
-
-	const auto pass = sender.takeOutgoing(now);
-	ASSERT_EQ(pass.size(), 3u);
-
-	const auto first  = decodePacket(pass[0]);
-	const auto second = decodePacket(pass[1]);
-	const auto third  = decodePacket(pass[2]);
-	ASSERT_TRUE(first && second && third);
-
-	EXPECT_EQ(first->header.flags.kind(), PacketKind::Heartbeat);
-	EXPECT_FALSE(second->header.flags.isReliable()) << "Unreliable data goes before reliable data";
-	EXPECT_TRUE(third->header.flags.isReliable());
-}
-
-
-TEST_F(ReliableLinkTest, UnreliableQueue_DropsTheOldestWhenFull)
-{
-	ReliableLink sender(sendPassConfig(), 0xAAAA0017);
-	for (int i = 0; i < 200; ++i)
-		sender.sendUnreliable(ChannelId::Application, bytes({1}));
-
-	std::vector<uint64_t> seqs;
-	while (sender.hasOutgoing())
-	{
-		const auto pass = dataSeqs(sender.takeOutgoing(now));
-		seqs.insert(seqs.end(), pass.begin(), pass.end());
-	}
-
-	const size_t capacity = ReliabilityConfig{}.unreliableQueueCapacity;
-	ASSERT_EQ(seqs.size(), capacity) << "Only as many as the queue holds";
-	EXPECT_EQ(seqs.front(), 200 - capacity + 1) << "The oldest ones were dropped";
-	EXPECT_EQ(seqs.back(), 200u);
-}
-
-
-TEST_F(ReliableLinkTest, QueuedFragment_DoesNotTimeOutBeforeItWasSent)
-{
-	ReliabilityConfig budgetConfig = sendPassConfig();
-	budgetConfig.initialSendBudget = 1;
-	budgetConfig.minSendBudget	 = 1;
-	budgetConfig.maxSendBudget	 = 1;
-
-	ReliableLink sender(budgetConfig, 0xAAAA0018);
-	sender.queueReliable(ChannelId::Application, bytes({1}));
-	sender.queueReliable(ChannelId::Application, bytes({2}));
-
-	EXPECT_EQ(dataSeqs(sender.takeOutgoing(now)), std::vector<uint64_t>{1}) << "Only one fragment fits into the pass";
-
-	now += 1s;
-	sender.onTimer(now);
-
-	EXPECT_EQ(dataSeqs(sender.takeOutgoing(now)), std::vector<uint64_t>{2}) << "The waiting fragment goes out for the first time";
-	EXPECT_EQ(dataSeqs(sender.takeOutgoing(now)), std::vector<uint64_t>{1}) << "Then the overdue one is retransmitted";
-	EXPECT_TRUE(sender.takeOutgoing(now).empty()) << "Nothing was queued twice";
-	EXPECT_EQ(sender.stats().dataSent, 2u);
-	EXPECT_EQ(sender.stats().retransmissions, 1u) << "Only the fragment that was really sent timed out";
-}
-
-
-TEST_F(ReliableLinkTest, LargeMessage_DeliveredUnderLossWithSendBudget)
-{
-	std::vector<uint8_t> body(4 * 1024 * 1024);
-	for (size_t i = 0; i < body.size(); ++i)
-		body[i] = static_cast<uint8_t>(i * 13);
-
-	config = sendPassConfig(20);
-	a	   = ReliableLink(config, 0xAAAA0001);
-	b	   = ReliableLink(config, 0xBBBB0001);
-	ASSERT_EQ(a.queueReliable(ChannelId::Application, body), PushResult::Accepted);
-
-	std::mt19937 random(5);
-	auto		 lossy = [&random](const PacketHeader &) { return std::uniform_real_distribution<double>(0.0, 1.0)(random) < 0.2; };
-
-	for (int i = 0; i < 2000 && a.hasPendingReliable(); ++i)
-	{
-		transfer(a, b, lossy);
-		transfer(b, a, lossy);
-		advance(50ms);
-	}
+	deliver(b, sent);
+	deliverPass(b, pass);
 	settle();
 
-	ASSERT_FALSE(a.hasPendingReliable());
+	ASSERT_EQ(atB.size(), 1u);
+	EXPECT_EQ(atB[0].body, body);
+	EXPECT_EQ(a.stats().dataSent, 3u);
+	EXPECT_EQ(a.stats().retransmissions, 0u) << "A datagram that never went out was not lost either";
+}
 
-	FragmentationService			  reassembly;
-	std::optional<ReassembledMessage> message;
-	for (const auto &packet : atB)
+
+// ---------------------------------------------------------------------------
+// Timers
+// ---------------------------------------------------------------------------
+
+TEST_F(ReliableLinkTest, NextDeadline_IsExact)
+{
+	EXPECT_EQ(a.nextDeadline(), std::nullopt);
+
+	send(a, Lane::Reliable, 0, bytes({1}));
+	const auto pass = take(a);
+
+	EXPECT_EQ(a.nextDeadline(), now + 100ms) << "The retransmission timeout of the only packet";
+
+	now += 30ms;
+	deliverPass(b, pass);
+	transfer(b, a);
+
+	EXPECT_EQ(a.nextDeadline(), std::nullopt) << "Acknowledged: there is nothing to wake up for";
+	EXPECT_EQ(b.nextDeadline(), std::nullopt) << "An Ack is not waited for";
+}
+
+
+TEST_F(ReliableLinkTest, TimerWork_IsProportionalToExpiredPackets)
+{
+	const auto started = now;
+
+	// 200 packets on the wire, sent 100 us apart, and none of them is acknowledged
+	for (uint32_t i = 0; i < 200; ++i)
 	{
-		if (auto m = reassembly.accept({ipv4("10.0.0.1"), 1}, packet.header, packet.body))
-			message = std::move(m);
+		send(a, Lane::Reliable, i, bytes({1}));
+		ASSERT_EQ(take(a).size(), 1u);
+		now += 100us;
 	}
 
-	ASSERT_TRUE(message.has_value());
-	EXPECT_EQ(message->body, body);
-	EXPECT_GT(a.stats().retransmissions, 0u) << "The loss must actually have been exercised";
+	const auto before = a.stats().timerWork;
+
+	now				  = started + 100ms;
+	a.onTimer(now);
+
+	EXPECT_LE(a.stats().timerWork - before, 2u) << "One packet is overdue: the timer looks at it and at the one behind it, not at all 200";
+	EXPECT_EQ(dataSeqs(take(a)), (std::vector<uint64_t>{1})) << "Only the oldest packet timed out";
+	EXPECT_EQ(a.nextDeadline(), started + 100us + 200ms) << "The next one is due when its own timeout ends, which doubled";
+}
+
+
+// ---------------------------------------------------------------------------
+// Congestion window
+// ---------------------------------------------------------------------------
+
+class CongestionTest : public ReliableLinkTest
+{
+protected:
+	void SetUp() override { recreate(congestionTimings()); }
+
+	void queueMessages(int amount, Lane lane = Lane::Reliable)
+	{
+		for (int i = 0; i < amount; ++i)
+			send(a, lane, 0, bytes({1}));
+	}
+
+	// One round trip without loss. Returns the number of Data packets a sent.
+	size_t roundTrip()
+	{
+		const auto pass = take(a);
+		deliverPass(b, pass);
+		transfer(b, a);
+		return dataSeqs(pass).size();
+	}
+
+	static std::vector<uint64_t> seqs(uint64_t first, uint64_t last)
+	{
+		std::vector<uint64_t> result;
+		for (uint64_t seq = first; seq <= last; ++seq)
+			result.push_back(seq);
+		return result;
+	}
+};
+
+
+TEST_F(CongestionTest, FirstPass_SendsTheInitialWindow)
+{
+	queueMessages(100);
+
+	EXPECT_EQ(dataSeqs(take(a)).size(), InitialCongestionWindow);
+	EXPECT_EQ(a.inFlightCount(), InitialCongestionWindow);
+	EXPECT_TRUE(take(a).empty()) << "More only goes out as Acks come in";
+}
+
+
+TEST_F(CongestionTest, Window_GrowsByOnePacketPerRoundTrip)
+{
+	queueMessages(1000);
+
+	EXPECT_EQ(roundTrip(), 32u);
+	EXPECT_EQ(roundTrip(), 33u);
+	EXPECT_EQ(roundTrip(), 34u);
+	EXPECT_EQ(a.congestionWindow(), 35u);
+}
+
+
+TEST_F(CongestionTest, Window_NeverExceedsItsMaximum)
+{
+	timings.initialCwnd = MaxCongestionWindow - 2;
+	recreate(timings);
+	queueMessages(5000);
+
+	for (int i = 0; i < 10; ++i)
+		roundTrip();
+
+	EXPECT_EQ(a.congestionWindow(), MaxCongestionWindow);
+	EXPECT_EQ(roundTrip(), MaxCongestionWindow);
+}
+
+
+TEST_F(CongestionTest, FastRetransmit_ResendsAHoleWithoutWaitingForTheRto)
+{
+	queueMessages(10);
+
+	const auto pass = take(a);
+	ASSERT_EQ(pass.size(), 10u);
+
+	// Seq 3 is lost, everything behind it arrives
+	deliverPass(b, pass, seqOf(Lane::Reliable, 3));
+	transfer(b, a);
+
+	const auto repair = take(a);
+	EXPECT_EQ(dataSeqs(repair), (std::vector<uint64_t>{3})) << "Seven later packets were acknowledged: seq 3 is resent long before its timeout";
+	EXPECT_EQ(a.stats().fastRetransmissions, 1u);
+	EXPECT_EQ(a.stats().retransmissions, 1u);
+	EXPECT_EQ(a.congestionWindow(), InitialCongestionWindow / 2) << "A loss halves the window";
+
+	deliverPass(b, repair);
+	settle();
+	EXPECT_EQ(atB.size(), 10u);
+	EXPECT_FALSE(pending(a));
+}
+
+
+TEST_F(CongestionTest, FastRetransmit_ToleratesSlightReordering)
+{
+	queueMessages(4);
+
+	const auto pass = take(a);
+	ASSERT_EQ(pass.size(), 4u);
+
+	// Seq 2 is missing, but only two later packets were acknowledged: too few to call it lost
+	deliverPass(b, pass, seqOf(Lane::Reliable, 2));
+	transfer(b, a);
+
+	advance(5ms);
+
+	EXPECT_TRUE(dataSeqs(take(a)).empty());
+	EXPECT_EQ(a.congestionWindow(), InitialCongestionWindow);
+
+	// It really is lost: the timeout takes care of it
+	advance(95ms);
+	settle();
+
+	EXPECT_EQ(atB.size(), 4u);
+	EXPECT_EQ(a.stats().retransmissions, 1u);
+	EXPECT_EQ(a.stats().fastRetransmissions, 0u);
+}
+
+
+TEST_F(CongestionTest, SeveralLossesOfOneRound_ReduceTheWindowOnce)
+{
+	queueMessages(16);
+
+	const auto pass = take(a);
+	deliverPass(b, pass, [](const PacketHeader &header) { return header.seq == 2 || header.seq == 5 || header.seq == 9; });
+	transfer(b, a);
+
+	EXPECT_EQ(a.congestionWindow(), InitialCongestionWindow / 2) << "Three losses of the same burst are one congestion signal";
+	EXPECT_EQ(dataSeqs(take(a)), (std::vector<uint64_t>{2, 5, 9})) << "All of them are resent, the oldest first";
+}
+
+
+TEST_F(CongestionTest, Timeout_HalvesTheWindowOncePerRound)
+{
+	queueMessages(100);
+	take(a); // all 32 are lost
+
+	advance(100ms);
+
+	EXPECT_EQ(a.congestionWindow(), InitialCongestionWindow / 2) << "32 packets timed out together: one signal, one reduction";
+
+	const auto retry = take(a);
+	EXPECT_EQ(dataSeqs(retry), seqs(1, 16)) << "The oldest lost packets go first, as many as the window allows";
+	EXPECT_EQ(a.stats().fastRetransmissions, 0u);
+
+	// Acks come back: the window opens again and everything gets through
+	deliverPass(b, retry);
+	transfer(b, a);
+
+	for (int i = 0; i < 200 && pending(a); ++i)
+		roundTrip();
+
+	EXPECT_EQ(atB.size(), 100u);
+}
+
+
+TEST_F(CongestionTest, Window_NeverFallsBelowItsMinimum)
+{
+	queueMessages(100);
+
+	// Three rounds in which nothing gets through
+	for (int round = 0; round < 3; ++round)
+	{
+		take(a);
+		advance(400ms);
+	}
+
+	EXPECT_EQ(a.congestionWindow(), MinCongestionWindow);
+	EXPECT_EQ(dataSeqs(take(a)).size(), MinCongestionWindow);
+	EXPECT_FALSE(failed(a));
+}
+
+
+TEST_F(CongestionTest, QueuedFragment_DoesNotTimeOutBeforeItWasSent)
+{
+	queueMessages(40);
+
+	EXPECT_EQ(dataSeqs(take(a)).size(), 32u);
+
+	// The Acks take longer than any timeout. What was not sent yet has no timer running.
+	now += 1s;
+	a.onTimer(now);
+
+	EXPECT_EQ(a.stats().retransmissions, 0u);
+	EXPECT_EQ(dataSeqs(take(a)), seqs(1, 16)) << "Only what was really sent timed out";
+	EXPECT_EQ(a.stats().dataSent, 32u);
+	EXPECT_EQ(a.stats().retransmissions, 16u);
+}
+
+
+TEST_F(CongestionTest, ControlLoss_DoesNotReduceTheWindow)
+{
+	// A control signal is lost and repaired by its timeout
+	send(a, Lane::Control, 0, bytes({42}));
+	take(a);
+	advance(100ms);
+	settle();
+
+	ASSERT_EQ(atB.size(), 1u);
+	EXPECT_EQ(a.stats().retransmissions, 1u);
+	EXPECT_EQ(a.congestionWindow(), InitialCongestionWindow) << "The window is about Reliable and Bulk only";
+
+	// Neither the lost signal nor one that is on the wire right now takes room in that window
+	send(a, Lane::Control, 0, bytes({43}));
+	queueMessages(100);
+
+	const auto pass = take(a);
+	EXPECT_EQ(dataSeqs(pass, Lane::Control).size(), 1u);
+	EXPECT_EQ(dataSeqs(pass, Lane::Reliable).size(), InitialCongestionWindow);
+}
+
+
+// ---------------------------------------------------------------------------
+// Pausing a lane
+// ---------------------------------------------------------------------------
+
+class PauseTest : public ReliableLinkTest
+{
+protected:
+	// B's application stopped taking messages, and A learned about it with the Ack of one message
+	void pauseReliable()
+	{
+		b.setPaused(true);
+
+		send(a, Lane::Reliable, 0, bytes({0}));
+		transfer(a, b);
+
+		pausedAck = take(b);
+		ASSERT_EQ(acks(pausedAck).size(), 1u);
+		ASSERT_TRUE(acks(pausedAck)[0].paused) << "The receiver asks for a pause";
+		deliverPass(a, pausedAck);
+	}
+
+	Pass pausedAck;
+};
+
+
+TEST_F(PauseTest, PausedReceiver_HoldsReliableAndBulkBack)
+{
+	pauseReliable();
+
+	for (uint8_t i = 0; i < 100; ++i)
+		send(a, Lane::Reliable, 0, bytes({i}));
+	send(a, Lane::Bulk, 0, bytes({7}));
+
+	EXPECT_TRUE(dataSeqs(take(a), Lane::Reliable).empty()) << "Nothing goes out on a lane the remote paused";
+
+	// Control signals are not affected
+	send(a, Lane::Control, 0, bytes({42}));
+	EXPECT_EQ(dataSeqs(take(a), Lane::Control).size(), 1u);
+
+	// Far longer than the peer timeout: nothing but pings and their answers
+	for (int i = 0; i < 50; ++i)
+	{
+		settle();
+		advance(100ms);
+		ASSERT_FALSE(failed(a)) << "A paused lane is not a failed link";
+	}
+
+	EXPECT_EQ(std::ranges::count_if(atB, [](const auto &message) { return message.lane == Lane::Reliable; }), 1);
+
+	// The application catches up: B says so without being asked
+	b.setPaused(false);
+
+	const auto resume = take(b);
+	ASSERT_EQ(acks(resume).size(), 2u) << "One Ack for every lane that was paused";
+	EXPECT_EQ(acks(resume)[0].lane, Lane::Reliable);
+	EXPECT_FALSE(acks(resume)[0].paused);
+	EXPECT_EQ(acks(resume)[1].lane, Lane::Bulk);
+	EXPECT_FALSE(acks(resume)[1].paused);
+	deliverPass(a, resume);
+
+	settle();
+
+	EXPECT_FALSE(pending(a));
+	EXPECT_EQ(std::ranges::count_if(atB, [](const auto &message) { return message.lane == Lane::Reliable; }), 101)
+		<< "Nothing was dropped on the way: pausing only slows the sender down";
+	EXPECT_EQ(std::ranges::count_if(atB, [](const auto &message) { return message.lane == Lane::Bulk; }), 1);
+}
+
+
+TEST_F(PauseTest, PausedLane_IsAskedAgainLessAndLessOften)
+{
+	pauseReliable();
+	send(a, Lane::Reliable, 0, bytes({1}));
+
+	// The first probe after one retransmission timeout (100 ms here), then the interval doubles up to the largest timeout
+	std::vector<std::chrono::milliseconds> probes;
+
+	for (auto elapsed = 10ms; elapsed <= 1000ms; elapsed += 10ms)
+	{
+		advance(10ms);
+
+		const auto pass = take(a);
+		if (count(pass, PacketKind::Ping) > 0)
+			probes.push_back(elapsed);
+
+		// Every Ping is answered, still with a pause
+		deliverPass(b, pass);
+		const auto answer = take(b);
+		EXPECT_EQ(acks(answer).size(), count(pass, PacketKind::Ping));
+		deliverPass(a, answer);
+	}
+
+	EXPECT_EQ(probes, (std::vector<std::chrono::milliseconds>{100ms, 300ms, 700ms}));
+	EXPECT_EQ(a.stats().dataSent, 1u) << "No data went out while the lane was paused";
+}
+
+
+TEST_F(PauseTest, LostResumeAck_IsRecoveredByTheLanePing)
+{
+	pauseReliable();
+	send(a, Lane::Reliable, 0, bytes({1}));
+
+	b.setPaused(false);
+	take(b); // the Ack that says so is lost
+
+	EXPECT_TRUE(dataSeqs(take(a)).empty()) << "A still believes the lane is paused";
+
+	advance(100ms);
+
+	const auto probe = take(a);
+	ASSERT_EQ(count(probe, PacketKind::Ping), 1u);
+	deliverPass(b, probe);
+	transfer(b, a);
+
+	settle();
+	EXPECT_EQ(atB.size(), 2u) << "The answer to the Ping carried the news";
+	EXPECT_FALSE(pending(a));
+}
+
+
+TEST_F(PauseTest, StaleAckWithEqualCumulative_DoesNotRepause)
+{
+	b.setPaused(true);
+
+	send(a, Lane::Reliable, 0, bytes({0}));
+	transfer(a, b);
+	const auto paused = take(b); // delayed on its way
+
+	b.setPaused(false);
+	const auto resumed = take(b);
+
+	ASSERT_EQ(acks(paused)[0].seq, acks(resumed)[0].seq) << "Both Acks name the same seq: only their serial tells which one is newer";
+
+	// The later Ack overtakes the earlier one
+	deliverPass(a, resumed);
+	deliverPass(a, paused);
+
+	send(a, Lane::Reliable, 0, bytes({1}));
+	EXPECT_EQ(dataSeqs(take(a)), (std::vector<uint64_t>{2})) << "The Ack that arrived last is not the one that was sent last";
+}
+
+
+TEST_F(PauseTest, AssemblyBudget_PausesOnlyThatLane)
+{
+	// Room for one 8 KB message at a time
+	AssemblyBudget budget(10'000);
+	b = ReliableLink(timings, 0xBBBB0001, &budget);
+
+	send(a, Lane::Bulk, 1, pattern(8000));
+	send(a, Lane::Reliable, 2, pattern(8000));
+
+	const auto pass = take(a);
+
+	// The blob starts first and takes the room
+	deliver(b, only(pass, Lane::Bulk).front());
+	EXPECT_EQ(budget.used(), 8000u);
+
+	deliverPass(b, only(pass, Lane::Reliable));
+
+	auto answer = acks(take(b));
+	ASSERT_EQ(answer.size(), 2u);
+	EXPECT_EQ(answer[0].lane, Lane::Reliable);
+	EXPECT_TRUE(answer[0].paused) << "No room for a second message: the sender has to wait";
+	EXPECT_EQ(answer[0].seq, 0u) << "Its first fragment is not acknowledged";
+	EXPECT_FALSE(answer[1].paused) << "The lane that got the room goes on";
+
+	// The blob completes and frees the room
+	Pass rest = only(pass, Lane::Bulk);
+	rest.erase(rest.begin());
+	deliverPass(b, rest);
+
+	ASSERT_EQ(atB.size(), 1u);
+	EXPECT_EQ(atB[0].tag, 1u);
+	EXPECT_EQ(budget.used(), 0u);
+
+	// The paused lane is asked again, learns that there is room and repeats what was refused
+	transfer(b, a);
+	for (int i = 0; i < 20 && pending(a); ++i)
+	{
+		advance(50ms);
+		settle();
+	}
+
+	ASSERT_EQ(atB.size(), 2u);
+	EXPECT_EQ(atB[1].tag, 2u);
+	EXPECT_EQ(atB[1].body, pattern(8000));
+	EXPECT_EQ(budget.used(), 0u);
+	EXPECT_FALSE(failed(a));
 }
 
 } // namespace ChannelTests

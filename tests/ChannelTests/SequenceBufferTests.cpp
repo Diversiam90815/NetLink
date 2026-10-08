@@ -12,7 +12,7 @@ namespace ChannelTests
 
 TEST(SequenceBuffer, InsertFindErase)
 {
-	SequenceBuffer<std::string, 8> buffer;
+	SequenceBuffer<std::string> buffer{8};
 
 	buffer.insert(5, "five");
 	buffer.insert(6, "six");
@@ -31,7 +31,7 @@ TEST(SequenceBuffer, InsertFindErase)
 
 TEST(SequenceBuffer, SlotOnlyAnswersForItsOwnSeq)
 {
-	SequenceBuffer<int, 8> buffer;
+	SequenceBuffer<int> buffer{8};
 	buffer.insert(3, 30);
 
 	// 11 maps to the same slot as 3
@@ -43,7 +43,7 @@ TEST(SequenceBuffer, SlotOnlyAnswersForItsOwnSeq)
 
 TEST(SequenceBuffer, NewerSeqReplacesTheStaleSlot)
 {
-	SequenceBuffer<int, 8> buffer;
+	SequenceBuffer<int> buffer{8};
 	buffer.insert(3, 30);
 	buffer.insert(11, 110);
 
@@ -56,7 +56,7 @@ TEST(SequenceBuffer, NewerSeqReplacesTheStaleSlot)
 
 TEST(SequenceBuffer, TakeRemovesAndReturns)
 {
-	SequenceBuffer<std::string, 4> buffer;
+	SequenceBuffer<std::string> buffer{4};
 	buffer.insert(1, "one");
 
 	auto taken = buffer.take(1);
@@ -69,7 +69,7 @@ TEST(SequenceBuffer, TakeRemovesAndReturns)
 
 TEST(SequenceBuffer, WorksWithLarge64BitSeqs)
 {
-	SequenceBuffer<int, 16> buffer;
+	SequenceBuffer<int>		buffer{16};
 	const uint64_t			seq = 0xFFFF'FFFF'FFFF'FF00ull;
 
 	buffer.insert(seq, 1);
@@ -83,7 +83,7 @@ TEST(SequenceBuffer, WorksWithLarge64BitSeqs)
 
 TEST(SequenceBuffer, ForEachVisitsAndCanErase)
 {
-	SequenceBuffer<int, 8> buffer;
+	SequenceBuffer<int> buffer{8};
 	for (uint64_t seq = 10; seq < 14; ++seq)
 		buffer.insert(seq, static_cast<int>(seq));
 
@@ -105,7 +105,7 @@ TEST(SequenceBuffer, ForEachVisitsAndCanErase)
 
 TEST(SequenceBuffer, ClearEmptiesEverything)
 {
-	SequenceBuffer<int, 4> buffer;
+	SequenceBuffer<int> buffer{4};
 	buffer.insert(1, 1);
 	buffer.insert(2, 2);
 	buffer.clear();

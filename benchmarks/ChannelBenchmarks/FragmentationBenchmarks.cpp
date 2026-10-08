@@ -7,15 +7,13 @@
 
 #include <benchmark/benchmark.h>
 
-#include <algorithm>
-#include <random>
 #include <span>
 #include <vector>
 
 #include "BenchUtil.h"
-#include "Channel/Fragmentation/FragmentationService.h"
+#include "Channel/Fragmentation/MessageAssembler.h"
 #include "Channel/Reliability/ReliableLink.h"
-#include "NetLinkConstants.h"
+#include "TransportConstants.h"
 
 using namespace netlink;
 using namespace netlink::channel;
@@ -32,61 +30,57 @@ struct Arrival
 };
 
 
-// The fragments of a message, cut with the fragment size the channel really uses
+// The fragments of a message, cut the way a link cuts them
 static std::vector<Arrival> arrivalsOf(std::span<const uint8_t> message)
 {
+	const size_t		 count = fragmentsOf(message.size());
 	std::vector<Arrival> arrivals;
-	uint64_t			 seq = 1;
 
-	for (const auto &fragment : FragmentationService::split(message, ReliableLink{}.maxFragmentBody()))
+	for (size_t index = 0; index < count; ++index)
 	{
-		PacketHeader header;
-		header.flags	   = PacketFlags::data(ChannelId::Application, true);
-		header.srcStreamID = 1;
-		header.seq		   = seq++;
+		const size_t offset = index * MaxFragmentBody;
 
-		if (fragment.isFragmented())
+		PacketHeader header;
+		header.flags	   = PacketFlags::data(Lane::Reliable);
+		header.srcStreamID = 1;
+		header.seq		   = 1 + index;
+
+		if (count > 1)
 		{
-			header.flags.setFragment(true, fragment.isLast());
-			header.fragIndex = fragment.index;
-			header.fragCount = fragment.count;
+			header.flags.setFragment(true, index + 1 == count);
+			header.fragIndex   = static_cast<uint16_t>(index);
+			header.fragCount   = static_cast<uint16_t>(count);
+			header.totalLength = static_cast<uint32_t>(message.size());
 		}
 
-		arrivals.push_back({.header = header, .body = fragment.body});
+		arrivals.push_back({.header = header, .body = message.subspan(offset, std::min(MaxFragmentBody, message.size() - offset))});
 	}
 
 	return arrivals;
 }
 
 
-// Time: all fragments of one message fed into accept() until the whole message comes out, in order or shuffled
+// Time: all fragments of one message fed into the assembler, in the order their stream delivers them, until the whole
+// message comes out. Reordering is not a case here: the link's reorder buffer sorts that out before.
 static void BM_Fragmentation_Reassemble(benchmark::State &state)
 {
-	const auto	   message	= bench::makePayload(static_cast<size_t>(state.range(0)));
-	constexpr auto peer		= net::SocketAddress{.ip = bench::loopback(), .port = 50000};
-	auto		   arrivals = arrivalsOf(message);
+	const auto		 message  = bench::makePayload(static_cast<size_t>(state.range(0)));
+	const auto		 arrivals = arrivalsOf(message);
 
-	if (state.range(1) != 0)
-		std::ranges::shuffle(arrivals, std::mt19937{7});
-
-	FragmentationService service;
+	MessageAssembler assembler;
 
 	for (auto _ : state)
 	{
-		// A completed message leaves no partial state behind, so the same seqs can be fed again
 		for (const auto &[header, body] : arrivals)
 		{
-			auto reassembled = service.accept(peer, header, body);
+			auto reassembled = assembler.accept(header, body);
 			benchmark::DoNotOptimize(reassembled);
 		}
 	}
 
 	state.SetBytesProcessed(static_cast<int64_t>(state.iterations() * message.size()));
 }
-BENCHMARK(BM_Fragmentation_Reassemble)->ArgNames({"bytes", "shuffled"})->ArgsProduct({{64 * bench::KiB}, {0, 1}})->Unit(benchmark::kMicrosecond);
-BENCHMARK(BM_Fragmentation_Reassemble)
-	->ArgNames({"bytes", "shuffled"})
-	->ArgsProduct({{bench::MiB, static_cast<int64_t>(internal::MaxMessagePayload)}, {0, 1}})
-	->Unit(benchmark::kMillisecond);
+BENCHMARK(BM_Fragmentation_Reassemble)->ArgName("bytes")->Arg(64 * bench::KiB)->Unit(benchmark::kMicrosecond);
+BENCHMARK(BM_Fragmentation_Reassemble)->ArgName("bytes")->Arg(bench::MiB)->Arg(static_cast<int64_t>(internal::MaxMessagePayload))->Unit(benchmark::kMillisecond);
 
 } // namespace ChannelBenchmarks

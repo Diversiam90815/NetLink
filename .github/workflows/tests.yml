@@ -44,11 +44,8 @@ jobs:
       - name: Install Ninja
         run: pip install ninja
 
-      - name: Install libnl (Linux WiFi backend dependency)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libnl-genl-3-dev libnl-3-dev
-
       - name: Configure, build and run tests
         run: python build.py --prepare --runtest
+
+      - name: Repeat the tests that depend on thread timing
+        run: ctest --test-dir build/x64 -C Release --repeat until-fail:5 -R "NetworkEngine|NetLinkCore|NetLinkApi|Mailbox|Sim" --output-on-failure

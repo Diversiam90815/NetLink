@@ -10,7 +10,7 @@
 
 #include "BenchUtil.h"
 #include "LinkWire.h"
-#include "NetLinkConstants.h"
+#include "TransportConstants.h"
 
 using namespace netlink;
 using namespace netlink::channel;
@@ -34,7 +34,7 @@ static void BM_ReliableLink_Transfer(benchmark::State &state)
 
 	for (auto _ : state)
 	{
-		wire.a.queueReliable(ChannelId::Application, payload);
+		wire.send(payload);
 
 		if (!wire.settle(drop) || wire.takeDeliveredBytesAtB() != size)
 		{

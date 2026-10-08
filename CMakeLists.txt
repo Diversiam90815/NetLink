@@ -5,7 +5,7 @@
 
 cmake_minimum_required(VERSION 4.0)
 
-set(PROJECT_VERSION 0.3.0)
+set(PROJECT_VERSION 0.5.0)
 set(NETLINK_BUILD_NUMBER "0" CACHE STRING "Build number")
 
 project(NetLink VERSION ${PROJECT_VERSION} LANGUAGES CXX)
@@ -19,23 +19,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
-option(NETLINK_ENABLE_LOGGING "Enable logging via Logger library" OFF)
+set(NETLINK_SANITIZER "" CACHE STRING "Build the library, tests and benchmarks with a sanitizer: thread or address (clang, gcc)")
 
 include(cpm)
-
-if (NETLINK_ENABLE_LOGGING)
-    CPMAddPackage(
-            NAME Logger
-            GITHUB_REPOSITORY Diversiam90815/Logger
-            VERSION 1.3.81
-    )
-endif ()
-
-CPMAddPackage(
-        NAME nlohmann_json
-        GITHUB_REPOSITORY nlohmann/json
-        VERSION 3.11.3
-)
 
 file(GLOB_RECURSE NETWORKING_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp)
 file(GLOB_RECURSE NETWORKING_HEADERS ${CMAKE_CURRENT_SOURCE_DIR}/include/*.h)
@@ -79,6 +65,25 @@ else ()
     target_compile_options(${PROJECT_NAME} PRIVATE -Wall -Wextra -Wpedantic)
 endif ()
 
+if (NETLINK_SANITIZER STREQUAL "thread")
+    set(NETLINK_SANITIZER_FLAGS -fsanitize=thread)
+elseif (NETLINK_SANITIZER STREQUAL "address")
+    set(NETLINK_SANITIZER_FLAGS -fsanitize=address -fsanitize=undefined)
+elseif (NETLINK_SANITIZER)
+    message(FATAL_ERROR "NETLINK_SANITIZER must be 'thread' or 'address'")
+endif ()
+
+# PUBLIC: whatever links the library in this build (tests, benchmarks) is instrumented with it
+foreach (flag IN LISTS NETLINK_SANITIZER_FLAGS)
+    target_compile_options(${PROJECT_NAME} PUBLIC $<BUILD_INTERFACE:${flag}> $<BUILD_INTERFACE:-fno-omit-frame-pointer>)
+    target_link_options(${PROJECT_NAME} PUBLIC $<BUILD_INTERFACE:${flag}>)
+endforeach ()
+
+if (CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND NOT MSVC)
+    target_compile_options(${PROJECT_NAME} PUBLIC $<BUILD_INTERFACE:-fexperimental-library>)
+    target_link_options(${PROJECT_NAME} PUBLIC $<BUILD_INTERFACE:-fexperimental-library>)
+endif ()
+
 target_include_directories(${PROJECT_NAME} PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
@@ -87,7 +92,6 @@ target_include_directories(${PROJECT_NAME}
         PRIVATE
         ${CMAKE_CURRENT_BINARY_DIR}/generated
         ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/internal/Discovery
         ${CMAKE_CURRENT_SOURCE_DIR}/src/internal/Util
 )
 
@@ -98,27 +102,14 @@ if (WIN32)
     )
 endif ()
 
-if (NETLINK_ENABLE_LOGGING)
-    target_compile_definitions(${PROJECT_NAME} PRIVATE NETLINK_LOGGING_ENABLED)
-    target_link_libraries(${PROJECT_NAME} PRIVATE $<BUILD_INTERFACE:Logger>)
-endif ()
-
-target_link_libraries(${PROJECT_NAME} PRIVATE $<BUILD_INTERFACE:nlohmann_json::nlohmann_json>)
-
 if (WIN32)
-    target_link_libraries(${PROJECT_NAME} PRIVATE iphlpapi ws2_32 wlanapi)
+    target_link_libraries(${PROJECT_NAME} PRIVATE iphlpapi ws2_32 winmm)
 elseif (APPLE)
     target_link_libraries(${PROJECT_NAME} PRIVATE
-            "-framework CoreWLAN"
             "-framework Foundation"
             "-framework SystemConfiguration"
             "-framework CoreFoundation"
     )
-elseif (UNIX)
-    find_package(PkgConfig REQUIRED)
-    pkg_check_modules(NL REQUIRED libnl-genl-3.0)
-    target_include_directories(${PROJECT_NAME} PRIVATE ${NL_INCLUDE_DIRS})
-    target_link_libraries(${PROJECT_NAME} PRIVATE ${NL_LIBRARIES})
 endif ()
 
 # ---------------------------------------------------------------------------
@@ -169,17 +160,11 @@ if (NETLINK_BUILD_TESTS OR NETLINK_BUILD_BENCHMARKS)
     # Internal headers for in-tree consumers of the library
     add_library(NetLinkInternal INTERFACE)
 
-    target_link_libraries(NetLinkInternal INTERFACE
-            NetLink
-            nlohmann_json::nlohmann_json
-    )
+    target_link_libraries(NetLinkInternal INTERFACE NetLink)
 
     target_include_directories(NetLinkInternal INTERFACE
             ${PROJECT_BINARY_DIR}/generated
             ${PROJECT_SOURCE_DIR}/src/internal
-            ${PROJECT_SOURCE_DIR}/src/internal/Discovery
-            ${PROJECT_SOURCE_DIR}/src/internal/PeerValidation
-            ${PROJECT_SOURCE_DIR}/src/internal/PeerValidation/Checks
             ${PROJECT_SOURCE_DIR}/src/internal/Util
     )
 endif ()

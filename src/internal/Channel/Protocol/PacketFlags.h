@@ -7,20 +7,22 @@
 
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
 #include <utility>
 
 /*
 	Packet encoding:
 
-	bit  7    6    5    4    3    2..0
-		[res][ch] [lf] [fr] [rl] [kind]
+	bit  7     6    5    4    3..2   1..0
+		[enc] [pa] [lf] [fr] [lane] [kind]
 
-	kind : PacketKind (Data, DataAck, AckAck, Heartbeat)
-	rl   : reliable (acknowledged) / unreliable
+	kind : PacketKind (Data, Ack, Ping, Beacon)
+	lane : Lane (Control, Reliable, Bulk, Media)
 	fr   : fragmented, a fragment extension follows the header
 	lf   : last fragment of a message
-	ch   : Control / Application channel
-	res  : reserved, must be zero
+	pa   : on an Ack: the receiver asks the sender to pause this lane
+	enc  : reserved for encrypted datagrams, must be zero
 */
 
 
@@ -29,35 +31,40 @@ namespace netlink::channel
 
 enum class PacketKind : uint8_t
 {
-	Data	  = 0, // Carries a message (or one fragment of it)
-	DataAck	  = 1, // Receiver confirms a reliable Data packet
-	AckAck	  = 2, // Sender confirms it got the DataAck, the receiver can forget the key
-	Heartbeat = 3, // Keepalive while a session is idle, never acknowledged
+	Data   = 0, // Carries a message (or one fragment of it)
+	Ack	   = 1, // Receiver confirms the Data packets of one lane
+	Ping   = 2, // Asks for the Ack of a lane: keepalive, and probe of a paused lane
+	Beacon = 3, // Discovery announcement: not part of a link
 };
 
-enum class ChannelId : uint8_t
+// Every lane is a stream of its own. Control, Reliable and Bulk are acknowledged and ordered, Media is neither.
+enum class Lane : uint8_t
 {
-	Control,	 // Validation and connection flow signals
-	Application, // Messages of the application using NetLink
+	Control	 = 0,
+	Reliable = 1,
+	Bulk	 = 2,
+	Media	 = 3,
 };
+
+inline constexpr size_t LaneCount = 4;
 
 enum class FlagBit : uint8_t
 {
-	Reliable	 = 1u << 3,
 	Fragmented	 = 1u << 4,
 	LastFragment = 1u << 5,
-	Application	 = 1u << 6,
-	Reserved	 = 1u << 7,
+	Paused		 = 1u << 6,
+	Encrypted	 = 1u << 7,
 };
 
 
 class PacketFlags
 {
 public:
-	static constexpr uint8_t KindMask	 = 0x07;
-	static constexpr uint8_t MaxKindBits = std::to_underlying(PacketKind::Heartbeat);
+	static constexpr uint8_t KindMask  = 0x03;
+	static constexpr uint8_t LaneMask  = 0x0C;
+	static constexpr uint8_t LaneShift = 2;
 
-	constexpr PacketFlags()				 = default;
+	constexpr PacketFlags()			   = default;
 
 	static constexpr PacketFlags fromRaw(const uint8_t raw)
 	{
@@ -68,17 +75,23 @@ public:
 
 	constexpr uint8_t	   raw() const { return mBits; }
 
-	constexpr PacketKind   kind() const { return static_cast<PacketKind>(mBits & KindMask); }
+	constexpr PacketKind   kind() const { return static_cast<PacketKind>(mBits & KindMask); } // NOLINT(clang-analyzer-optin.core.EnumCastOutOfRange)
+	constexpr Lane		   lane() const { return static_cast<Lane>((mBits & LaneMask) >> LaneShift); }
 	constexpr bool		   has(const FlagBit bit) const { return (mBits & std::to_underlying(bit)) != 0; }
 
-	constexpr bool		   isReliable() const { return has(FlagBit::Reliable); }
 	constexpr bool		   isFragmented() const { return has(FlagBit::Fragmented); }
 	constexpr bool		   isLastFragment() const { return has(FlagBit::LastFragment); }
-	constexpr ChannelId	   channel() const { return has(FlagBit::Application) ? ChannelId::Application : ChannelId::Control; }
+	constexpr bool		   isPaused() const { return has(FlagBit::Paused); }
 
 	constexpr PacketFlags &setKind(const PacketKind kind)
 	{
-		mBits = static_cast<uint8_t>((mBits & ~KindMask) | (std::to_underlying(kind) & KindMask));
+		mBits = static_cast<uint8_t>((mBits & ~KindMask) | std::to_underlying(kind));
+		return *this;
+	}
+
+	constexpr PacketFlags &setLane(const Lane lane)
+	{
+		mBits = static_cast<uint8_t>((mBits & ~LaneMask) | (std::to_underlying(lane) << LaneShift));
 		return *this;
 	}
 
@@ -91,33 +104,32 @@ public:
 		return *this;
 	}
 
-	constexpr PacketFlags &setReliable(const bool reliable = true) { return set(FlagBit::Reliable, reliable); }
-	constexpr PacketFlags &setChannel(const ChannelId channel) { return set(FlagBit::Application, channel == ChannelId::Application); }
-
 	constexpr PacketFlags &setFragment(const bool fragmented, const bool last)
 	{
 		set(FlagBit::Fragmented, fragmented);
 		return set(FlagBit::LastFragment, fragmented && last);
 	}
 
-	// Rejects reserved kinds/bits and combinations no sender produces
+	// Rejects reserved bits and combinations no sender produces
 	constexpr bool isValid() const
 	{
-		if ((mBits & KindMask) > MaxKindBits || has(FlagBit::Reserved))
+		if (has(FlagBit::Encrypted))
 			return false;
 
 		if (isLastFragment() && !isFragmented())
 			return false;
 
-		// Only reliable Data packets are fragmented: losing one fragment of an unreliable message would lose all of it
-		if (isFragmented() && (kind() != PacketKind::Data || !isReliable()))
+		if (isFragmented() && kind() != PacketKind::Data)
 			return false;
 
-		// Acknowledgements only exist for reliable packets, heartbeats never are
-		if ((kind() == PacketKind::DataAck || kind() == PacketKind::AckAck) && !isReliable())
+		if (isPaused() && kind() != PacketKind::Ack)
 			return false;
 
-		if (kind() == PacketKind::Heartbeat && isReliable())
+		// Media is never acknowledged, so there is nothing to confirm or to ask for
+		if ((kind() == PacketKind::Ack || kind() == PacketKind::Ping) && lane() == Lane::Media)
+			return false;
+
+		if (kind() == PacketKind::Beacon && (mBits & ~KindMask) != 0)
 			return false;
 
 		return true;
@@ -126,9 +138,9 @@ public:
 	constexpr bool				 operator==(const PacketFlags &other) const = default;
 
 	// Convenience factories for the packet types a link sends
-	static constexpr PacketFlags data(const ChannelId channel, const bool reliable) { return PacketFlags{}.setKind(PacketKind::Data).setReliable(reliable).setChannel(channel); }
-	static constexpr PacketFlags ack(const PacketKind kind) { return PacketFlags{}.setKind(kind).setReliable(); }
-	static constexpr PacketFlags heartbeat() { return PacketFlags{}.setKind(PacketKind::Heartbeat); }
+	static constexpr PacketFlags data(const Lane lane) { return PacketFlags{}.setKind(PacketKind::Data).setLane(lane); }
+	static constexpr PacketFlags ack(const Lane lane, const bool paused = false) { return PacketFlags{}.setKind(PacketKind::Ack).setLane(lane).set(FlagBit::Paused, paused); }
+	static constexpr PacketFlags ping(const Lane lane) { return PacketFlags{}.setKind(PacketKind::Ping).setLane(lane); }
 
 private:
 	uint8_t mBits{0};

@@ -1,0 +1,60 @@
+name: Sanitizers
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CPM_SOURCE_CACHE: ${{ github.workspace }}/.cpm-cache
+
+jobs:
+  sanitize:
+    strategy:
+      fail-fast: false
+      matrix:
+        # Address and undefined behaviour only on pull requests and main; thread on every push
+        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || github.ref == 'refs/heads/main') && '["thread", "address"]' || '["thread"]') }}
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache CPM dependencies
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.cpm-cache
+          key: ${{ runner.os }}-cpm-${{ hashFiles('CMakeLists.txt', 'cmake/*.cmake') }}
+          restore-keys: ${{ runner.os }}-cpm-
+
+
+      - uses: lukka/get-cmake@latest
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libc++-dev libc++abi-dev ninja-build
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_CXX_COMPILER=clang++
+          -DCMAKE_CXX_FLAGS=-stdlib=libc++
+          -DCMAKE_CXX_SCAN_FOR_MODULES=OFF
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DNETLINK_BUILD_BENCHMARKS=OFF
+          -DNETLINK_SANITIZER=${{ matrix.sanitizer }}
+
+      - name: Build
+        run: cmake --build build --target NetLinkTests
+
+      - name: Run tests
+        env:
+          TSAN_OPTIONS: halt_on_error=1
+          ASAN_OPTIONS: detect_leaks=1:alloc_dealloc_mismatch=0
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: ctest --test-dir build --output-on-failure

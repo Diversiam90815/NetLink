@@ -26,7 +26,12 @@ public:
 	UdpSocket		&operator=(UdpSocket &&) noexcept = default;
 
 	Result<size_t>	 sendTo(const SocketAddress &destination, std::span<const uint8_t> data) override;
-	Result<Datagram> receiveFrom(std::span<uint8_t> buffer, std::chrono::milliseconds timeout) override;
+	Result<size_t>	 sendParts(const SocketAddress &destination, std::span<const uint8_t> head, std::span<const uint8_t> body) override;
+	Result<Datagram> receiveFrom(std::span<uint8_t> buffer, std::chrono::microseconds timeout) override;
+
+	Result<void>	 waitReadable(std::chrono::microseconds timeout) override;
+
+	void			 interrupt() override { mHandle.interrupt(); }
 
 	SocketAddress	 localAddress() const override { return mLocalAddress; }
 

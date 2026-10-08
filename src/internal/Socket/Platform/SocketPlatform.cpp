@@ -56,6 +56,19 @@ Result<void> setIntOption(const NativeHandle handle, const int level, const int 
 }
 
 
+// 0 if the option cannot be read
+int intOption(const NativeHandle handle, const int level, const int name)
+{
+	int		value  = 0;
+	SockLen length = sizeof(value);
+
+	if (getsockopt(toNative(handle), level, name, reinterpret_cast<char *>(&value), &length) == SocketErrorRet)
+		return 0;
+
+	return value;
+}
+
+
 BufferLength clampLength(const size_t size)
 {
 #if defined(_WIN32)
@@ -100,6 +113,9 @@ Result<void> applyBindOptions(const NativeHandle handle, const BindOptions &opti
 		if (auto result = setIntOption(handle, SOL_SOCKET, SO_SNDBUF, options.sendBufferSize); !result)
 			NETLINK_LOG_WARNING("Send buffer of {} bytes not applied: {}", options.sendBufferSize, toString(result.error()));
 	}
+
+	if (options.receiveBufferSize > 0 || options.sendBufferSize > 0)
+		NETLINK_LOG_INFO("Socket buffers granted: {} bytes to receive, {} bytes to send", intOption(handle, SOL_SOCKET, SO_RCVBUF), intOption(handle, SOL_SOCKET, SO_SNDBUF));
 
 	return {};
 }
@@ -153,16 +169,82 @@ Result<size_t> sendDatagram(const NativeHandle handle, const SocketAddress &to, 
 }
 
 
+Result<size_t> sendDatagram(const NativeHandle handle, const SocketAddress &to, const std::span<const uint8_t> head, const std::span<const uint8_t> body)
+{
+	auto addr = toSockaddr(to);
+	if (!addr)
+		return std::unexpected(addr.error());
+
+	while (true)
+	{
+#if defined(_WIN32)
+		WSABUF buffers[2];
+		buffers[0].buf = const_cast<char *>(reinterpret_cast<const char *>(head.data()));
+		buffers[0].len = static_cast<ULONG>(head.size());
+		buffers[1].buf = const_cast<char *>(reinterpret_cast<const char *>(body.data()));
+		buffers[1].len = static_cast<ULONG>(body.size());
+
+		DWORD	   sent	  = 0;
+		const bool failed = WSASendTo(toNative(handle), buffers, body.empty() ? 1 : 2, &sent, 0, reinterpret_cast<sockaddr *>(&*addr), sizeof(sockaddr_in), nullptr, nullptr) == SOCKET_ERROR;
+#else
+		iovec parts[2];
+		parts[0].iov_base = const_cast<uint8_t *>(head.data());
+		parts[0].iov_len  = head.size();
+		parts[1].iov_base = const_cast<uint8_t *>(body.data());
+		parts[1].iov_len  = body.size();
+
+		msghdr message{};
+		message.msg_name	= &*addr;
+		message.msg_namelen = sizeof(sockaddr_in);
+		message.msg_iov		= parts;
+		message.msg_iovlen	= body.empty() ? 1 : 2;
+
+		const auto result = ::sendmsg(toNative(handle), &message, SendFlags);
+		const bool failed = result == SocketErrorRet;
+		const auto sent	  = result;
+#endif
+
+		if (!failed)
+			return static_cast<size_t>(sent);
+
+		const int code = lastNativeError();
+		if (isInterrupted(code))
+			continue;
+
+		return std::unexpected(isWouldBlock(code) ? SocketError::WouldBlock : mapNativeError(code));
+	}
+}
+
+
 Result<Datagram> receiveDatagram(const NativeHandle handle, std::span<uint8_t> buffer)
 {
 	while (true)
 	{
 		sockaddr_in from{};
-		SockLen		length = sizeof(from);
 
-		if (const auto received =
-				::recvfrom(toNative(handle), reinterpret_cast<char *>(buffer.data()), clampLength(buffer.size()), 0, reinterpret_cast<sockaddr *>(&from), &length);
-			received != SocketErrorRet)
+#if defined(_WIN32)
+		// A datagram that does not fit into the buffer fails with WSAEMSGSIZE, and is gone
+		SockLen	   length	= sizeof(from);
+		const auto received = ::recvfrom(toNative(handle), reinterpret_cast<char *>(buffer.data()), clampLength(buffer.size()), 0, reinterpret_cast<sockaddr *>(&from), &length);
+#else
+		iovec part{};
+		part.iov_base = buffer.data();
+		part.iov_len  = buffer.size();
+
+		msghdr message{};
+		message.msg_name	= &from;
+		message.msg_namelen = sizeof(from);
+		message.msg_iov		= &part;
+		message.msg_iovlen	= 1;
+
+		const auto received = ::recvmsg(toNative(handle), &message, 0);
+
+		// A datagram that does not fit into the buffer is cut off silently, and its rest is gone: reported like on Windows
+		if (received != SocketErrorRet && (message.msg_flags & MSG_TRUNC) != 0)
+			return std::unexpected(SocketError::MessageTooLarge);
+#endif
+
+		if (received != SocketErrorRet)
 			return Datagram{.size = static_cast<size_t>(received), .from = fromSockaddr(from)};
 
 		const int code = lastNativeError();

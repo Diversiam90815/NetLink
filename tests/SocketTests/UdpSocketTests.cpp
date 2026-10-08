@@ -1,7 +1,13 @@
+// First: on Windows it brings in WinSock2.h, which has to come before anything that includes windows.h
+#include "Socket/Platform/SocketCommon.h"
+
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <chrono>
+#include <future>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "TestIp.h"
@@ -49,6 +55,69 @@ TEST(UdpSocket, SendAndReceiveOverLoopback)
 }
 
 
+TEST(UdpSocket, SendParts_ArrivesAsOneDatagram)
+{
+	auto receiver = UdpSocket::bind({ipv4("127.0.0.1"), 0});
+	auto sender	  = UdpSocket::bind({ipv4("127.0.0.1"), 0});
+	ASSERT_TRUE(receiver && sender);
+
+	auto sent = sender->sendParts(receiver->localAddress(), asBytes("head:"), asBytes("body"));
+	ASSERT_TRUE(sent.has_value()) << toString(sent.error());
+	EXPECT_EQ(*sent, 9u);
+
+	auto headOnly = sender->sendParts(receiver->localAddress(), asBytes("alone"), {});
+	ASSERT_TRUE(headOnly.has_value()) << toString(headOnly.error());
+	EXPECT_EQ(*headOnly, 5u);
+
+	std::vector<uint8_t> buffer(1024);
+
+	auto				 first = receiver->receiveFrom(buffer, 2s);
+	ASSERT_TRUE(first.has_value()) << toString(first.error());
+	EXPECT_EQ(std::string(buffer.begin(), buffer.begin() + first->size), "head:body") << "Both parts must leave as a single datagram";
+
+	auto second = receiver->receiveFrom(buffer, 2s);
+	ASSERT_TRUE(second.has_value()) << toString(second.error());
+	EXPECT_EQ(std::string(buffer.begin(), buffer.begin() + second->size), "alone") << "An empty body is allowed";
+}
+
+
+TEST(UdpSocket, DatagramLargerThanTheBuffer_IsDroppedAndReported)
+{
+	auto receiver = UdpSocket::bind({ipv4("127.0.0.1"), 0});
+	auto sender	  = UdpSocket::bind({ipv4("127.0.0.1"), 0});
+	ASSERT_TRUE(receiver && sender);
+
+	ASSERT_TRUE(sender->sendTo(receiver->localAddress(), asBytes(std::string(200, 'x'))));
+	ASSERT_TRUE(sender->sendTo(receiver->localAddress(), asBytes("next")));
+
+	std::vector<uint8_t> buffer(100);
+
+	auto				 oversized = receiver->receiveFrom(buffer, 2s);
+	ASSERT_FALSE(oversized.has_value()) << "A cut off datagram must not pass as a whole one";
+	EXPECT_EQ(oversized.error(), SocketError::MessageTooLarge);
+
+	auto next = receiver->receiveFrom(buffer, 2s);
+	ASSERT_TRUE(next.has_value()) << toString(next.error());
+	EXPECT_EQ(std::string(buffer.begin(), buffer.begin() + next->size), "next") << "The oversized datagram is gone, the one behind it is not";
+}
+
+
+TEST(UdpSocket, NoBufferSpace_IsWouldBlock)
+{
+	using namespace netlink::net::platform::common;
+
+#if defined(_WIN32)
+	EXPECT_TRUE(isWouldBlock(WSAEWOULDBLOCK));
+	EXPECT_TRUE(isWouldBlock(WSAENOBUFS)) << "A full system buffer is a reason to try again, not a failed socket";
+	EXPECT_FALSE(isWouldBlock(WSAECONNRESET));
+#else
+	EXPECT_TRUE(isWouldBlock(EAGAIN));
+	EXPECT_TRUE(isWouldBlock(ENOBUFS)) << "A full system buffer is a reason to try again, not a failed socket";
+	EXPECT_FALSE(isWouldBlock(ECONNRESET));
+#endif
+}
+
+
 TEST(UdpSocket, Receive_TimesOutWhenNothingArrives)
 {
 	auto socket = UdpSocket::bind({ipv4("127.0.0.1"), 0});
@@ -61,6 +130,140 @@ TEST(UdpSocket, Receive_TimesOutWhenNothingArrives)
 	ASSERT_FALSE(datagram.has_value());
 	EXPECT_EQ(datagram.error(), SocketError::Timeout);
 	EXPECT_LT(std::chrono::steady_clock::now() - started, 1s) << "The timeout must be honored";
+}
+
+
+TEST(UdpSocket, ReceiveWithZeroTimeout_DoesNotBlock)
+{
+	auto receiver = UdpSocket::bind({ipv4("127.0.0.1"), 0});
+	auto sender	  = UdpSocket::bind({ipv4("127.0.0.1"), 0});
+	ASSERT_TRUE(receiver && sender);
+
+	std::vector<uint8_t> buffer(64);
+
+	auto				 nothing = receiver->receiveFrom(buffer, 0ms);
+	ASSERT_FALSE(nothing.has_value());
+	EXPECT_EQ(nothing.error(), SocketError::Timeout);
+
+	ASSERT_TRUE(sender->sendTo(receiver->localAddress(), asBytes("ping")));
+	ASSERT_TRUE(receiver->waitReadable(2s)) << "Loopback delivery must make the socket readable";
+
+	auto datagram = receiver->receiveFrom(buffer, 0ms);
+	ASSERT_TRUE(datagram.has_value()) << "A waiting datagram must be returned without waiting";
+	EXPECT_EQ(datagram->size, 4u);
+}
+
+
+TEST(UdpSocket, WaitReadable_DoesNotConsumeTheDatagram)
+{
+	auto receiver = UdpSocket::bind({ipv4("127.0.0.1"), 0});
+	auto sender	  = UdpSocket::bind({ipv4("127.0.0.1"), 0});
+	ASSERT_TRUE(receiver && sender);
+
+	auto idle = receiver->waitReadable(20ms);
+	ASSERT_FALSE(idle.has_value());
+	EXPECT_EQ(idle.error(), SocketError::Timeout);
+
+	ASSERT_TRUE(sender->sendTo(receiver->localAddress(), asBytes("one")));
+	ASSERT_TRUE(sender->sendTo(receiver->localAddress(), asBytes("two")));
+
+	std::vector<uint8_t> buffer(64);
+
+	for (const std::string expected : {"one", "two"})
+	{
+		ASSERT_TRUE(receiver->waitReadable(2s)) << "Still readable while a datagram is waiting (" << expected << ")";
+
+		auto datagram = receiver->receiveFrom(buffer, 0ms);
+		ASSERT_TRUE(datagram.has_value());
+		EXPECT_EQ(std::string(buffer.begin(), buffer.begin() + datagram->size), expected);
+	}
+}
+
+
+TEST(UdpSocket, Interrupt_EndsAWaitingReceive)
+{
+	auto socket = UdpSocket::bind({ipv4("127.0.0.1"), 0});
+	ASSERT_TRUE(socket);
+
+	auto waiting = std::async(std::launch::async,
+							  [&]
+							  {
+								  std::vector<uint8_t> buffer(64);
+								  return socket->receiveFrom(buffer, 10s);
+							  });
+
+	std::this_thread::sleep_for(50ms);
+	socket->interrupt();
+
+	ASSERT_EQ(waiting.wait_for(2s), std::future_status::ready) << "interrupt() must end the wait long before its timeout";
+
+	const auto datagram = waiting.get();
+	ASSERT_FALSE(datagram.has_value());
+	EXPECT_EQ(datagram.error(), SocketError::Cancelled);
+}
+
+
+TEST(UdpSocket, InterruptBeforeTheWait_EndsTheNextWaitOnly)
+{
+	auto socket = UdpSocket::bind({ipv4("127.0.0.1"), 0});
+	ASSERT_TRUE(socket);
+
+	socket->interrupt();
+
+	const auto first = socket->waitReadable(5s);
+	ASSERT_FALSE(first.has_value());
+	EXPECT_EQ(first.error(), SocketError::Cancelled) << "An interrupt without a wait in progress must not be lost";
+
+	const auto second = socket->waitReadable(20ms);
+	ASSERT_FALSE(second.has_value());
+	EXPECT_EQ(second.error(), SocketError::Timeout) << "One interrupt ends exactly one wait";
+}
+
+
+TEST(UdpSocket, Shutdown_EndsAWaitingReceive)
+{
+	auto socket = UdpSocket::bind({ipv4("127.0.0.1"), 0});
+	ASSERT_TRUE(socket);
+
+	auto waiting = std::async(std::launch::async,
+							  [&]
+							  {
+								  std::vector<uint8_t> buffer(64);
+								  return socket->receiveFrom(buffer, 10s);
+							  });
+
+	std::this_thread::sleep_for(50ms);
+	socket->shutdown();
+
+	ASSERT_EQ(waiting.wait_for(2s), std::future_status::ready);
+
+	const auto datagram = waiting.get();
+	ASSERT_FALSE(datagram.has_value());
+	EXPECT_EQ(datagram.error(), SocketError::Closed);
+}
+
+
+TEST(UdpSocket, ShortReceiveTimeouts_EndCloseToTheirDeadline)
+{
+	using Clock = std::chrono::steady_clock;
+
+	auto socket = UdpSocket::bind({ipv4("127.0.0.1"), 0});
+	ASSERT_TRUE(socket);
+
+	std::vector<uint8_t> buffer(64);
+
+	// The best of several attempts: a busy machine may delay single ones, a coarse timer delays all of them
+	auto				 smallestDelay = Clock::duration::max();
+
+	for (int attempt = 0; attempt < 20; ++attempt)
+	{
+		const auto deadline = Clock::now() + 1ms;
+		ASSERT_FALSE(socket->receiveFrom(buffer, 1ms).has_value());
+		smallestDelay = std::min(smallestDelay, Clock::now() - deadline);
+	}
+
+	EXPECT_GE(smallestDelay, Clock::duration::zero()) << "The wait must not end before its timeout";
+	EXPECT_LT(smallestDelay, 5ms) << "A 1 ms timeout must not be rounded up to the scheduler tick (15.6 ms on Windows)";
 }
 
 

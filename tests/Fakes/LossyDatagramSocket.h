@@ -77,7 +77,11 @@ public:
 		return result;
 	}
 
-	Result<Datagram> receiveFrom(std::span<uint8_t> buffer, std::chrono::milliseconds timeout) override { return mInner->receiveFrom(buffer, timeout); }
+	Result<Datagram> receiveFrom(std::span<uint8_t> buffer, std::chrono::microseconds timeout) override { return mInner->receiveFrom(buffer, timeout); }
+
+	Result<void>	 waitReadable(std::chrono::microseconds timeout) override { return mInner->waitReadable(timeout); }
+
+	void			 interrupt() override { mInner->interrupt(); }
 
 	SocketAddress	 localAddress() const override { return mInner->localAddress(); }
 

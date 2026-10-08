@@ -8,22 +8,55 @@
 #include "SocketHandle.h"
 #include "Platform/SocketPlatform.h"
 
-#include <algorithm>
+#include <atomic>
 #include <utility>
 
 
 namespace netlink::net
 {
 
-namespace
+struct SocketHandle::State
 {
-// Upper bound for noticing a shutdown() from another thread
-constexpr std::chrono::milliseconds ShutdownPollSlice{50};
-} // namespace
+	std::atomic<bool>					  shutdown{false};
+	std::unique_ptr<platform::ReadWaiter> waiter;
+};
+
+
+SocketHandle::SocketHandle() = default;
+
+
+SocketHandle::SocketHandle(const NativeHandle handle) : mHandle(handle), mState(std::make_unique<State>())
+{
+	mState->waiter = platform::createReadWaiter(handle);
+}
+
+
+SocketHandle::~SocketHandle()
+{
+	reset();
+}
+
+
+SocketHandle::SocketHandle(SocketHandle &&other) noexcept : mHandle(std::exchange(other.mHandle, InvalidNativeHandle)), mState(std::move(other.mState)) {}
+
+
+SocketHandle &SocketHandle::operator=(SocketHandle &&other) noexcept
+{
+	if (this != &other)
+	{
+		reset();
+		mHandle = std::exchange(other.mHandle, InvalidNativeHandle);
+		mState	= std::move(other.mState);
+	}
+	return *this;
+}
 
 
 void SocketHandle::reset()
 {
+	// The waiter is registered on the descriptor: it has to go first
+	mState.reset();
+
 	if (isValid())
 		platform::closeHandle(std::exchange(mHandle, InvalidNativeHandle));
 }
@@ -31,32 +64,49 @@ void SocketHandle::reset()
 
 void SocketHandle::shutdown() const
 {
-	if (!isValid())
+	if (!isValid() || !mState)
 		return;
 
-	mShutdown->store(true);
+	mState->shutdown.store(true);
 	platform::shutdownHandle(mHandle);
+	interrupt();
 }
 
 
-Result<void> SocketHandle::wait(const WaitFor what, const std::chrono::milliseconds timeout) const
+bool SocketHandle::isShutdown() const
 {
-	using Clock			= std::chrono::steady_clock;
-	const auto deadline = Clock::now() + timeout;
+	return mState && mState->shutdown.load();
+}
 
-	while (true)
-	{
-		if (isShutdown())
-			return std::unexpected(SocketError::Closed);
 
-		const auto remaining = std::max(std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now()), std::chrono::milliseconds{0});
+Result<void> SocketHandle::waitReadable(const TimePoint deadline) const
+{
+	if (!isValid() || !mState || !mState->waiter)
+		return std::unexpected(SocketError::InvalidArgument);
 
-		if (auto ready = platform::waitUntil(mHandle, what, std::min(remaining, ShutdownPollSlice)); ready || ready.error() != SocketError::Timeout)
-			return isShutdown() ? Result<void>(std::unexpected(SocketError::Closed)) : ready;
+	if (isShutdown())
+		return std::unexpected(SocketError::Closed);
 
-		if (Clock::now() >= deadline)
-			return std::unexpected(SocketError::Timeout);
-	}
+	auto ready = mState->waiter->wait(deadline);
+
+	if (isShutdown())
+		return std::unexpected(SocketError::Closed);
+
+	return ready;
+}
+
+
+void SocketHandle::interrupt() const
+{
+	if (mState && mState->waiter)
+		mState->waiter->interrupt();
+}
+
+
+void SocketHandle::noteReceiveAttempt() const
+{
+	if (mState && mState->waiter)
+		mState->waiter->onReceiveAttempt();
 }
 
 } // namespace netlink::net

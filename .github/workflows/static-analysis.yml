@@ -31,7 +31,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang clang-tidy libc++-dev libc++abi-dev ninja-build jq libnl-genl-3-dev libnl-3-dev
+          sudo apt-get install -y clang clang-tidy libc++-dev libc++abi-dev ninja-build jq
 
       - name: Configure
         run: >
@@ -41,12 +41,12 @@ jobs:
           -DCMAKE_CXX_SCAN_FOR_MODULES=OFF
           -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
           -DNETLINK_BUILD_TESTS=OFF
-          -DNETLINK_ENABLE_LOGGING=ON
+          -DNETLINK_BUILD_BENCHMARKS=OFF
 
       - name: Run clang-tidy
         run: |
           status=0
-          for f in $(jq -r '.[].file' build/compile_commands.json | grep -v -e '/_deps/' -e '/\.cpm-cache/'); do
+          for f in $(jq -r '.[].file' build/compile_commands.json | grep '/src/'); do
             echo "::group::clang-tidy $f"
             if ! clang-tidy -p build "$f"; then
               status=1

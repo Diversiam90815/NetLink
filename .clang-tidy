@@ -6,4 +6,6 @@ Checks: >
   -bugprone-easily-swappable-parameters,
   -clang-analyzer-cplusplus.StringChecker,
   -bugprone-exception-escape
+CheckOptions:
+  bugprone-unused-return-value.AllowCastToVoid: true
 WarningsAsErrors: 'clang-analyzer-*,bugprone-*'

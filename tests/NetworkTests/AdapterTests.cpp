@@ -7,13 +7,9 @@ using namespace netlink;
 namespace NetworkTests
 {
 
-static NetworkAdapterInternal makeAdapter(const std::string		 &name		= "Ethernet",
-										  const std::string		 &ip		= "192.168.1.10",
-										  const std::string		 &subnet	= "255.255.255.0",
-										  int					  id		= 1,
-										  bool					  isDefault = false,
-										  AdapterTypes			  type		= AdapterTypes::Ethernet,
-										  AdapterPriorityInternal prio		= AdapterPriorityInternal::Available)
+static NetworkAdapterInternal makeAdapter(const std::string &name = "Ethernet", const std::string &ip = "192.168.1.10", const std::string &subnet = "255.255.255.0",
+										  uint64_t id = 1, bool isDefault = false, AdapterTypes type = AdapterTypes::Ethernet,
+										  AdapterPriorityInternal prio = AdapterPriorityInternal::Available)
 {
 	return NetworkAdapterInternal(name, "MyNetwork", ip, subnet, id, isDefault, type, prio);
 }
@@ -141,6 +137,31 @@ TEST(NetworkAdapterInternal, PriorityEnumValues)
 	EXPECT_EQ(static_cast<int>(AdapterPriorityInternal::Suppressed), 1) << "AdapterPriorityInternal::Suppressed must have numeric value 1";
 	EXPECT_EQ(static_cast<int>(AdapterPriorityInternal::Available), 2) << "AdapterPriorityInternal::Available must have numeric value 2";
 	EXPECT_EQ(static_cast<int>(AdapterPriorityInternal::Preferred), 3) << "AdapterPriorityInternal::Preferred must have numeric value 3";
+}
+
+
+// ---------------------------------------------------------------------------
+// Adapter IDs and names
+// ---------------------------------------------------------------------------
+
+TEST(NetworkAdapterInternal, AdapterId_IsStablePerInterfaceAndAddress)
+{
+	const uint64_t id = makeAdapterId(7, "192.168.1.10");
+
+	EXPECT_EQ(id, makeAdapterId(7, "192.168.1.10")) << "The same interface with the same address has the same ID, whenever it is asked for";
+	EXPECT_NE(id, makeAdapterId(8, "192.168.1.10")) << "Another interface";
+	EXPECT_NE(id, makeAdapterId(7, "192.168.1.11")) << "Another address of the same interface";
+	EXPECT_NE(id, 0u) << "0 means no adapter";
+	EXPECT_NE(makeAdapterId(0, ""), 0u);
+}
+
+
+TEST(NetworkAdapterInternal, NetworkName_NeedsNoLookup)
+{
+	EXPECT_EQ(networkNameOf(AdapterTypes::Ethernet, "192.168.1.10"), "Ethernet (192.168.1.10)");
+	EXPECT_EQ(networkNameOf(AdapterTypes::WiFi, "192.168.1.10"), "WiFi (192.168.1.10)");
+	EXPECT_TRUE(networkNameOf(AdapterTypes::Loopback, "127.0.0.1").empty());
+	EXPECT_TRUE(networkNameOf(AdapterTypes::Virtual, "10.0.0.1").empty());
 }
 
 } // namespace NetworkTests

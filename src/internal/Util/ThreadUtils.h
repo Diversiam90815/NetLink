@@ -7,11 +7,13 @@
 
 #pragma once
 
+#include <atomic>
 #include <thread>
 
 
 // Joins the thread, or detaches it when called from that very thread
-inline void joinOrDetach(std::thread &thread)
+template <typename Thread>
+void joinOrDetach(Thread &thread)
 {
 	if (!thread.joinable())
 		return;
@@ -21,3 +23,12 @@ inline void joinOrDetach(std::thread &thread)
 	else
 		thread.join();
 }
+
+
+namespace netlink::internal
+{
+
+// Threads the library started since the process began: every place that starts one counts it
+inline std::atomic<int> threadsStarted{0};
+
+} // namespace netlink::internal

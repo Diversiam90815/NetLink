@@ -1,27 +1,27 @@
 /*
   ==============================================================================
 	Module:         NetLinkCore
-	Description:    Composition root of the library: owns every service, wires
-					them together and delivers public events on a dedicated
-					event thread.
+	Description:    Runs the engine on its thread, delivers its events on the
+					event thread and tells it which network adapter to use
   ==============================================================================
 */
 
 #pragma once
 
-#include <atomic>
 #include <chrono>
-#include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <span>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "NetLink/NetLink.h"
-#include "Channel/PeerChannel.h"
-#include "ConnectionService/ConnectionService.h"
-#include "Discovery/DiscoveryService.h"
-#include "PeerValidation/PeerValidationService.h"
+
+#include "Engine/NetworkEngine.h"
+#include "NetLinkLog.h"
+#include "Network/NetworkInformation.h"
 #include "Socket/IDatagramSocket.h"
 #include "Util/TaskQueue.h"
 
@@ -32,83 +32,76 @@ namespace netlink
 struct NetLinkCoreDependencies
 {
 	net::DatagramSocketFactory datagramSocketFactory{}; // empty = real UDP sockets
-	PeerChannelConfig		   channelConfig{};			// timings of the reliable channel
+	LocalInterfaceProvider	   localInterface{};		// empty = the network adapters of this machine
+	channel::LinkTimings	   timings{};				// of every link. peerTimeout comes from the configuration.
 };
 
 
 class NetLinkCore
 {
 public:
-	// How long shutdown() waits for the remote to acknowledge the Disconnect
-	static constexpr std::chrono::milliseconds ShutdownFlushTimeout{250};
-
-	using Event = std::function<void(const NetLinkCallbacks &callbacks)>;
-
-	explicit NetLinkCore(const NetLinkCoreDependencies &dependencies = {});
+	explicit NetLinkCore(NetLinkCoreDependencies dependencies = {});
 	~NetLinkCore();
 
-	NetLinkCore(const NetLinkCore &)					 = delete;
-	NetLinkCore			 &operator=(const NetLinkCore &) = delete;
+	NetLinkCore(const NetLinkCore &)							  = delete;
+	NetLinkCore					  &operator=(const NetLinkCore &) = delete;
 
-	// Call before init()
-	void				  configure(const NetLinkConfig &config, const NetLinkCallbacks &callbacks);
+	bool						   start(const NetLinkConfig &config, const NetLinkCallbacks &callbacks);
 
-	bool				  init();
-	void				  shutdown();
+	// From a callback: only asks the engine to stop. The threads are joined by the next stop() from elsewhere.
+	void						   stop();
 
-	// Local interface address all networking runs on (the selected network adapter)
-	void				  setLocalAddress(const std::string &ipv4, const std::string &subnetMask = {});
+	bool						   startDiscovery();
+	void						   stopDiscovery();
 
-	bool				  startDiscovery();
-	void				  stopDiscovery();
+	std::vector<PeerInfo>		   peers() const;
+	std::vector<PeerId>			   connectedPeers() const;
 
-	std::vector<Endpoint> getPotentialEndpoints() const;
+	bool						   connect(PeerId peer);
+	void						   accept(PeerId peer);
+	void						   decline(PeerId peer);
+	void						   disconnect(PeerId peer);
 
-	bool				  connectTo(const Endpoint &remote);
-	void				  respondToConnection(bool accepted);
-	void				  disconnect();
+	SendResult					   send(PeerId peer, uint32_t type, std::vector<uint8_t> &&data, Lane lane, std::chrono::milliseconds timeout);
+	size_t						   broadcast(uint32_t type, std::span<const uint8_t> data, Lane lane);
+	std::optional<PeerStats>	   stats(PeerId peer) const;
 
-	ConnectionState		  getConnectionState() const { return mState.load(); }
+	std::vector<NetworkAdapter>	   getAvailableAdapters();
+	bool						   setActiveAdapter(uint64_t adapterID);
+	uint64_t					   getActiveAdapterID() const;
 
-	bool				  send(uint32_t type, const std::vector<uint8_t> &payload, DeliveryMode mode);
-
-	// Queues a public callback invocation onto the event thread
-	void				  postEvent(Event event);
+	// The running engine, null if there is none
+	std::shared_ptr<NetworkEngine> engine() const;
 
 private:
-	void									wireServices();
+	// Joins the threads of an engine that was asked to stop. Caller holds mLifecycleMutex.
+	void									finish();
 
-	void									applyLocalAddress();
-	void									updateDiscoveryConfig();
+	void									deliver(EventBatch &&batch);
+	internal::LogSink						logSink() const;
+	void									dispatch(EngineEvent &event, const NetLinkCallbacks &callbacks);
 
-	void									onConnectionStatus(const ConnectionStatusUpdate &update);
-	void									onValidationResult(const ValidationResult &result);
-
-	void									emitConnectionChanged(ConnectionState state, const std::string &message, const DiscoveryEndpoint &remote);
-	void									endSessionTraffic(const std::string &remote);
-
-	static Endpoint							toPublicEndpoint(const DiscoveryEndpoint &endpoint);
+	// Looks the adapters of this machine up again
+	void									enumerateAdapters();
+	void									selectAdapter();
+	std::optional<LocalInterface>			selectedInterface();
+	NetworkAdapter							adapterAt(const std::string &ipv4) const;
 
 
-	mutable std::mutex						mCallbacksMutex;
-	std::shared_ptr<const NetLinkCallbacks> mCallbacks{std::make_shared<const NetLinkCallbacks>()};
+	NetLinkCoreDependencies					mDependencies;
 
-	mutable std::mutex						mConfigMutex;
-	NetLinkConfig							mConfig;
-	net::IPv4Address						mLocalAddress;
-	net::IPv4Address						mSubnetMask;
-	std::string								mLocalVersion;
-	std::atomic<bool>						mInitialized{false};
-	std::atomic<ConnectionState>			mState{ConnectionState::None};
-
+	std::mutex								mLifecycleMutex; // start() and stop() one at a time
+	mutable std::mutex						mEngineMutex;
+	std::shared_ptr<NetworkEngine>			mEngine;
+	std::shared_ptr<const NetLinkCallbacks> mCallbacks;
+	internal::LogSink						mLogSink; // hands a log line of any thread to the event thread
+	std::jthread							mThread;
 	TaskQueue								mEvents;
 
-	// Services
-	DiscoveryService						mDiscovery;
-	PeerChannel								mChannel;
-	PeerChannelConfig						mChannelConfig;
-	PeerValidationService					mValidation;
-	ConnectionService						mConnectionService;
+	// The adapters of this machine. Unused when the address comes from the dependencies.
+	mutable std::mutex						mNetworkMutex;
+	NetworkInformation						mNetwork;
+	NetworkAdapterInternal					mAdapter; // the selected one, as it was last seen
 };
 
 } // namespace netlink

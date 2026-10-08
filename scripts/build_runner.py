@@ -35,6 +35,9 @@ class BuildRunner:
         ]
         if platform == Platform.VS2022 or platform == Platform.VS2026:
             prepare_cmd += ["-A", str(architecture)]
+        else:
+            # Ninja builds one configuration and ignores --config: without a build type nothing would be optimized
+            prepare_cmd.append(f"-DCMAKE_BUILD_TYPE={Configuration.Release}")
 
         BuildUtils.execute_command(
             prepare_cmd,

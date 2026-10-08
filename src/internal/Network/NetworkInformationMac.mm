@@ -13,17 +13,12 @@
 #include <net/if.h>
 #include <net/if_media.h>
 #include <net/route.h>
-#include <netdb.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/sysctl.h>
 #include <unistd.h>
 
-#import <CoreWLAN/CoreWLAN.h>
-#import <Foundation/Foundation.h>
-
 #include <cstring>
-#include <unordered_map>
 #include <unordered_set>
 
 
@@ -40,24 +35,6 @@ size_t roundUpToWord(size_t length)
 }
 
 
-std::string ssidForInterface(const std::string &ifName)
-{
-	@autoreleasepool
-	{
-		NSString	*name  = [NSString stringWithUTF8String:ifName.c_str()];
-		CWInterface *iface = [[CWWiFiClient sharedWiFiClient] interfaceWithName:name];
-
-		if (!iface)
-			return {};
-
-		NSString *ssid = [iface ssid];
-		if (!ssid)
-			return {};
-
-		return std::string([ssid UTF8String]);
-	}
-}
-
 } // namespace
 
 
@@ -66,20 +43,15 @@ struct NetworkInformation::Impl
 	using AddrList = std::unique_ptr<ifaddrs, void (*)(ifaddrs *)>;
 
 	AddrList										mAddrList{nullptr, &freeifaddrs};
-	std::unordered_map<std::string, std::string>	mDefaultGateways;
 
 	bool											getNetworkInformationFromOS();
-	void											saveAdapter(std::vector<NetworkAdapterInternal> &adapters, const ifaddrs *ifa, const int ID, const std::unordered_set<std::string> &defaultRouteIfNames);
+	void											saveAdapter(std::vector<NetworkAdapterInternal> &adapters, const ifaddrs *ifa, const std::unordered_set<std::string> &defaultRouteIfNames);
 
 	std::string										sockaddrToString(const sockaddr *sa) const;
 	AdapterTypes									filterAdapterType(const std::string &ifName, unsigned int flags) const;
 	AdapterPriorityInternal							determinePriority(bool isDefaultRoute, AdapterTypes type, unsigned int flags) const;
 
 	bool											getDefaultInterfaces(std::unordered_set<std::string> &ifNames);
-	std::string										getHostName(const sockaddr *ip, socklen_t ipLength);
-	std::string										getWifiSsid(const std::string &ifName) const;
-	std::string										getNetworkGatename(AdapterTypes type, const std::string &ifName, const std::string &address);
-	std::string										getNetworkName(AdapterTypes type, const std::string &ifName, const std::string &address);
 };
 
 
@@ -132,16 +104,14 @@ void NetworkInformation::processAdapter()
 		defaultRouteIfNames.clear();
 	}
 
-	int ID = 1; // Giving each network adapter an ID
-
-	for (auto *ifa = mImpl->mAddrList.get(); ifa; ifa = ifa->ifa_next, ++ID)
+	for (auto *ifa = mImpl->mAddrList.get(); ifa; ifa = ifa->ifa_next)
 	{
-		mImpl->saveAdapter(mNetworkAdapters, ifa, ID, defaultRouteIfNames);
+		mImpl->saveAdapter(mNetworkAdapters, ifa, defaultRouteIfNames);
 	}
 }
 
 
-void NetworkInformation::Impl::saveAdapter(std::vector<NetworkAdapterInternal> &adapters, const ifaddrs *ifa, const int ID, const std::unordered_set<std::string> &defaultRouteIfNames)
+void NetworkInformation::Impl::saveAdapter(std::vector<NetworkAdapterInternal> &adapters, const ifaddrs *ifa, const std::unordered_set<std::string> &defaultRouteIfNames)
 {
 	if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET)
 		return;
@@ -150,12 +120,13 @@ void NetworkInformation::Impl::saveAdapter(std::vector<NetworkAdapterInternal> &
 	std::string	addressString	 = sockaddrToString(ifa->ifa_addr);
 	std::string	subnetMaskString = ifa->ifa_netmask ? sockaddrToString(ifa->ifa_netmask) : std::string{};
 	AdapterTypes type			 = filterAdapterType(adapterName, ifa->ifa_flags);
-	std::string	networkName		 = getNetworkName(type, adapterName, addressString);
+	std::string	networkName		 = networkNameOf(type, addressString);
 	const bool	isDefaultRoute	 = defaultRouteIfNames.find(adapterName) != defaultRouteIfNames.end();
 
 	AdapterPriorityInternal visibility = determinePriority(isDefaultRoute, type, ifa->ifa_flags);
 
-	adapters.emplace_back(adapterName, networkName, addressString, subnetMaskString, ID, isDefaultRoute, type, visibility);
+	adapters.emplace_back(adapterName, networkName, addressString, subnetMaskString, makeAdapterId(if_nametoindex(adapterName.c_str()), addressString), isDefaultRoute, type,
+						  visibility);
 }
 
 
@@ -232,7 +203,6 @@ netlink::AdapterPriorityInternal NetworkInformation::Impl::determinePriority(boo
 bool NetworkInformation::Impl::getDefaultInterfaces(std::unordered_set<std::string> &ifNames)
 {
 	ifNames.clear();
-	mDefaultGateways.clear();
 
 	int	   mib[6] = {CTL_NET, PF_ROUTE, 0, AF_INET, NET_RT_DUMP, 0};
 	size_t needed  = 0;
@@ -264,7 +234,6 @@ bool NetworkInformation::Impl::getDefaultInterfaces(std::unordered_set<std::stri
 		{
 			char	   *sa		   = reinterpret_cast<char *>(rtm + 1);
 			bool		isDefault  = false;
-			std::string gatewayIp;
 
 			for (int i = 0; i < RTAX_MAX; ++i)
 			{
@@ -280,10 +249,6 @@ bool NetworkInformation::Impl::getDefaultInterfaces(std::unordered_set<std::stri
 					if (sin->sin_addr.s_addr == 0)
 						isDefault = true;
 				}
-				else if (i == RTAX_GATEWAY && sockAddr->sa_family == AF_INET)
-				{
-					gatewayIp = sockaddrToString(sockAddr);
-				}
 
 				sa += roundUpToWord(saLen);
 			}
@@ -292,11 +257,7 @@ bool NetworkInformation::Impl::getDefaultInterfaces(std::unordered_set<std::stri
 			{
 				char ifNameBuf[IF_NAMESIZE] = {0};
 				if (if_indextoname(rtm->rtm_index, ifNameBuf))
-				{
 					ifNames.insert(ifNameBuf);
-					if (!gatewayIp.empty())
-						mDefaultGateways[ifNameBuf] = gatewayIp;
-				}
 			}
 		}
 
@@ -304,75 +265,6 @@ bool NetworkInformation::Impl::getDefaultInterfaces(std::unordered_set<std::stri
 	}
 
 	return true;
-}
-
-
-std::string NetworkInformation::Impl::getHostName(const sockaddr *ip, socklen_t ipLength)
-{
-	char nameBuffer[NI_MAXHOST];
-
-	int	 result = getnameinfo(ip, ipLength, nameBuffer, NI_MAXHOST, nullptr, 0, NI_NAMEREQD);
-
-	if (result != 0)
-		return {};
-
-	return std::string(nameBuffer);
-}
-
-
-std::string NetworkInformation::Impl::getWifiSsid(const std::string &ifName) const
-{
-	std::string networkName = "WiFi";
-
-	std::string ssid		 = ssidForInterface(ifName);
-	if (!ssid.empty())
-		networkName = ssid;
-
-	return networkName;
-}
-
-
-std::string NetworkInformation::Impl::getNetworkGatename(AdapterTypes type, const std::string &ifName, const std::string &address)
-{
-	std::string networkName = (type == AdapterTypes::Virtual) ? "Virtual Ethernet" : "Ethernet";
-
-	auto		it			 = mDefaultGateways.find(ifName);
-	if (it == mDefaultGateways.end())
-	{
-		if (!address.empty())
-			networkName += " (" + address + ")";
-		return networkName;
-	}
-
-	sockaddr_in gatewaySockaddr{};
-	gatewaySockaddr.sin_family = AF_INET;
-	inet_pton(AF_INET, it->second.c_str(), &gatewaySockaddr.sin_addr);
-
-	std::string host = getHostName(reinterpret_cast<const sockaddr *>(&gatewaySockaddr), sizeof(gatewaySockaddr));
-
-	if (!host.empty())
-	{
-		networkName += " via " + host;
-		return networkName;
-	}
-
-	if (!address.empty())
-		networkName += " (" + address + ")";
-
-	return networkName;
-}
-
-
-std::string NetworkInformation::Impl::getNetworkName(AdapterTypes type, const std::string &ifName, const std::string &address)
-{
-	std::string networkName = "";
-
-	if (type == AdapterTypes::WiFi)
-		networkName = getWifiSsid(ifName);
-	else if (type == AdapterTypes::Ethernet)
-		networkName = getNetworkGatename(type, ifName, address);
-
-	return networkName;
 }
 
 

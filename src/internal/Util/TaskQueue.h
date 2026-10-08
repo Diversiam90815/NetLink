@@ -16,6 +16,7 @@
 #include <thread>
 
 #include "NetLinkLog.h"
+#include "ThreadUtils.h"
 
 
 class TaskQueue
@@ -34,9 +35,12 @@ public:
 		if (mRunning.exchange(true))
 			return;
 
+		mDraining = false;
+		netlink::internal::threadsStarted.fetch_add(1);
 		mThread = std::thread(&TaskQueue::run, this);
 	}
 
+	// Discards the tasks that did not start yet
 	void stop()
 	{
 		if (!mRunning.exchange(false))
@@ -49,8 +53,23 @@ public:
 		}
 		mCV.notify_all();
 
-		if (mThread.joinable())
-			mThread.join();
+		joinOrDetach(mThread);
+	}
+
+	// Runs the tasks that are queued, then stops
+	void stopAfterDrain()
+	{
+		{
+			std::lock_guard<std::mutex> lock(mMutex);
+
+			if (!mRunning.load())
+				return;
+
+			mDraining = true;
+		}
+		mCV.notify_all();
+
+		joinOrDetach(mThread);
 	}
 
 	// Enqueues a task for execution on the worker thread (FIFO order).
@@ -72,6 +91,9 @@ public:
 
 	bool isRunning() const { return mRunning.load(); }
 
+	// Whether the caller is a task of this queue
+	bool isWorkerThread() const { return mThread.get_id() == std::this_thread::get_id(); }
+
 
 private:
 	void run()
@@ -81,10 +103,16 @@ private:
 			Task task;
 			{
 				std::unique_lock<std::mutex> lock(mMutex);
-				mCV.wait(lock, [this] { return !mQueue.empty() || !mRunning.load(); });
+				mCV.wait(lock, [this] { return !mQueue.empty() || !mRunning.load() || mDraining; });
 
 				if (!mRunning.load())
 					return;
+
+				if (mQueue.empty())
+				{
+					mRunning.store(false);
+					return;
+				}
 
 				task = std::move(mQueue.front());
 				mQueue.pop();
@@ -107,6 +135,7 @@ private:
 
 	std::thread				mThread;
 	std::atomic<bool>		mRunning{false};
+	bool					mDraining{false}; // guarded by mMutex
 	mutable std::mutex		mMutex;
 	std::condition_variable mCV;
 	std::queue<Task>		mQueue;
