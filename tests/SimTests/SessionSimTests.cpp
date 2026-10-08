@@ -480,7 +480,7 @@ TEST(SessionSimTest, ThreePeerMesh_KeepsTheOrderPerPeer)
 		}
 	}
 
-	ASSERT_TRUE(sim.driver.runUntil([&] { return std::ranges::all_of(all, [](const auto *node) { return node->received.size() == 2 * Messages; }); }, 60s));
+	ASSERT_TRUE(sim.driver.runUntil([&] { return std::ranges::all_of(all, [Messages](const auto *node) { return node->received.size() == 2 * Messages; }); }, 60s));
 
 	for (const auto *node : all)
 	{
@@ -519,7 +519,7 @@ TEST(SessionSimTest, TenPeers_ExchangeAThousandMessagesEach)
 	}
 
 	ASSERT_TRUE(sim.driver.runUntil(
-		[&] { return hub.received.size() == Peers * Messages && std::ranges::all_of(peers, [](const auto *peer) { return peer->received.size() == Messages; }); }, 60s));
+		[&] { return hub.received.size() == Peers * Messages && std::ranges::all_of(peers, [Messages](const auto *peer) { return peer->received.size() == Messages; }); }, 60s));
 
 	std::map<PeerId, uint32_t> next;
 	for (const auto &message : hub.events.messages())
