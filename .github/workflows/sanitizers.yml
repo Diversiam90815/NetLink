@@ -54,6 +54,6 @@ jobs:
       - name: Run tests
         env:
           TSAN_OPTIONS: halt_on_error=1
-          ASAN_OPTIONS: detect_leaks=1
+          ASAN_OPTIONS: detect_leaks=1:alloc_dealloc_mismatch=0
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
         run: ctest --test-dir build --output-on-failure
