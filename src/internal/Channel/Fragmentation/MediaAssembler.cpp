@@ -92,7 +92,7 @@ MediaAssembler::Slot *MediaAssembler::slotFor(const uint64_t id, const uint16_t 
 	if (!free)
 	{
 		// A straggler of a message older than everything in progress is not worth giving up a newer one for
-		if (id < oldest->id)
+		if (!oldest || id < oldest->id)
 			return nullptr;
 
 		*oldest = {};

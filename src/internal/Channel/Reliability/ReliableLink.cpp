@@ -783,8 +783,11 @@ std::optional<ReliableLink::TimePoint> ReliableLink::nextDeadline() const
 
 	for (const auto &stream : mStreams)
 	{
-		if (stream && stream->peerPaused && stream->probeAt)
-			consider(*stream->probeAt);
+		if (!stream || !stream->peerPaused)
+			continue;
+
+		if (const auto probeAt = stream->probeAt)
+			consider(*probeAt);
 	}
 
 	return next;

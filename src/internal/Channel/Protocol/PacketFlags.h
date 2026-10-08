@@ -75,7 +75,7 @@ public:
 
 	constexpr uint8_t	   raw() const { return mBits; }
 
-	constexpr PacketKind   kind() const { return static_cast<PacketKind>(mBits & KindMask); }
+	constexpr PacketKind   kind() const { return static_cast<PacketKind>(mBits & KindMask); } // NOLINT(clang-analyzer-optin.core.EnumCastOutOfRange)
 	constexpr Lane		   lane() const { return static_cast<Lane>((mBits & LaneMask) >> LaneShift); }
 	constexpr bool		   has(const FlagBit bit) const { return (mBits & std::to_underlying(bit)) != 0; }
 
