@@ -141,7 +141,7 @@ Bit 7 of the flags and an extension field in `Hello`, `Accept` and `Beacon` are 
 CPMAddPackage(
         NAME NetLink
         GITHUB_REPOSITORY Diversiam90815/NetLink
-        VERSION 0.5.0
+        VERSION 0.6.0
 )
 
 target_link_libraries(YourTarget PRIVATE NetLink::NetLink)
@@ -155,6 +155,34 @@ cmake -B build -S . && cmake --build build     # standalone build
 ctest --test-dir build                         # tests
 python build.py --benchmark                    # benchmarks, Release; see --benchmark-filter and --benchmark-repetitions
 ```
+
+### C API
+
+For hosts that cannot use the C++ API (C#, Swift, Python, ...), configure with `-DNETLINK_BUILD_C_API=ON`. This
+builds `NetLinkC`, a shared library with the plain C API of `<NetLink/NetLinkC.h>`:
+
+```c
+NLNetLink *net = nl_create();
+
+NLConfig config = {0};
+config.displayName = "Living room";
+config.appId       = "com.example.my-app";
+
+NLCallbacks callbacks = {0};
+callbacks.context   = myState;
+callbacks.onMessage = onMessage;   // void onMessage(void *context, uint64_t from, int32_t lane, uint32_t type, const uint8_t *data, size_t size)
+
+nl_start(net, &config, &callbacks);
+nl_start_discovery(net);
+// ...
+nl_destroy(net);                   // stops it as well
+```
+
+Every C++ method has a counterpart (`nl_connect`, `nl_send`, `nl_get_adapters`, ...). Peers and adapters are
+identified by their `uint64_t` ID, texts are UTF-8 in fixed buffers of `NL_MAX_STRING` bytes, and functions that list
+something copy what fits into the caller's array and return how many there are. The callbacks run on NetLink's event
+thread as in C++; the pointers they get are only valid while they run. `cmake --install` puts the library into `bin`
+(Windows) or `lib`, the header into `include/NetLink` and the version into `share/NetLink/NetLinkVersion.txt`.
 
 ## Compatibility
 
