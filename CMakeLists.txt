@@ -181,10 +181,6 @@ if (NETLINK_BUILD_C_API AND MSVC)
     install(FILES $<TARGET_PDB_FILE:NetLinkC> DESTINATION ${CMAKE_INSTALL_BINDIR} OPTIONAL)
 endif ()
 
-# Lets hosts that only load the shared library check which version they got
-file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/NetLinkVersion.txt "${PROJECT_VERSION}\n")
-install(FILES ${CMAKE_CURRENT_BINARY_DIR}/NetLinkVersion.txt DESTINATION ${CMAKE_INSTALL_DATADIR}/NetLink)
-
 install(EXPORT NetLinkTargets
         FILE NetLinkTargets.cmake
         NAMESPACE NetLink::

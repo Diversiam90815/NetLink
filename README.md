@@ -182,7 +182,7 @@ Every C++ method has a counterpart (`nl_connect`, `nl_send`, `nl_get_adapters`, 
 identified by their `uint64_t` ID, texts are UTF-8 in fixed buffers of `NL_MAX_STRING` bytes, and functions that list
 something copy what fits into the caller's array and return how many there are. The callbacks run on NetLink's event
 thread as in C++; the pointers they get are only valid while they run. `cmake --install` puts the library into `bin`
-(Windows) or `lib`, the header into `include/NetLink` and the version into `share/NetLink/NetLinkVersion.txt`.
+(Windows) or `lib` and the header into `include/NetLink`.
 
 ## Compatibility
 
