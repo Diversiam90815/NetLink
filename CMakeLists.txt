@@ -5,7 +5,7 @@
 
 cmake_minimum_required(VERSION 4.0)
 
-set(PROJECT_VERSION 0.5.0)
+set(PROJECT_VERSION 0.6.0)
 set(NETLINK_BUILD_NUMBER "0" CACHE STRING "Build number")
 
 project(NetLink VERSION ${PROJECT_VERSION} LANGUAGES CXX)
@@ -22,10 +22,15 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 set(NETLINK_SANITIZER "" CACHE STRING "Build the library, tests and benchmarks with a sanitizer: thread or address (clang, gcc)")
 
 include(cpm)
+include(GNUInstallDirs)
 
 file(GLOB_RECURSE NETWORKING_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp)
 file(GLOB_RECURSE NETWORKING_HEADERS ${CMAKE_CURRENT_SOURCE_DIR}/include/*.h)
 file(GLOB_RECURSE NETWORKING_INTERNAL_HEADERS ${CMAKE_CURRENT_SOURCE_DIR}/src/*.h)
+
+# The C API is a library of its own
+list(FILTER NETWORKING_SOURCES EXCLUDE REGEX ".*/src/capi/.*")
+list(FILTER NETWORKING_HEADERS EXCLUDE REGEX ".*/NetLinkC\.h$")
 
 # NetworkInformation and the socket platform shim have one backend per platform
 list(FILTER NETWORKING_SOURCES EXCLUDE REGEX ".*NetworkInformation(Windows|Linux)\\.cpp$")
@@ -113,13 +118,57 @@ elseif (APPLE)
 endif ()
 
 # ---------------------------------------------------------------------------
+# C API: a shared library for hosts that cannot use the C++ API
+# ---------------------------------------------------------------------------
+
+option(NETLINK_BUILD_C_API "Build NetLinkC, the shared library with the plain C API" OFF)
+
+if (NETLINK_BUILD_C_API)
+    add_library(NetLinkC SHARED
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/capi/NetLinkC.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/include/NetLink/NetLinkC.h)
+    add_library(NetLink::NetLinkC ALIAS NetLinkC)
+
+    target_link_libraries(NetLinkC PRIVATE NetLink)
+    target_compile_definitions(NetLinkC PRIVATE NETLINK_C_EXPORTS)
+    target_include_directories(NetLinkC
+            PUBLIC
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+            $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+            PRIVATE
+            ${CMAKE_CURRENT_BINARY_DIR}/generated)
+
+    set_target_properties(NetLinkC PROPERTIES
+            VERSION ${PROJECT_VERSION}
+            CXX_VISIBILITY_PRESET hidden
+            VISIBILITY_INLINES_HIDDEN ON)
+
+    if (MSVC)
+        target_compile_options(NetLinkC PRIVATE /W4)
+    else ()
+        target_compile_options(NetLinkC PRIVATE -Wall -Wextra -Wpedantic)
+    endif ()
+
+    foreach (flag IN LISTS NETLINK_SANITIZER_FLAGS)
+        target_compile_options(NetLinkC PRIVATE ${flag} -fno-omit-frame-pointer)
+        target_link_options(NetLinkC PRIVATE ${flag})
+    endforeach ()
+endif ()
+
+
+# ---------------------------------------------------------------------------
 # Install / export, so consumers can use find_package(NetLink) as well as CPM
 # ---------------------------------------------------------------------------
 
-include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
-install(TARGETS ${PROJECT_NAME}
+set(NETLINK_INSTALL_TARGETS ${PROJECT_NAME})
+
+if (NETLINK_BUILD_C_API)
+    list(APPEND NETLINK_INSTALL_TARGETS NetLinkC)
+endif ()
+
+install(TARGETS ${NETLINK_INSTALL_TARGETS}
         EXPORT NetLinkTargets
         ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
@@ -127,6 +176,14 @@ install(TARGETS ${PROJECT_NAME}
         INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+
+if (NETLINK_BUILD_C_API AND MSVC)
+    install(FILES $<TARGET_PDB_FILE:NetLinkC> DESTINATION ${CMAKE_INSTALL_BINDIR} OPTIONAL)
+endif ()
+
+# Lets hosts that only load the shared library check which version they got
+file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/NetLinkVersion.txt "${PROJECT_VERSION}\n")
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/NetLinkVersion.txt DESTINATION ${CMAKE_INSTALL_DATADIR}/NetLink)
 
 install(EXPORT NetLinkTargets
         FILE NetLinkTargets.cmake

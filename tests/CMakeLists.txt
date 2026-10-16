@@ -111,3 +111,28 @@ target_include_directories(NetLinkTests PRIVATE ${Test_Directory}/Fakes)
 AddTests(NetLinkTests)
 
 source_group(TREE ${Test_Directory} FILES ${All_Tests} ${Test_Fakes})
+
+
+# The C API is tested through the shared library, the way hosts use it
+if (TARGET NetLinkC)
+    set(CApi_Tests ${Test_Directory}/CApiTests/NetLinkCApiTests.cpp)
+
+    add_executable(NetLinkCApiTests ${CApi_Tests})
+    target_link_libraries(NetLinkCApiTests PRIVATE NetLinkC)
+
+    if(MSVC)
+        target_compile_options(NetLinkCApiTests PRIVATE /W4)
+    else()
+        target_compile_options(NetLinkCApiTests PRIVATE -Wall -Wextra)
+    endif()
+
+    # Next to the test, so it is found when the tests are listed and run
+    if (WIN32)
+        add_custom_command(TARGET NetLinkCApiTests POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:NetLinkC> $<TARGET_FILE_DIR:NetLinkCApiTests>)
+    endif ()
+
+    AddTests(NetLinkCApiTests)
+
+    source_group(TREE ${Test_Directory} FILES ${CApi_Tests})
+endif ()
